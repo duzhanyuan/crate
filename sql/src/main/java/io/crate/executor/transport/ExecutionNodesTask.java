@@ -359,7 +359,11 @@ public class ExecutionNodesTask extends JobTask {
             if (node.keepContextForFetcher()) {
                 LOGGER.trace("closing job context {} on {} nodes", node.jobId().get(), nodeIds.size());
                 for (final String nodeId : nodeIds) {
-                    transportCloseContextNodeAction.execute(nodeId, new NodeCloseContextRequest(node.jobId().get()), new ActionListener<NodeCloseContextResponse>() {
+                    transportCloseContextNodeAction.execute(
+                            nodeId,
+                            new NodeCloseContextRequest(node.jobId().get(), node.executionNodeId()),
+                            new ActionListener<NodeCloseContextResponse>() {
+
                         @Override
                         public void onResponse(NodeCloseContextResponse nodeCloseContextResponse) {
                         }

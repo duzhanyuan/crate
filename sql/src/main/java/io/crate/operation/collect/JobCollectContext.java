@@ -49,13 +49,8 @@ public class JobCollectContext implements Releasable {
 
     private static final ESLogger LOGGER = Loggers.getLogger(JobCollectContext.class);
 
-
     public JobCollectContext(UUID id) {
         this.id = id;
-    }
-
-    public UUID id() {
-        return id;
     }
 
     public void registerJobContextId(ShardId shardId, int jobContextId) {

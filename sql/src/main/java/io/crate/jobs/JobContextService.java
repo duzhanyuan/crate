@@ -32,6 +32,7 @@ import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import javax.annotation.Nullable;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ScheduledFuture;
@@ -96,6 +97,7 @@ public class JobContextService extends AbstractLifecycleComponent<JobContextServ
     public JobExecutionContext getOrCreateContext(UUID jobId) {
         JobExecutionContext jobExecutionContext = activeContexts.get(jobId);
         if (jobExecutionContext != null) {
+            contextProcessing(jobExecutionContext);
             return jobExecutionContext;
         }
 
@@ -118,14 +120,18 @@ public class JobContextService extends AbstractLifecycleComponent<JobContextServ
         }
     }
 
+
     /**
-     * Close {@link JobCollectContext} for given <code>jobId</code> and remove if from active map.
+     * closes the subContext.
+     * In case this is the last subContext within the JobContext the JobContext itself will be closed
      */
-    public void closeContext(UUID jobId) {
-        JobExecutionContext jobExecutionContext = activeContexts.get(jobId);
-        if (jobExecutionContext != null) {
-            activeContexts.remove(jobId, jobExecutionContext);
-            jobExecutionContext.close();
+    public void closeSubContext(UUID job, int executionNodeId) {
+        JobExecutionContext jobExecutionContext = activeContexts.get(job);
+        if (jobExecutionContext == null) {
+            return;
+        }
+        if (jobExecutionContext.close(executionNodeId)) {
+            activeContexts.remove(job);
         }
     }
 
@@ -147,7 +153,8 @@ public class JobContextService extends AbstractLifecycleComponent<JobContextServ
         @Override
         public void run() {
             final long time = threadPool.estimatedTimeInMillis();
-            for (JobExecutionContext context : activeContexts.values()) {
+            for (Map.Entry<UUID, JobExecutionContext> uuidJobExecutionContextEntry : activeContexts.entrySet()) {
+                JobExecutionContext context = uuidJobExecutionContextEntry.getValue();
                 // Use the same value for both checks since lastAccessTime can
                 // be modified by another thread between checks!
                 final long lastAccessTime = context.lastAccessTime();
@@ -155,10 +162,10 @@ public class JobContextService extends AbstractLifecycleComponent<JobContextServ
                     continue;
                 }
                 if ((time - lastAccessTime > context.keepAlive())) {
-                    logger.debug("closing job collect context [{}], time [{}], " +
-                                    "lastAccessTime [{}], keepAlive [{}]",
-                            context.id(), time, lastAccessTime, context.keepAlive());
-                    closeContext(context.id());
+                    UUID id = uuidJobExecutionContextEntry.getKey();
+                    logger.debug("closing job collect context [{}], time [{}], lastAccessTime [{}], keepAlive [{}]",
+                            id, time, lastAccessTime, context.keepAlive());
+                    activeContexts.remove(id);
                 }
             }
         }

@@ -22,10 +22,7 @@
 package io.crate.action.job;
 
 import com.google.common.base.Optional;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.SettableFuture;
+import com.google.common.util.concurrent.*;
 import io.crate.breaker.CrateCircuitBreakerService;
 import io.crate.breaker.RamAccountingContext;
 import io.crate.core.collections.Bucket;
@@ -208,7 +205,7 @@ public class TransportJobAction implements NodeAction<JobRequest, JobResponse> {
         }
 
         @Override
-        public Void visitMergeNode(MergeNode node, final VisitorContext context) {
+        public Void visitMergeNode(final MergeNode node, final VisitorContext context) {
             JobExecutionContext jobExecutionContext = jobContextService.getOrCreateContext(node.jobId());
             final UUID operationId = UUID.randomUUID();
             statsTables.operationStarted(operationId, context.jobId, node.name());
@@ -227,6 +224,13 @@ public class TransportJobAction implements NodeAction<JobRequest, JobResponse> {
 
             Futures.addCallback(downstream.result(),
                     new SetBucketFutureCallback(operationId, context.ramAccountingContext, context.directResultFuture));
+            downstream.result().addListener(new Runnable() {
+                @Override
+                public void run() {
+                    jobContextService.closeSubContext(node.jobId(), node.executionNodeId());
+                }
+            }, MoreExecutors.directExecutor());
+
             return null;
         }
 

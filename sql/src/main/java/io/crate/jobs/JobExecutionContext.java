@@ -27,20 +27,16 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import io.crate.operation.collect.JobCollectContext;
-import org.elasticsearch.ElasticsearchException;
-import org.elasticsearch.common.lease.Releasable;
 
 import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 
-public class JobExecutionContext implements Releasable {
+public class JobExecutionContext {
 
     private final UUID jobId;
     private final long keepAlive;
-    private final AtomicBoolean closed = new AtomicBoolean(false);
 
     private final ConcurrentMap<Integer, JobCollectContext> collectContextMap = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, PageDownstreamContext> pageDownstreamMap = new ConcurrentHashMap<>();
@@ -55,9 +51,6 @@ public class JobExecutionContext implements Releasable {
     }
 
     public JobCollectContext collectContext(int executionNodeId) {
-        if (closed.get()) {
-            throw new IllegalStateException("Context already closed");
-        }
         JobCollectContext collectContext = collectContextMap.get(executionNodeId);
         if (collectContext != null) {
             return collectContext;
@@ -79,17 +72,23 @@ public class JobExecutionContext implements Releasable {
         return this.keepAlive;
     }
 
-    @Override
-    public void close() throws ElasticsearchException {
-        if (closed.compareAndSet(false, true)) { // prevent double release
-            for (JobCollectContext collectContext : collectContextMap.values()) {
-                collectContext.close();
-            }
+    /**
+     * closes the given subContext
+     * @return true if this was the last context, otherwise false
+     */
+    public boolean close(int executionNodeId) {
+        JobCollectContext jobCollectContext = collectContextMap.remove(executionNodeId);
+        if (jobCollectContext != null) {
+            jobCollectContext.close();
         }
+        pageDownstreamMap.remove(executionNodeId);
+        return collectContextMap.isEmpty() && pageDownstreamMap.isEmpty();
     }
 
-    public UUID id() {
-        return jobId;
+    void close() {
+        for (JobCollectContext jobCollectContext : collectContextMap.values()) {
+            jobCollectContext.close();
+        }
     }
 
     public void pageDownstreamContext(int executionNodeId,

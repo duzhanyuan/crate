@@ -205,7 +205,8 @@ public class RemoteCollectTask extends JobTask {
         if (collectNode.keepContextForFetcher()) {
             LOGGER.trace("closing job context {} on {} nodes", collectNode.jobId().get(), nodeIds.size());
             for (final String nodeId : nodeIds) {
-                transportCloseContextNodeAction.execute(nodeId, new NodeCloseContextRequest(collectNode.jobId().get()), new ActionListener<NodeCloseContextResponse>() {
+                transportCloseContextNodeAction.execute(nodeId,
+                        new NodeCloseContextRequest(collectNode.jobId().get(), collectNode.executionNodeId()), new ActionListener<NodeCloseContextResponse>() {
                     @Override
                     public void onResponse(NodeCloseContextResponse nodeCloseContextResponse) {
                     }
