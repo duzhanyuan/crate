@@ -22,8 +22,8 @@
 package io.crate.types;
 
 import io.crate.test.integration.CrateUnitTest;
-import org.elasticsearch.common.io.stream.BytesStreamInput;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.instanceOf;
@@ -38,15 +38,15 @@ public class ArrayTypeTest extends CrateUnitTest {
 
         DataTypes.toStream(arrayType, out);
 
-        BytesStreamInput in = new BytesStreamInput(out.bytes());
+        StreamInput in = out.bytes().streamInput();
 
         DataType readType = DataTypes.fromStream(in);
         assertThat(readType, instanceOf(ArrayType.class));
 
-        ArrayType readArrayType = (ArrayType)readType;
+        ArrayType readArrayType = (ArrayType) readType;
         assertThat(readArrayType.innerType(), instanceOf(ArrayType.class));
 
-        ArrayType readInnerArrayType = (ArrayType)readArrayType.innerType();
+        ArrayType readInnerArrayType = (ArrayType) readArrayType.innerType();
         assertThat(readInnerArrayType.innerType(), instanceOf(StringType.class));
         assertSame(readInnerArrayType.innerType(), StringType.INSTANCE);
     }

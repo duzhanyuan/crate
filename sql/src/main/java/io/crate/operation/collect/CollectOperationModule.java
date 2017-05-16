@@ -21,18 +21,22 @@
 
 package io.crate.operation.collect;
 
+import io.crate.operation.collect.sources.InformationSchemaIterables;
+import io.crate.operation.collect.sources.ShardCollectSource;
+import io.crate.operation.collect.sources.SystemCollectSource;
+import io.crate.operation.collect.stats.JobsLogService;
+import io.crate.operation.collect.stats.JobsLogs;
 import org.elasticsearch.common.inject.AbstractModule;
 
 public class CollectOperationModule extends AbstractModule {
+
     @Override
     protected void configure() {
-        bind(HandlerSideDataCollectOperation.class).asEagerSingleton();
-        bind(InformationSchemaCollectService.class).asEagerSingleton();
-        bind(UnassignedShardsCollectService.class).asEagerSingleton();
+        bind(InformationSchemaIterables.class).asEagerSingleton();
 
-        bind(StatsTables.class).asEagerSingleton();
-        bind(SystemCollectService.class).asEagerSingleton();
-
-        bind(CollectContextService.class).asEagerSingleton();
+        bind(JobsLogService.class).asEagerSingleton();
+        bind(JobsLogs.class).toProvider(JobsLogService.class);
+        bind(ShardCollectSource.class).asEagerSingleton();
+        bind(SystemCollectSource.class).asEagerSingleton();
     }
 }

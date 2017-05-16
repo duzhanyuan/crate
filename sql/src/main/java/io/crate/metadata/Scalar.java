@@ -21,28 +21,67 @@
 
 package io.crate.metadata;
 
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.format.OperatorFormatSpec;
+import io.crate.data.Input;
 
 import java.util.Collection;
 import java.util.List;
 
 /**
- * evaluable function implementation
+ * Base class for Scalar functions in crate.
+ * A Scalar function is a function which has zero or more arguments and returns a value. (not rows).
+ * <p>
+ * Argument types and return types are restricted to the types supported by Crate (see {@link io.crate.types.DataType})
+ * </p>
+ *
+ * <p>
+ *     Usually functions are registered as deterministic (See {@link io.crate.metadata.FunctionInfo.Feature}.
+ *     If this is the case the function must be a pure function. Meaning that given the same input it must always produce
+ *     the same output.
+ *
+ *     Functions also MUST NOT have any internal state that influences the result of future calls.
+ *     Functions are used as singletons.
+ *     An exception is if {@link #compile(List)} returns a NEW instance.
+ * </p>
+ *
  * @param <ReturnType> the class of the returned value
  */
-public abstract class Scalar<ReturnType, InputType> implements FunctionImplementation<Function> {
+public abstract class Scalar<ReturnType, InputType> implements FunctionImplementation {
 
+    public static <R, I> Scalar<R, I> withOperator(Scalar<R, I> func, String operator) {
+        return new OperatorScalar<>(func, operator);
+    }
+
+
+    /**
+     * Evaluate the function using the provided arguments
+     */
     public abstract ReturnType evaluate(Input<InputType>... args);
 
     /**
-     * Returns a optional compiled version of the scalar implementation.
+     * Called to return a "optimized" version of a scalar implementation.
      *
+     * The returned instance will only be used in the context of a single query
+     * (or rather, a subset of a single query if executed distributed).
+     *
+     * @param arguments arguments in symbol form. If any symbols are literals, any arguments passed to
+     *                  {@link #evaluate(Input[])} will have the same value as those literals.
+     *                  (Within the scope of a single operation)
      */
     public Scalar<ReturnType, InputType> compile(List<Symbol> arguments) {
         return this;
+    }
+
+    @Override
+    public Symbol normalizeSymbol(Function symbol, TransactionContext transactionContext) {
+        try {
+            return evaluateIfLiterals(this, symbol);
+        } catch (Throwable t) {
+            return symbol;
+        }
     }
 
     protected static boolean anyNonLiterals(Collection<? extends Symbol> arguments) {
@@ -57,25 +96,46 @@ public abstract class Scalar<ReturnType, InputType> implements FunctionImplement
     /**
      * This method will evaluate the function using the given scalar if all arguments are literals.
      * Otherwise it will return the function as is or NULL in case it contains a null literal
-     *
      */
-    public static <ReturnType, InputType> Symbol evaluateIfLiterals(Scalar<ReturnType, InputType> scalar, Function function) {
-        Input[] inputs = new Input[function.arguments().size()];
-        int idx = 0;
-        for (Symbol arg : function.arguments()) {
-            if (arg instanceof Input) {
-                Input inputArg =  (Input) arg;
-                if (inputArg.value() == null) {
-                    return Literal.newLiteral(arg.valueType(), null);
-                } else {
-                    inputs[idx] = inputArg;
-                    idx++;
-                }
-            } else {
+    private static <ReturnType, InputType> Symbol evaluateIfLiterals(Scalar<ReturnType, InputType> scalar, Function function) {
+        List<Symbol> arguments = function.arguments();
+        for (Symbol argument : arguments) {
+            if (!(argument instanceof Input)) {
                 return function;
             }
         }
+        Input[] inputs = new Input[arguments.size()];
+        int idx = 0;
+        for (Symbol arg : arguments) {
+            inputs[idx] = (Input) arg;
+            idx++;
+        }
         //noinspection unchecked
-        return Literal.newLiteral(function.info().returnType(), scalar.evaluate(inputs));
+        return Literal.of(function.info().returnType(), scalar.evaluate(inputs));
+    }
+
+    private static class OperatorScalar<R, I> extends Scalar<R, I> implements OperatorFormatSpec {
+        private final Scalar<R, I> func;
+        private final String operator;
+
+        OperatorScalar(Scalar<R, I> func, String operator) {
+            this.func = func;
+            this.operator = operator;
+        }
+
+        @Override
+        public FunctionInfo info() {
+            return func.info();
+        }
+
+        @Override
+        public R evaluate(Input<I>... args) {
+            return func.evaluate(args);
+        }
+
+        @Override
+        public String operator(Function function) {
+            return operator;
+        }
     }
 }

@@ -21,276 +21,453 @@
 
 package io.crate.executor.transport;
 
-import com.carrotsearch.hppc.IntArrayList;
-import com.carrotsearch.hppc.LongArrayList;
-import com.carrotsearch.hppc.cursors.IntCursor;
-import com.carrotsearch.hppc.cursors.LongCursor;
-import com.google.common.collect.UnmodifiableIterator;
-import io.crate.Constants;
-import io.crate.core.collections.Row;
-import io.crate.core.collections.Rows;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
-import io.crate.types.DataType;
-import org.elasticsearch.action.support.replication.ShardReplicationOperationRequest;
+import com.google.common.base.Objects;
+import io.crate.Streamer;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.Symbols;
+import io.crate.metadata.Reference;
+import io.crate.metadata.doc.DocSysColumns;
+import org.elasticsearch.Version;
+import org.elasticsearch.action.bulk.BulkShardProcessor;
+import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.support.replication.ReplicationRequest;
 import org.elasticsearch.common.Nullable;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.lucene.uid.Versions;
+import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.shard.ShardId;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.Arrays;
+import java.util.UUID;
 
-public class ShardUpsertRequest extends ShardReplicationOperationRequest<ShardUpsertRequest> implements Iterable<ShardUpsertRequest.Item> {
+public class ShardUpsertRequest extends ShardRequest<ShardUpsertRequest, ShardUpsertRequest.Item> {
 
-    private final Item item = new Item();
-
-    private int shardId;
-    private IntArrayList locations;
-    private List<String> ids;
-    private LongArrayList versions;
     private boolean continueOnError = false;
     private boolean overwriteDuplicates = false;
-
-    @Nullable
-    private String routing;
-
-    /**
-     * Map of references and symbols used on update if document exist
-     */
-    @Nullable
-    private Map<Reference, Symbol> updateAssignments;
+    private Boolean isRawSourceInsert = null;
+    private boolean validateConstraints = true;
+    private boolean isRetry = false;
 
     /**
-     * Map of references and symbols used on insert
+     * List of column names used on update
      */
     @Nullable
-    private Map<Reference, Symbol> insertAssignments;
+    private String[] updateColumns;
 
-    private Rows rows;
+    /**
+     * List of references used on insert
+     */
+    @Nullable
+    private Reference[] insertColumns;
+
+    /**
+     * List of data type streamer resolved through insertColumns
+     */
+    @Nullable
+    private Streamer[] insertValuesStreamer;
 
     public ShardUpsertRequest() {
     }
 
-    public ShardUpsertRequest(ShardId shardId,
-                              DataType[] dataTypes,
-                              List<Integer> columnIndicesToStream,
-                              @Nullable Map<Reference, Symbol> updateAssignments,
-                              @Nullable Map<Reference, Symbol> insertAssignments) {
-        this(shardId, dataTypes, columnIndicesToStream, updateAssignments, insertAssignments, null);
-    }
-
-    public ShardUpsertRequest(ShardId shardId,
-                              DataType[] dataTypes,
-                              List<Integer> columnIndicesToStream,
-                              @Nullable Map<Reference, Symbol> updateAssignments,
-                              @Nullable Map<Reference, Symbol> insertAssignments,
-                              @Nullable String routing) {
-        assert updateAssignments != null || insertAssignments != null
-                : "Missing assignments, whether for update nor for insert given";
-        this.index = shardId.getIndex();
-        this.shardId = shardId.id();
-        this.routing = routing;
-        this.updateAssignments = updateAssignments;
-        this.insertAssignments = insertAssignments;
-        locations = new IntArrayList();
-        ids = new ArrayList<>();
-        versions = new LongArrayList();
-        rows = new Rows(dataTypes, columnIndicesToStream);
-    }
-
-    @Nullable
-    public String routing() {
-        return routing;
-    }
-
-    public IntArrayList locations() {
-        return locations;
-    }
-
-    public ShardUpsertRequest add(int location,
-                                  String id,
-                                  Row row,
-                                  @Nullable Long version,
-                                  @Nullable String routing) {
-        locations.add(location);
-        ids.add(id);
-        rows.addSafe(row);
-        if (version != null) {
-            versions.add(version);
-        } else {
-            versions.add(Versions.MATCH_ANY);
+    private ShardUpsertRequest(ShardId shardId,
+                               @Nullable String[] updateColumns,
+                               @Nullable Reference[] insertColumns,
+                               @Nullable String routing,
+                               UUID jobId) {
+        super(shardId, routing, jobId);
+        assert updateColumns != null || insertColumns != null
+            : "Missing updateAssignments, whether for update nor for insert";
+        this.updateColumns = updateColumns;
+        this.insertColumns = insertColumns;
+        if (insertColumns != null) {
+            insertValuesStreamer = new Streamer[insertColumns.length];
+            for (int i = 0; i < insertColumns.length; i++) {
+                insertValuesStreamer[i] = insertColumns[i].valueType().streamer();
+            }
         }
-        if (this.routing == null) {
-            this.routing = routing;
-        }
-        return this;
     }
 
-    public String type() {
-        return Constants.DEFAULT_MAPPING_TYPE;
+    public void add(int location, Item item) {
+        item.insertValuesStreamer(insertValuesStreamer);
+        super.add(location, item);
     }
 
-    public int shardId() {
-        return shardId;
+    public String[] updateColumns() {
+        return updateColumns;
     }
 
     @Nullable
-    public Map<Reference, Symbol> updateAssignments() {
-        return updateAssignments;
-    }
-
-    @Nullable
-    public Map<Reference, Symbol> insertAssignments() {
-        return insertAssignments;
+    public Reference[] insertColumns() {
+        return insertColumns;
     }
 
     public boolean overwriteDuplicates() {
         return overwriteDuplicates;
     }
 
-    public void overwriteDuplicates(boolean overwriteDuplicates) {
+    public ShardUpsertRequest overwriteDuplicates(boolean overwriteDuplicates) {
         this.overwriteDuplicates = overwriteDuplicates;
+        return this;
     }
 
     public boolean continueOnError() {
         return continueOnError;
     }
 
-    public void continueOnError(boolean continueOnError) {
+    public ShardUpsertRequest continueOnError(boolean continueOnError) {
         this.continueOnError = continueOnError;
+        return this;
+    }
+
+    public boolean validateConstraints() {
+        return validateConstraints;
+    }
+
+    public ShardUpsertRequest validateConstraints(boolean validateConstraints) {
+        this.validateConstraints = validateConstraints;
+        return this;
+    }
+
+    public Boolean isRawSourceInsert() {
+        if (isRawSourceInsert == null) {
+            isRawSourceInsert =
+                insertColumns.length == 1 && insertColumns[0].ident().columnIdent().equals(DocSysColumns.RAW);
+        }
+        return isRawSourceInsert;
+    }
+
+    /**
+     * Returns <code>true</code> if this request has been sent to a shard copy more than once.
+     */
+    public boolean isRetry() {
+        return isRetry;
     }
 
     @Override
-    public Iterator<Item> iterator() {
-        return new UnmodifiableIterator<Item>() {
-            private Iterator<IntCursor> locationsIterator = locations.iterator();
-            private Iterator<String> idsIterator = ids.iterator();
-            private Iterator<Row> rowsIterator = rows.iterator();
-            private Iterator<LongCursor> versionsIterator = versions.iterator();
-
-            @Override
-            public boolean hasNext() {
-                return rowsIterator.hasNext();
-            }
-
-            @Override
-            public Item next() {
-                item.location = locationsIterator.next().value;
-                item.id = idsIterator.next();
-                item.row = rowsIterator.next();
-                item.version = versionsIterator.next().value;
-                return item;
-            }
-        };
+    public void onRetry() {
+        isRetry = true;
     }
 
     @Override
     public void readFrom(StreamInput in) throws IOException {
         super.readFrom(in);
-        shardId = in.readInt();
-        routing = in.readOptionalString();
-        int updateAssignmentsSize = in.readVInt();
-        if (updateAssignmentsSize > 0) {
-            updateAssignments = new HashMap<>();
-            for (int i = 0; i < updateAssignmentsSize; i++) {
-                updateAssignments.put(Reference.fromStream(in), Symbol.fromStream(in));
+        int assignmentsColumnsSize = in.readVInt();
+        if (assignmentsColumnsSize > 0) {
+            updateColumns = new String[assignmentsColumnsSize];
+            for (int i = 0; i < assignmentsColumnsSize; i++) {
+                updateColumns[i] = in.readString();
             }
         }
-        int insertAssignmentsSize = in.readVInt();
-        if (insertAssignmentsSize > 0) {
-            insertAssignments = new HashMap<>();
-            for (int i = 0; i < insertAssignmentsSize; i++) {
-                insertAssignments.put(Reference.fromStream(in), Symbol.fromStream(in));
+        int missingAssignmentsColumnsSize = in.readVInt();
+        if (missingAssignmentsColumnsSize > 0) {
+            insertColumns = new Reference[missingAssignmentsColumnsSize];
+            insertValuesStreamer = new Streamer[missingAssignmentsColumnsSize];
+            for (int i = 0; i < missingAssignmentsColumnsSize; i++) {
+                insertColumns[i] = Reference.fromStream(in);
+                insertValuesStreamer[i] = insertColumns[i].valueType().streamer();
             }
         }
-
-        int size = in.readVInt();
-        locations = new IntArrayList(size);
-        ids = new ArrayList<>(size);
-        versions = new LongArrayList(size);
-        for (int i = 0; i < size; i++) {
-            locations.add(in.readVInt());
-            ids.add(in.readString());
-            versions.add(in.readLong());
-        }
-        rows = Rows.fromStream(in);
-
         continueOnError = in.readBoolean();
         overwriteDuplicates = in.readBoolean();
+        validateConstraints = in.readBoolean();
+        readItems(in, locations.size());
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        out.writeInt(shardId);
-        out.writeOptionalString(routing);
-        // Stream assignment symbols
-        if (updateAssignments != null) {
-            out.writeVInt(updateAssignments.size());
-            for (Map.Entry<Reference, Symbol> entry : updateAssignments.entrySet()) {
-                Reference.toStream(entry.getKey(), out);
-                Symbol.toStream(entry.getValue(), out);
+        // Stream References
+        if (updateColumns != null) {
+            out.writeVInt(updateColumns.length);
+            for (String column : updateColumns) {
+                out.writeString(column);
             }
         } else {
             out.writeVInt(0);
         }
-        if (insertAssignments != null) {
-            out.writeVInt(insertAssignments.size());
-            for (Map.Entry<Reference, Symbol> entry : insertAssignments.entrySet()) {
-                Reference.toStream(entry.getKey(), out);
-                Symbol.toStream(entry.getValue(), out);
+        if (insertColumns != null) {
+            out.writeVInt(insertColumns.length);
+            for (Reference reference : insertColumns) {
+                Reference.toStream(reference, out);
             }
         } else {
             out.writeVInt(0);
         }
-
-        out.writeVInt(locations.size());
-        for (int i = 0; i < locations.size(); i++) {
-            out.writeVInt(locations.get(i));
-            out.writeString(ids.get(i));
-            out.writeLong(versions.get(i));
-        }
-        rows.writeTo(out);
-
         out.writeBoolean(continueOnError);
         out.writeBoolean(overwriteDuplicates);
+        out.writeBoolean(validateConstraints);
+        writeItems(out);
     }
 
+    @Override
+    protected Item readItem(StreamInput input) throws IOException {
+        return Item.readItem(input, insertValuesStreamer);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (!super.equals(o)) return false;
+        if (this == o) return true;
+        if (getClass() != o.getClass()) return false;
+        if (!super.equals(o)) return false;
+        ShardUpsertRequest items = (ShardUpsertRequest) o;
+        return continueOnError == items.continueOnError &&
+               overwriteDuplicates == items.overwriteDuplicates &&
+               validateConstraints == items.validateConstraints &&
+               Objects.equal(isRawSourceInsert, items.isRawSourceInsert) &&
+               Arrays.equals(updateColumns, items.updateColumns) &&
+               Arrays.equals(insertColumns, items.insertColumns) &&
+               Arrays.equals(insertValuesStreamer, items.insertValuesStreamer);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(super.hashCode(), continueOnError, overwriteDuplicates, isRawSourceInsert, validateConstraints, updateColumns, insertColumns, insertValuesStreamer);
+    }
 
     /**
      * A single update item.
      */
-    public static class Item {
+    public static class Item extends ShardRequest.Item {
 
-        private int location;
-        private String id;
-        private Row row;
         private long version = Versions.MATCH_ANY;
+        private VersionType versionType = VersionType.INTERNAL;
+        private IndexRequest.OpType opType = IndexRequest.OpType.INDEX;
+        @Nullable
+        private BytesReference source;
 
-        Item() {
+        /**
+         * List of symbols used on update if document exist
+         */
+        @Nullable
+        private Symbol[] updateAssignments;
+
+        /**
+         * List of objects used on insert
+         */
+        @Nullable
+        private Object[] insertValues;
+
+        /**
+         * List of data type streamer needed for streaming insert values
+         */
+        @Nullable
+        private Streamer[] insertValuesStreamer;
+
+        protected Item() {
         }
 
-        public int location() {
-            return location;
+        public Item(String id,
+                    @Nullable Symbol[] updateAssignments,
+                    @Nullable Object[] insertValues,
+                    @Nullable Long version) {
+            super(id);
+            this.updateAssignments = updateAssignments;
+            if (version != null) {
+                this.version = version;
+            }
+            this.insertValues = insertValues;
         }
 
-        public String id() {
-            return id;
-        }
-
-        public Row row() {
-            return row;
+        public void insertValuesStreamer(@Nullable Streamer[] insertValuesStreamer) {
+            this.insertValuesStreamer = insertValuesStreamer;
         }
 
         public long version() {
             return version;
         }
 
-        public int retryOnConflict() {
-            return version == Versions.MATCH_ANY ? Constants.UPDATE_RETRY_ON_CONFLICT : 0;
+        public void version(long version) {
+            this.version = version;
+        }
+
+        public VersionType versionType() {
+            return versionType;
+        }
+
+        public void versionType(VersionType versionType) {
+            this.versionType = versionType;
+        }
+
+        public IndexRequest.OpType opType() {
+            return opType;
+        }
+
+        public void opType(IndexRequest.OpType opType) {
+            this.opType = opType;
+        }
+
+        @Nullable
+        public BytesReference source() {
+            return source;
+        }
+
+        public void source(BytesReference source) {
+            this.source = source;
+        }
+
+        public boolean retryOnConflict() {
+            return version == Versions.MATCH_ANY;
+        }
+
+        @Nullable
+        public Symbol[] updateAssignments() {
+            return updateAssignments;
+        }
+
+        @Nullable
+        public Object[] insertValues() {
+            return insertValues;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            if (!super.equals(o)) return false;
+            Item item = (Item) o;
+            return version == item.version &&
+                   versionType == item.versionType &&
+                   opType == item.opType &&
+                   Objects.equal(source, item.source) &&
+                   Arrays.equals(updateAssignments, item.updateAssignments) &&
+                   Arrays.equals(insertValues, item.insertValues) &&
+                   Arrays.equals(insertValuesStreamer, item.insertValuesStreamer);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hashCode(super.hashCode(), version, versionType, opType, source, updateAssignments,
+                insertValues, insertValuesStreamer);
+        }
+
+        static Item readItem(StreamInput in, @Nullable Streamer[] streamers) throws IOException {
+            Item item = new Item();
+            item.insertValuesStreamer(streamers);
+            item.readFrom(in);
+            return item;
+        }
+
+        @Override
+        public void readFrom(StreamInput in) throws IOException {
+            id = in.readString();
+            int assignmentsSize = in.readVInt();
+            if (assignmentsSize > 0) {
+                updateAssignments = new Symbol[assignmentsSize];
+                for (int i = 0; i < assignmentsSize; i++) {
+                    updateAssignments[i] = Symbols.fromStream(in);
+                }
+            }
+            int missingAssignmentsSize = in.readVInt();
+            if (missingAssignmentsSize > 0) {
+                this.insertValues = new Object[missingAssignmentsSize];
+                for (int i = 0; i < missingAssignmentsSize; i++) {
+                    insertValues[i] = insertValuesStreamer[i].readValueFrom(in);
+                }
+            }
+            this.version = Version.readVersion(in).id;
+            versionType = VersionType.fromValue(in.readByte());
+            opType = IndexRequest.OpType.fromId(in.readByte());
+            if (in.readBoolean()) {
+                source = in.readBytesReference();
+            }
+        }
+
+        @Override
+        public void writeTo(StreamOutput out) throws IOException {
+            out.writeString(id);
+            if (updateAssignments != null) {
+                out.writeVInt(updateAssignments.length);
+                for (Symbol updateAssignment : updateAssignments) {
+                    Symbols.toStream(updateAssignment, out);
+                }
+            } else {
+                out.writeVInt(0);
+            }
+            // Stream References
+            if (insertValues != null) {
+                out.writeVInt(insertValues.length);
+                for (int i = 0; i < insertValues.length; i++) {
+                    insertValuesStreamer[i].writeValueTo(out, insertValues[i]);
+                }
+            } else {
+                out.writeVInt(0);
+            }
+
+            Version.writeVersion(Version.fromId((int) version), out);
+            out.writeByte(versionType.getValue());
+            out.writeByte(opType.id());
+            boolean sourceAvailable = source != null;
+            out.writeBoolean(sourceAvailable);
+            if (sourceAvailable) {
+                out.writeBytesReference(source);
+            }
         }
     }
 
+    public static class Builder implements BulkShardProcessor.BulkRequestBuilder<ShardUpsertRequest> {
+
+        private final TimeValue timeout;
+        private final boolean overwriteDuplicates;
+        private final boolean continueOnError;
+        @Nullable
+        private final String[] assignmentsColumns;
+        @Nullable
+        private final Reference[] missingAssignmentsColumns;
+        private final UUID jobId;
+        private boolean validateGeneratedColumns;
+
+        public Builder(TimeValue timeout,
+                       boolean overwriteDuplicates,
+                       boolean continueOnError,
+                       @Nullable String[] assignmentsColumns,
+                       @Nullable Reference[] missingAssignmentsColumns,
+                       UUID jobId) {
+            this(timeout, overwriteDuplicates, continueOnError, assignmentsColumns, missingAssignmentsColumns, jobId, true);
+        }
+
+        public Builder(boolean overwriteDuplicates,
+                       boolean continueOnError,
+                       @Nullable String[] assignmentsColumns,
+                       @Nullable Reference[] missingAssignmentsColumns,
+                       UUID jobId,
+                       boolean validateGeneratedColumns) {
+            this(ReplicationRequest.DEFAULT_TIMEOUT, overwriteDuplicates, continueOnError,
+                assignmentsColumns, missingAssignmentsColumns, jobId, validateGeneratedColumns);
+        }
+
+        public Builder(TimeValue timeout,
+                       boolean overwriteDuplicates,
+                       boolean continueOnError,
+                       @Nullable String[] assignmentsColumns,
+                       @Nullable Reference[] missingAssignmentsColumns,
+                       UUID jobId,
+                       boolean validateGeneratedColumns) {
+            this.timeout = timeout;
+            this.overwriteDuplicates = overwriteDuplicates;
+            this.continueOnError = continueOnError;
+            this.assignmentsColumns = assignmentsColumns;
+            this.missingAssignmentsColumns = missingAssignmentsColumns;
+            this.jobId = jobId;
+            this.validateGeneratedColumns = validateGeneratedColumns;
+        }
+
+        @Override
+        public ShardUpsertRequest newRequest(ShardId shardId, String routing) {
+            return new ShardUpsertRequest(
+                shardId,
+                assignmentsColumns,
+                missingAssignmentsColumns,
+                routing,
+                jobId)
+                .timeout(timeout)
+                .continueOnError(continueOnError)
+                .overwriteDuplicates(overwriteDuplicates)
+                .validateConstraints(validateGeneratedColumns);
+        }
+    }
 }

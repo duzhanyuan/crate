@@ -21,18 +21,20 @@
 
 package io.crate.executor.transport.task.elasticsearch;
 
-import com.google.common.collect.Lists;
-import io.crate.metadata.Functions;
+import com.google.common.base.Function;
+import com.google.common.base.Functions;
+import io.crate.analyze.symbol.*;
+import io.crate.analyze.symbol.format.SymbolFormatter;
+import io.crate.metadata.Reference;
 import io.crate.metadata.Scalar;
-import io.crate.planner.symbol.*;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Helper class for converting a {@link io.crate.planner.symbol.Symbol} to a
- * {@link io.crate.executor.transport.task.elasticsearch.FieldExtractor}.
+ * Helper class for converting a {@link io.crate.analyze.symbol.Symbol} to a
+ * {@link com.google.common.base.Function}
  *
  * @param <T> The response class a concrete FieldExtractorFactory is operating on
  */
@@ -44,45 +46,32 @@ public class SymbolToFieldExtractor<T> {
         this.visitor = new Visitor<>(extractorFactory);
     }
 
-    public FieldExtractor<T> convert(Symbol symbol, Context context) {
+    public Function<T, Object> convert(Symbol symbol, Context context) {
         return visitor.process(symbol, context);
     }
 
     public abstract static class Context {
-        private final List<Reference> references;
-        private final Functions functions;
-        private String[] referenceNames;
+        private final io.crate.metadata.Functions functions;
 
-        public Context(Functions functions, int size) {
+        public Context(io.crate.metadata.Functions functions, int size) {
             this.functions = functions;
-            references = new ArrayList<>(size);
-        }
-
-        public void addReference(Reference reference) {
-            references.add(reference);
-        }
-
-        public List<Reference> references() {
-            return references;
-        }
-
-        public String[] referenceNames() {
-            if (referenceNames == null) {
-                referenceNames = Lists.transform(references, new com.google.common.base.Function<Reference, String>() {
-                    @Nullable
-                    @Override
-                    public String apply(Reference input) {
-                        return input.info().ident().columnIdent().fqn();
-                    }
-                }).toArray(new String[references.size()]);
-            }
-            return referenceNames;
         }
 
         public abstract Object inputValueFor(InputColumn inputColumn);
+
+        @Nullable
+        public Object referenceValue(Reference reference) {
+            return null;
+        }
     }
 
-    static class Visitor<T> extends SymbolVisitor<Context, FieldExtractor<T>> {
+
+    private static <T> Function<T, Object> constant(Object value) {
+        //noinspection unchecked
+        return (Function<T, Object>) Functions.constant(value);
+    }
+
+    static class Visitor<T> extends SymbolVisitor<Context, Function<T, Object>> {
 
         private final FieldExtractorFactory<T, Context> extractorFactory;
 
@@ -91,39 +80,42 @@ public class SymbolToFieldExtractor<T> {
         }
 
         @Override
-        public FieldExtractor<T> visitReference(Reference reference, Context context) {
-            context.addReference(reference);
+        public Function<T, Object> visitReference(Reference reference, Context context) {
+            Object value = context.referenceValue(reference);
+            if (value != null) {
+                return constant(value);
+            }
             return extractorFactory.build(reference, context);
         }
 
         @Override
-        public FieldExtractor<T> visitDynamicReference(DynamicReference symbol, Context context) {
+        public Function<T, Object> visitDynamicReference(DynamicReference symbol, Context context) {
             return visitReference(symbol, context);
         }
 
         @Override
-        public FieldExtractor<T> visitFunction(Function symbol, Context context) {
-            List<FieldExtractor<T>> subExtractors = new ArrayList<>(symbol.arguments().size());
+        public Function<T, Object> visitFunction(io.crate.analyze.symbol.Function symbol, Context context) {
+            List<Function<T, Object>> subExtractors = new ArrayList<>(symbol.arguments().size());
             for (Symbol argument : symbol.arguments()) {
                 subExtractors.add(process(argument, context));
             }
-            return new FunctionExtractor<>((Scalar) context.functions.getSafe(symbol.info().ident()), subExtractors);
+            return new FunctionExtractor<>((Scalar) context.functions.getQualified(symbol.info().ident()), subExtractors);
         }
 
         @Override
-        public FieldExtractor<T> visitLiteral(Literal symbol, Context context) {
-            return new LiteralExtractor<>(symbol.value());
+        public Function<T, Object> visitLiteral(Literal symbol, Context context) {
+            return constant(symbol.value());
         }
 
         @Override
-        public FieldExtractor<T> visitInputColumn(InputColumn inputColumn, Context context) {
-            return new LiteralExtractor<>(context.inputValueFor(inputColumn));
+        public Function<T, Object> visitInputColumn(InputColumn inputColumn, Context context) {
+            return constant(context.inputValueFor(inputColumn));
         }
 
         @Override
-        protected FieldExtractor<T> visitSymbol(Symbol symbol, Context context) {
+        protected Function<T, Object> visitSymbol(Symbol symbol, Context context) {
             throw new UnsupportedOperationException(
-                    SymbolFormatter.format("Operation not supported with symbol %s", symbol));
+                SymbolFormatter.format("Operation not supported with symbol %s", symbol));
         }
     }
 

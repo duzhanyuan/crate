@@ -22,117 +22,111 @@
 package io.crate.analyze;
 
 import io.crate.metadata.*;
+import io.crate.metadata.doc.DocSysColumns;
+import io.crate.metadata.doc.DocTableInfo;
+import io.crate.metadata.table.Operation;
 import io.crate.metadata.table.TableInfo;
 import io.crate.sql.tree.AlterTableAddColumn;
-import io.crate.sql.tree.DefaultTraversalVisitor;
-import io.crate.sql.tree.Node;
-import io.crate.sql.tree.Table;
 import io.crate.types.CollectionType;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
 
 import java.util.List;
+import java.util.Locale;
 
-@Singleton
-public class AlterTableAddColumnAnalyzer extends DefaultTraversalVisitor<AddColumnAnalyzedStatement, Analysis> {
+class AlterTableAddColumnAnalyzer {
 
-    private final ReferenceInfos referenceInfos;
+    private final Schemas schemas;
     private final FulltextAnalyzerResolver fulltextAnalyzerResolver;
+    private final Functions functions;
 
-    @Inject
-    public AlterTableAddColumnAnalyzer(ReferenceInfos referenceInfos,
-                                       FulltextAnalyzerResolver fulltextAnalyzerResolver) {
-        this.referenceInfos = referenceInfos;
+    AlterTableAddColumnAnalyzer(Schemas schemas,
+                                FulltextAnalyzerResolver fulltextAnalyzerResolver,
+                                Functions functions) {
+        this.schemas = schemas;
         this.fulltextAnalyzerResolver = fulltextAnalyzerResolver;
+        this.functions = functions;
     }
 
-    public AddColumnAnalyzedStatement analyze(Node node, Analysis analysis) {
-        analysis.expectsAffectedRows(true);
-        return super.process(node, analysis);
-    }
-
-    @Override
-    protected AddColumnAnalyzedStatement visitNode(Node node, Analysis analysis) {
-        throw new RuntimeException(
-                String.format("Encountered node %s but expected a AlterTableAddColumn node", node));
-    }
-
-    @Override
-    public AddColumnAnalyzedStatement visitAlterTableAddColumnStatement(AlterTableAddColumn node, Analysis analysis) {
-        AddColumnAnalyzedStatement statement = new AddColumnAnalyzedStatement(referenceInfos);
-        setTableAndPartitionName(node.table(), statement, analysis.parameterContext());
-
-        statement.analyzedTableElements(TableElementsAnalyzer.analyze(
-                node.tableElement(),
-                analysis.parameterContext().parameters(),
-                fulltextAnalyzerResolver
-        ));
-
-        for (AnalyzedColumnDefinition column : statement.analyzedTableElements().columns()) {
-            ensureColumnLeafsAreNew(column, statement.table());
+    public AddColumnAnalyzedStatement analyze(AlterTableAddColumn node, Analysis analysis) {
+        if (!node.table().partitionProperties().isEmpty()) {
+            throw new UnsupportedOperationException("Adding a column to a single partition is not supported");
         }
-        addExistingPrimaryKeys(statement);
-        ensureNoIndexDefinitions(statement.analyzedTableElements().columns());
-        statement.analyzedTableElements().finalizeAndValidate();
+        TableIdent tableIdent = TableIdent.of(node.table(), analysis.sessionContext().defaultSchema());
+        DocTableInfo tableInfo = schemas.getTableInfo(tableIdent, Operation.ALTER, analysis.sessionContext().user());
+        AnalyzedTableElements tableElements = TableElementsAnalyzer.analyze(
+            node.tableElement(),
+            analysis.parameterContext().parameters(),
+            fulltextAnalyzerResolver,
+            tableInfo
+        );
+        for (AnalyzedColumnDefinition column : tableElements.columns()) {
+            ensureColumnLeafsAreNew(column, tableInfo);
+        }
+        addExistingPrimaryKeys(tableInfo, tableElements);
+        ensureNoIndexDefinitions(tableElements.columns());
+        tableElements.finalizeAndValidate(
+            tableInfo.ident(),
+            tableInfo.columns(),
+            functions,
+            analysis.parameterContext(),
+            analysis.sessionContext());
 
-        int numCurrentPks = statement.table().primaryKey().size();
-        if (statement.table().primaryKey().contains(new ColumnIdent("_id"))) {
+        int numCurrentPks = tableInfo.primaryKey().size();
+        if (tableInfo.primaryKey().contains(DocSysColumns.ID)) {
             numCurrentPks -= 1;
         }
-        statement.newPrimaryKeys(statement.analyzedTableElements().primaryKeys().size() > numCurrentPks);
-        return statement;
+
+        boolean hasNewPrimaryKeys = tableElements.primaryKeys().size() > numCurrentPks;
+        boolean hasGeneratedColumns = tableElements.hasGeneratedColumns();
+        return new AddColumnAnalyzedStatement(
+            tableInfo,
+            tableElements,
+            hasNewPrimaryKeys,
+            hasGeneratedColumns
+        );
     }
 
-    private void ensureColumnLeafsAreNew(AnalyzedColumnDefinition column, TableInfo tableInfo) {
-        if ((!column.isParentColumn() || !column.hasChildren()) && tableInfo.getReferenceInfo(column.ident()) != null) {
-            throw new IllegalArgumentException(String.format(
-                    "The table \"%s\" already has a column named \"%s\"",
-                    tableInfo.ident().fqn(),
-                    column.ident().sqlFqn()));
+    private static void ensureColumnLeafsAreNew(AnalyzedColumnDefinition column, TableInfo tableInfo) {
+        if ((!column.isParentColumn() || !column.hasChildren()) && tableInfo.getReference(column.ident()) != null) {
+            throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+                "The table %s already has a column named %s",
+                tableInfo.ident().sqlFqn(),
+                column.ident().sqlFqn()));
         }
         for (AnalyzedColumnDefinition child : column.children()) {
             ensureColumnLeafsAreNew(child, tableInfo);
         }
     }
 
-    private void addExistingPrimaryKeys(AddColumnAnalyzedStatement context) {
-        for (ColumnIdent pkIdent : context.table().primaryKey()) {
+    private static void addExistingPrimaryKeys(DocTableInfo tableInfo, AnalyzedTableElements tableElements) {
+        for (ColumnIdent pkIdent : tableInfo.primaryKey()) {
             if (pkIdent.name().equals("_id")) {
                 continue;
             }
-            ReferenceInfo pkInfo = context.table().getReferenceInfo(pkIdent);
-            assert pkInfo != null;
+            Reference pkInfo = tableInfo.getReference(pkIdent);
+            assert pkInfo != null : "pk must not be null";
 
             AnalyzedColumnDefinition pkColumn = new AnalyzedColumnDefinition(null);
             pkColumn.ident(pkIdent);
             pkColumn.name(pkIdent.name());
-            pkColumn.isPrimaryKey(true);
+            pkColumn.setPrimaryKeyConstraint();
 
-            assert !(pkInfo.type() instanceof CollectionType); // pk can't be an array
-            pkColumn.dataType(pkInfo.type().getName());
-            context.analyzedTableElements().add(pkColumn);
+            assert !(pkInfo.valueType() instanceof CollectionType) : "pk can't be an array";
+            pkColumn.dataType(pkInfo.valueType().getName());
+            tableElements.add(pkColumn);
         }
 
-        for (ColumnIdent columnIdent : context.table().partitionedBy()) {
-            context.analyzedTableElements().changeToPartitionedByColumn(columnIdent, true);
+        for (ColumnIdent columnIdent : tableInfo.partitionedBy()) {
+            tableElements.changeToPartitionedByColumn(columnIdent, true);
         }
     }
 
-    private void ensureNoIndexDefinitions(List<AnalyzedColumnDefinition> columns) {
+    private static void ensureNoIndexDefinitions(List<AnalyzedColumnDefinition> columns) {
         for (AnalyzedColumnDefinition column : columns) {
-            if (column.isIndex()) {
+            if (column.isIndexColumn()) {
                 throw new UnsupportedOperationException(
-                        "Adding an index using ALTER TABLE ADD COLUMN is not supported");
+                    "Adding an index using ALTER TABLE ADD COLUMN is not supported");
             }
             ensureNoIndexDefinitions(column.children());
         }
     }
-
-    private void setTableAndPartitionName(Table node, AddColumnAnalyzedStatement context, ParameterContext parameterContext) {
-        if (!node.partitionProperties().isEmpty()) {
-            throw new UnsupportedOperationException("Adding a column to a single partition is not supported");
-        }
-        context.table(TableIdent.of(node, parameterContext.defaultSchema()));
-    }
-
 }

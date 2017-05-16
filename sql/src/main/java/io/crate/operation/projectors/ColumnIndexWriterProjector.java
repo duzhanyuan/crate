@@ -21,64 +21,116 @@
 
 package io.crate.operation.projectors;
 
-import io.crate.core.collections.Row;
+import com.google.common.base.MoreObjects;
+import io.crate.analyze.symbol.Assignments;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.data.BatchIterator;
+import io.crate.data.Input;
+import io.crate.data.Projector;
+import io.crate.data.Row;
+import io.crate.executor.transport.ShardUpsertRequest;
+import io.crate.executor.transport.TransportActionProvider;
 import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.TableIdent;
-import io.crate.operation.Input;
+import io.crate.metadata.Functions;
+import io.crate.metadata.Reference;
+import io.crate.operation.InputRow;
 import io.crate.operation.collect.CollectExpression;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
-import org.elasticsearch.action.admin.indices.create.TransportCreateIndexAction;
+import io.crate.operation.collect.RowShardResolver;
 import org.elasticsearch.action.bulk.BulkRetryCoordinatorPool;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.action.bulk.BulkShardProcessor;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.settings.Settings;
 
 import javax.annotation.Nullable;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.function.Supplier;
 
-public class ColumnIndexWriterProjector extends AbstractIndexWriterProjector {
+public class ColumnIndexWriterProjector implements Projector {
+
+    private final Iterable<? extends CollectExpression<Row, ?>> collectExpressions;
+
+    private final RowShardResolver rowShardResolver;
+    private final Supplier<String> indexNameResolver;
+    private final Symbol[] assignments;
+    private final InputRow insertValues;
+    private BulkShardProcessor<ShardUpsertRequest> bulkShardProcessor;
 
     protected ColumnIndexWriterProjector(ClusterService clusterService,
+                                         Functions functions,
+                                         IndexNameExpressionResolver indexNameExpressionResolver,
                                          Settings settings,
-                                         TransportCreateIndexAction transportCreateIndexAction,
+                                         Supplier<String> indexNameResolver,
+                                         TransportActionProvider transportActionProvider,
                                          BulkRetryCoordinatorPool bulkRetryCoordinatorPool,
-                                         TableIdent tableIdent,
-                                         @Nullable String partitionIdent,
                                          List<ColumnIdent> primaryKeyIdents,
-                                         List<Symbol> primaryKeySymbols,
-                                         List<Input<?>> partitionedByInputs,
+                                         List<? extends Symbol> primaryKeySymbols,
                                          @Nullable Symbol routingSymbol,
+                                         ColumnIdent clusteredByColumn,
                                          List<Reference> columnReferences,
-                                         List<Symbol> columnSymbols,
-                                         CollectExpression<?>[] collectExpressions,
-                                         @Nullable
-                                         Map<Reference, Symbol> updateAssignments,
+                                         List<Input<?>> insertInputs,
+                                         Iterable<? extends CollectExpression<Row, ?>> collectExpressions,
+                                         @Nullable Map<Reference, Symbol> updateAssignments,
                                          @Nullable Integer bulkActions,
-                                         boolean autoCreateIndices) {
-        super(bulkRetryCoordinatorPool, tableIdent, partitionIdent, primaryKeyIdents, primaryKeySymbols,
-                partitionedByInputs, routingSymbol, collectExpressions);
-        assert columnReferences.size() == columnSymbols.size();
+                                         boolean autoCreateIndices,
+                                         UUID jobId) {
+        this.indexNameResolver = indexNameResolver;
+        this.collectExpressions = collectExpressions;
+        rowShardResolver = new RowShardResolver(functions, primaryKeyIdents, primaryKeySymbols, clusteredByColumn, routingSymbol);
+        assert columnReferences.size() == insertInputs.size()
+            : "number of insert inputs must be equal to the number of columns";
 
-        Map<Reference, Symbol> insertAssignments = new HashMap<>(columnReferences.size());
-        for (int i = 0; i < columnReferences.size(); i++) {
-            insertAssignments.put(columnReferences.get(i), columnSymbols.get(i));
+        String[] updateColumnNames;
+        if (updateAssignments == null) {
+            updateColumnNames = null;
+            assignments = null;
+        } else {
+            Tuple<String[], Symbol[]> convert = Assignments.convert(updateAssignments);
+            updateColumnNames = convert.v1();
+            assignments = convert.v2();
         }
+        ShardUpsertRequest.Builder builder = new ShardUpsertRequest.Builder(
+            BulkShardProcessor.BULK_REQUEST_TIMEOUT_SETTING.setting().get(settings),
+            false, // overwriteDuplicates
+            true, // continueOnErrors
+            updateColumnNames,
+            columnReferences.toArray(new Reference[columnReferences.size()]),
+            jobId);
 
-        createBulkShardProcessor(
-                clusterService,
-                settings,
-                transportCreateIndexAction,
-                bulkActions,
-                autoCreateIndices,
-                false, // overwriteDuplicates
-                updateAssignments,
-                insertAssignments);
+        insertValues = new InputRow(insertInputs);
+        bulkShardProcessor = new BulkShardProcessor<>(
+            clusterService,
+            transportActionProvider.transportBulkCreateIndicesAction(),
+            indexNameExpressionResolver,
+            settings,
+            bulkRetryCoordinatorPool,
+            autoCreateIndices,
+            MoreObjects.firstNonNull(bulkActions, 100),
+            builder,
+            transportActionProvider.transportShardUpsertAction()::execute,
+            jobId
+        );
     }
 
     @Override
-    protected Row updateRow(Row row) {
-        return row;
+    public BatchIterator apply(BatchIterator batchIterator) {
+        Supplier<ShardUpsertRequest.Item> updateItemSupplier = () -> new ShardUpsertRequest.Item(
+            rowShardResolver.id(), assignments, insertValues.materialize(), null);
+        return IndexWriterCountBatchIterator.newIndexInstance(
+            batchIterator,
+            indexNameResolver,
+            collectExpressions,
+            rowShardResolver,
+            bulkShardProcessor,
+            updateItemSupplier
+        );
+    }
+
+    @Override
+    public boolean providesIndependentScroll() {
+        return false;
     }
 }

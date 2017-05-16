@@ -21,29 +21,50 @@
 
 package io.crate.metadata.shard.blob;
 
-import io.crate.metadata.AbstractReferenceResolver;
+import io.crate.blob.v2.BlobShard;
+import io.crate.metadata.MapBackedRefResolver;
 import io.crate.metadata.ReferenceIdent;
 import io.crate.metadata.ReferenceImplementation;
-import org.elasticsearch.common.inject.Inject;
+import io.crate.metadata.blob.BlobSchemaInfo;
+import io.crate.metadata.sys.SysShardsTableInfo;
+import io.crate.operation.reference.ReferenceResolver;
+import io.crate.operation.reference.sys.shard.*;
+import io.crate.operation.reference.sys.shard.blob.BlobShardBlobPathExpression;
+import io.crate.operation.reference.sys.shard.blob.BlobShardNumDocsExpression;
+import io.crate.operation.reference.sys.shard.blob.BlobShardSizeExpression;
+import io.crate.operation.reference.sys.shard.blob.BlobShardTableNameExpression;
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.index.shard.IndexShard;
+import org.elasticsearch.index.shard.ShardId;
 
 import java.util.HashMap;
-import java.util.Map;
 
-public class BlobShardReferenceResolver extends AbstractReferenceResolver {
+public class BlobShardReferenceResolver {
 
-    private final Map<ReferenceIdent, ReferenceImplementation> implementations;
-
-    @Inject
-    public BlobShardReferenceResolver(final Map<ReferenceIdent, ReferenceImplementation> globalImplementations,
-                                      final Map<ReferenceIdent, BlobShardReferenceImplementation> blobShardImplementations) {
-        Map<ReferenceIdent, ReferenceImplementation> implementations = new HashMap<>();
-        implementations.putAll(globalImplementations);
-        implementations.putAll(blobShardImplementations);
-        this.implementations = implementations;
-    }
-
-    @Override
-    protected Map<ReferenceIdent, ReferenceImplementation> implementations() {
-        return implementations;
+    public static ReferenceResolver<ReferenceImplementation<?>> create(BlobShard blobShard) {
+        IndexShard indexShard = blobShard.indexShard();
+        ShardId shardId = indexShard.shardId();
+        HashMap<ReferenceIdent, ReferenceImplementation> implementations = new HashMap<>(15);
+        implementations.put(SysShardsTableInfo.ReferenceIdents.ID, new LiteralReferenceImplementation<>(shardId.id()));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.NUM_DOCS, new BlobShardNumDocsExpression(blobShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.PRIMARY, new ShardPrimaryExpression(indexShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.RELOCATING_NODE,
+            new ShardRelocatingNodeExpression(indexShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.SCHEMA_NAME,
+            new LiteralReferenceImplementation<>(new BytesRef(BlobSchemaInfo.NAME)));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.SIZE, new BlobShardSizeExpression(blobShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.STATE, new ShardStateExpression(indexShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.ROUTING_STATE, new ShardRoutingStateExpression(indexShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.TABLE_NAME, new BlobShardTableNameExpression(shardId));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.PARTITION_IDENT,
+            new LiteralReferenceImplementation<>(new BytesRef("")));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.ORPHAN_PARTITION,
+            new LiteralReferenceImplementation<>(false));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.PATH, new ShardPathExpression(indexShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.BLOB_PATH, new BlobShardBlobPathExpression(blobShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.MIN_LUCENE_VERSION,
+            new ShardMinLuceneVersionExpression(indexShard));
+        implementations.put(SysShardsTableInfo.ReferenceIdents.RECOVERY, new ShardRecoveryExpression(indexShard));
+        return new MapBackedRefResolver(implementations);
     }
 }

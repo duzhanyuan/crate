@@ -21,28 +21,30 @@
 package io.crate.operation.reference.sys.shard;
 
 import io.crate.metadata.PartitionName;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.inject.Inject;
+import io.crate.metadata.ReferenceImplementation;
+import org.elasticsearch.cluster.metadata.MetaData;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.index.shard.ShardId;
 
-public class ShardPartitionOrphanedExpression extends SysShardExpression<Boolean> {
+public class ShardPartitionOrphanedExpression implements ReferenceImplementation<Boolean> {
 
-    public static final String NAME = "orphan_partition";
     private final ClusterService clusterService;
-    private String tableName;
-    private boolean isPartition = false;
+    private final String aliasName;
+    private final String templateName;
+    private final boolean isPartition;
 
-
-    @Inject
     public ShardPartitionOrphanedExpression(ShardId shardId, ClusterService clusterService) {
-        super(NAME);
         this.clusterService = clusterService;
-        tableName = shardId.getIndex();
-        try {
-            tableName = PartitionName.tableName(tableName);
-            isPartition = true;
-        } catch (IllegalArgumentException e) {
-            // no partition
+        isPartition = PartitionName.isPartition(shardId.getIndex().getName());
+        if (isPartition) {
+            PartitionName partitionName = PartitionName.fromIndexOrTemplate(shardId.getIndex().getName());
+            aliasName = partitionName.tableIdent().indexName();
+            templateName = PartitionName.templateName(
+                partitionName.tableIdent().schema(),
+                partitionName.tableIdent().name());
+        } else {
+            templateName = null;
+            aliasName = null;
         }
     }
 
@@ -51,10 +53,7 @@ public class ShardPartitionOrphanedExpression extends SysShardExpression<Boolean
         if (!isPartition) {
             return false;
         }
-        if (!clusterService.state().metaData().hasConcreteIndex(tableName)) {
-            return true;
-        }
-        return false;
+        final MetaData metaData = clusterService.state().metaData();
+        return !(metaData.templates().containsKey(templateName) && metaData.hasConcreteIndex(aliasName));
     }
-
 }

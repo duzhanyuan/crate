@@ -21,49 +21,50 @@
 
 package io.crate.planner.projection;
 
-import com.google.common.collect.ImmutableList;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.Symbol;
-import io.crate.planner.symbol.Value;
-import io.crate.types.DataTypes;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.Symbols;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.List;
+import java.util.Arrays;
+import java.util.function.Function;
 
-public class UpdateProjection extends Projection {
-
-    public static final ProjectionFactory<UpdateProjection> FACTORY = new ProjectionFactory<UpdateProjection>() {
-        @Override
-        public UpdateProjection newInstance() {
-            return new UpdateProjection();
-        }
-    };
-
-    protected final static List<Symbol> OUTPUTS = ImmutableList.<Symbol>of(
-            new Value(DataTypes.LONG)  // number of rows updated
-    );
+public class UpdateProjection extends DMLProjection {
 
     private Symbol[] assignments;
     // All values of this list are expected to be a FQN columnIdent.
     private String[] assignmentsColumns;
     @Nullable
     private Long requiredVersion;
-    private Symbol uidSymbol;
 
     public UpdateProjection(Symbol uidSymbol,
                             String[] assignmentsColumns,
                             Symbol[] assignments,
                             @Nullable Long requiredVersion) {
-        this.uidSymbol = uidSymbol;
+        super(uidSymbol);
         this.assignmentsColumns = assignmentsColumns;
         this.assignments = assignments;
         this.requiredVersion = requiredVersion;
     }
 
-    public UpdateProjection() {
+    public UpdateProjection(StreamInput in) throws IOException {
+        super(in);
+        int assignmentColumnsSize = in.readVInt();
+        assignmentsColumns = new String[assignmentColumnsSize];
+        for (int i = 0; i < assignmentColumnsSize; i++) {
+            assignmentsColumns[i] = in.readString();
+        }
+        int assignmentsSize = in.readVInt();
+        assignments = new Symbol[assignmentsSize];
+        for (int i = 0; i < assignmentsSize; i++) {
+            assignments[i] = Symbols.fromStream(in);
+        }
+        requiredVersion = in.readVLong();
+        if (requiredVersion == 0) {
+            requiredVersion = null;
+        }
     }
 
     public String[] assignmentsColumns() {
@@ -80,6 +81,14 @@ public class UpdateProjection extends Projection {
     }
 
     @Override
+    public void replaceSymbols(Function<Symbol, Symbol> replaceFunction) {
+        super.replaceSymbols(replaceFunction);
+        for (int i = 0; i < assignments.length; i++) {
+            assignments[i] = replaceFunction.apply(assignments[i]);
+        }
+    }
+
+    @Override
     public ProjectionType projectionType() {
         return ProjectionType.UPDATE;
     }
@@ -90,23 +99,14 @@ public class UpdateProjection extends Projection {
     }
 
     @Override
-    public List<? extends Symbol> outputs() {
-        return OUTPUTS;
-    }
-
-    public Symbol uidSymbol() {
-        return uidSymbol;
-    }
-
-    @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
 
         UpdateProjection that = (UpdateProjection) o;
 
-        if (!assignments.equals(that.assignments)) return false;
-        if (!assignmentsColumns.equals(that.assignmentsColumns)) return false;
+        if (!Arrays.equals(assignments, that.assignments)) return false;
+        if (!Arrays.equals(assignmentsColumns, that.assignmentsColumns)) return false;
         if (requiredVersion != null ? !requiredVersion.equals(that.requiredVersion) : that.requiredVersion != null)
             return false;
         if (!uidSymbol.equals(that.uidSymbol)) return false;
@@ -117,52 +117,29 @@ public class UpdateProjection extends Projection {
     @Override
     public int hashCode() {
         int result = super.hashCode();
-        result = 31 * result + assignments.hashCode();
-        result = 31 * result + assignmentsColumns.hashCode();
+        result = 31 * result + Arrays.hashCode(assignments);
+        result = 31 * result + Arrays.hashCode(assignmentsColumns);
         result = 31 * result + (requiredVersion != null ? requiredVersion.hashCode() : 0);
         result = 31 * result + uidSymbol.hashCode();
         return result;
     }
 
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        uidSymbol = Symbol.fromStream(in);
-        int assignmentColumnsSize = in.readVInt();
-        assignmentsColumns = new String[assignmentColumnsSize];
-        for (int i = 0; i < assignmentColumnsSize; i++) {
-            assignmentsColumns[i] = in.readString();
-        }
-        int assignmentsSize = in.readVInt();
-        assignments = new Symbol[assignmentsSize];
-        for (int i = 0; i < assignmentsSize; i++) {
-            assignments[i] = Symbol.fromStream(in);
-        }
-        requiredVersion = in.readVLong();
-        if (requiredVersion == 0) {
-            requiredVersion = null;
-        }
-    }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        Symbol.toStream(uidSymbol, out);
+        super.writeTo(out);
         out.writeVInt(assignmentsColumns.length);
         for (int i = 0; i < assignmentsColumns.length; i++) {
             out.writeString(assignmentsColumns[i]);
         }
         out.writeVInt(assignments.length);
         for (int i = 0; i < assignments.length; i++) {
-            Symbol.toStream(assignments[i], out);
+            Symbols.toStream(assignments[i], out);
         }
         if (requiredVersion == null) {
             out.writeVLong(0);
         } else {
             out.writeVLong(requiredVersion);
         }
-    }
-
-    @Override
-    public RowGranularity requiredGranularity() {
-        return RowGranularity.SHARD;
     }
 }

@@ -24,140 +24,155 @@ package io.crate.metadata.doc;
 import com.carrotsearch.hppc.ObjectLookupContainer;
 import com.carrotsearch.hppc.cursors.ObjectCursor;
 import com.carrotsearch.hppc.cursors.ObjectObjectCursor;
-import com.google.common.base.Function;
-import com.google.common.base.Predicate;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
-import com.google.common.collect.Collections2;
 import com.google.common.collect.Iterators;
-import com.google.common.collect.UnmodifiableIterator;
 import com.google.common.util.concurrent.UncheckedExecutionException;
-import io.crate.blob.v2.BlobIndices;
-import io.crate.exceptions.TableUnknownException;
+import io.crate.blob.v2.BlobIndex;
+import io.crate.exceptions.ResourceUnknownException;
 import io.crate.exceptions.UnhandledServerException;
-import io.crate.metadata.PartitionName;
-import io.crate.metadata.ReferenceInfos;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.*;
 import io.crate.metadata.table.SchemaInfo;
 import io.crate.metadata.table.TableInfo;
-import org.elasticsearch.action.admin.indices.template.put.TransportPutIndexTemplateAction;
+import io.crate.operation.udf.UDFLanguage;
+import io.crate.operation.udf.UserDefinedFunctionMetaData;
+import io.crate.operation.udf.UserDefinedFunctionService;
+import io.crate.operation.udf.UserDefinedFunctionsMetaData;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.cluster.ClusterChangedEvent;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.cluster.ClusterStateListener;
 import org.elasticsearch.cluster.metadata.AliasMetaData;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.IndexTemplateMetaData;
 import org.elasticsearch.cluster.metadata.MetaData;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.collect.ImmutableOpenMap;
-import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.logging.Loggers;
+import org.elasticsearch.index.Index;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
+import java.util.stream.Stream;
 
-public class DocSchemaInfo implements SchemaInfo, ClusterStateListener {
+/**
+ * SchemaInfo for all user tables.
+ *
+ * <p>
+ * Can be used to retrieve DocTableInfo's of tables in the `doc` or a custom schema.
+ * </p>
+ *
+ * <p>
+ *     See the following table for examples how the indexName is encoded.
+ *     Functions to encode/decode are either in {@link TableIdent} or {@link PartitionName}
+ * </p>
+ *
+ * <table>
+ *     <tr>
+ *         <th>schema</th>
+ *         <th>tableName</th>
+ *         <th>indices</th>
+ *         <th>partitioned</th>
+ *         <th>templateName</th>
+ *     </tr>
+ *
+ *     <tr>
+ *         <td>doc</td>
+ *         <td>t1</td>
+ *         <td>[ t1 ]</td>
+ *         <td>NO</td>
+ *         <td></td>
+ *     </tr>
+ *     <tr>
+ *         <td>doc</td>
+ *         <td>t1p</td>
+ *         <td>[ .partitioned.t1p.&lt;ident&gt; ]</td>
+ *         <td>YES</td>
+ *         <td>.partitioned.t1p.</td>
+ *     </tr>
+ *     <tr>
+ *         <td>custom</td>
+ *         <td>t1</td>
+ *         <td>[ custom.t1 ]</td>
+ *         <td>NO</td>
+ *         <td></td>
+ *     </tr>
+ *     <tr>
+ *         <td>custom</td>
+ *         <td>t1p</td>
+ *         <td>[ custom..partitioned.t1p.&lt;ident&gt; ]</td>
+ *         <td>YES</td>
+ *         <td>custom..partitioned.t1p.</td>
+ *     </tr>
+ * </table>
+ */
+public class DocSchemaInfo implements SchemaInfo {
+
+    public static final String NAME = "doc";
+    private static final Logger LOGGER = Loggers.getLogger(DocSchemaInfo.class);
 
     private final ClusterService clusterService;
-    private final TransportPutIndexTemplateAction transportPutIndexTemplateAction;
-
-    private final static Predicate<String> DOC_SCHEMA_TABLES_FILTER = new Predicate<String>() {
-        @Override
-        public boolean apply(String input) {
-            //noinspection SimplifiableIfStatement
-            if (BlobIndices.isBlobIndex(input)) {
-                return false;
-            }
-            return !ReferenceInfos.SCHEMA_PATTERN.matcher(input).matches();
-        }
-    };
-
-    private final Predicate<String> tablesFilter;
+    private final DocTableInfoFactory docTableInfoFactory;
+    private final Functions functions;
+    private final UserDefinedFunctionService udfService;
 
     private final LoadingCache<String, DocTableInfo> cache = CacheBuilder.newBuilder()
-            .maximumSize(10000)
-            .build(
-                    new CacheLoader<String, DocTableInfo>() {
-                        @Override
-                        public DocTableInfo load(@Nonnull String key) throws Exception {
-                            return innerGetTableInfo(key);
-                        }
+        .maximumSize(10000)
+        .build(
+            new CacheLoader<String, DocTableInfo>() {
+                @Override
+                public DocTableInfo load(@Nonnull String key) throws Exception {
+                    synchronized (DocSchemaInfo.this) {
+                        return innerGetTableInfo(key);
                     }
-            );
-
-    private final Function<String, TableInfo> tableInfoFunction;
-    private final String schemaName;
-
-
-    /**
-     * DocSchemaInfo constructor for the default (doc) schema.
-     */
-    @Inject
-    public DocSchemaInfo(ClusterService clusterService,
-                         TransportPutIndexTemplateAction transportPutIndexTemplateAction) {
-        schemaName = ReferenceInfos.DEFAULT_SCHEMA_NAME;
-        this.clusterService = clusterService;
-        clusterService.add(this);
-        this.transportPutIndexTemplateAction = transportPutIndexTemplateAction;
-
-        this.tablesFilter = DOC_SCHEMA_TABLES_FILTER;
-        this.tableInfoFunction = new Function<String, TableInfo>() {
-            @Nullable
-            @Override
-            public TableInfo apply(String input) {
-                return getTableInfo(input);
+                }
             }
-        };
-    }
+        );
+
+    private static final Predicate<String> NO_BLOB = ((Predicate<String>)BlobIndex::isBlobIndex).negate();
+    private static final Predicate<String> NO_PARTITION = ((Predicate<String>)PartitionName::isPartition).negate();
+
+    private final String schemaName;
+    private boolean isDocSchema;
 
     /**
-     * constructor used for custom schemas
+     * DocSchemaInfo constructor for the all schemas.
      */
     public DocSchemaInfo(final String schemaName,
                          ClusterService clusterService,
-                         TransportPutIndexTemplateAction transportPutIndexTemplateAction) {
+                         Functions functions,
+                         UserDefinedFunctionService udfService,
+                         DocTableInfoFactory docTableInfoFactory) {
+        this.functions = functions;
         this.schemaName = schemaName;
+        this.isDocSchema = Schemas.DEFAULT_SCHEMA_NAME.equals(schemaName);
         this.clusterService = clusterService;
-        clusterService.add(this);
-        this.transportPutIndexTemplateAction = transportPutIndexTemplateAction;
-
-        this.tableInfoFunction = new Function<String, TableInfo>() {
-            @Nullable
-            @Override
-            public TableInfo apply(String input) {
-                Matcher matcher = ReferenceInfos.SCHEMA_PATTERN.matcher(input);
-                if (matcher.matches()) {
-                    input = matcher.group(2);
-                }
-                return getTableInfo(input);
-            }
-        };
-        tablesFilter = new Predicate<String>() {
-            @Override
-            public boolean apply(String input) {
-                //noinspection SimplifiableIfStatement
-                if (BlobIndices.isBlobIndex(input)) {
-                    return false;
-                }
-                Matcher matcher = ReferenceInfos.SCHEMA_PATTERN.matcher(input);
-                return (matcher.matches() && matcher.group(1).equals(schemaName)) ;
-            }
-        };
+        this.udfService = udfService;
+        this.docTableInfoFactory = docTableInfoFactory;
     }
 
-    private DocTableInfo innerGetTableInfo(String name) {
-        boolean checkAliasSchema = clusterService.state().metaData().settings().getAsBoolean("crate.table_alias.schema_check", true);
-        DocTableInfoBuilder builder = new DocTableInfoBuilder(
-                this,
-                new TableIdent(name(), name),
-                clusterService,
-                transportPutIndexTemplateAction,
-                checkAliasSchema
-        );
-        return builder.build();
+    private static String getTableNameFromIndexName(String indexName) {
+        Matcher matcher = Schemas.SCHEMA_PATTERN.matcher(indexName);
+        if (matcher.matches()) {
+            return matcher.group(2);
+        }
+        return indexName;
+    }
+
+    private boolean indexMatchesSchema(String index) {
+        Matcher matcher = Schemas.SCHEMA_PATTERN.matcher(index);
+        if (matcher.matches()) {
+            return matcher.group(1).equals(schemaName);
+        }
+        return isDocSchema;
+    }
+
+    private DocTableInfo innerGetTableInfo(String tableName) {
+        return docTableInfoFactory.create(new TableIdent(schemaName, tableName), clusterService);
     }
 
     @Override
@@ -171,29 +186,35 @@ public class DocSchemaInfo implements SchemaInfo, ClusterStateListener {
             if (cause == null) {
                 throw e;
             }
-            if (cause instanceof TableUnknownException) {
+            if (cause instanceof ResourceUnknownException) {
                 return null;
             }
             throw Throwables.propagate(cause);
         }
     }
 
-    public Collection<String> tableNames() {
-        // TODO: once we support closing/opening tables change this to concreteIndices()
-        // and add  state info to the TableInfo.
-        List<String> tables = new ArrayList<>();
-        tables.addAll(Collections2.filter(
-                Arrays.asList(clusterService.state().metaData().concreteAllOpenIndices()), tablesFilter));
+    private Collection<String> tableNames() {
+        Set<String> tables = new HashSet<>();
+
+        Stream.of(clusterService.state().metaData().getConcreteAllIndices())
+            .filter(NO_BLOB)
+            .filter(NO_PARTITION)
+            .filter(this::indexMatchesSchema)
+            .map(DocSchemaInfo::getTableNameFromIndexName)
+            .forEach(tables::add);
 
         // Search for partitioned table templates
-        UnmodifiableIterator<String> templates = clusterService.state().metaData().getTemplates().keysIt();
+        Iterator<String> templates = clusterService.state().metaData().getTemplates().keysIt();
         while (templates.hasNext()) {
             String templateName = templates.next();
+            if (!PartitionName.isPartition(templateName)) {
+                continue;
+            }
             try {
-                String tableName = PartitionName.tableName(templateName);
-                String schemaName = PartitionName.schemaName(templateName);
-                if (schemaName.equalsIgnoreCase(name())) {
-                    tables.add(tableName);
+                PartitionName partitionName = PartitionName.fromIndexOrTemplate(templateName);
+                TableIdent ti = partitionName.tableIdent();
+                if (schemaName.equalsIgnoreCase(ti.schema())) {
+                    tables.add(ti.name());
                 }
             } catch (IllegalArgumentException e) {
                 // do nothing
@@ -209,60 +230,54 @@ public class DocSchemaInfo implements SchemaInfo, ClusterStateListener {
     }
 
     @Override
-    public boolean systemSchema() {
-        return false;
+    public void invalidateTableCache(String tableName) {
+        cache.invalidate(tableName);
     }
 
     @Override
-    public void clusterChanged(ClusterChangedEvent event) {
-        if (event.metaDataChanged() && cache.size() > 0) {
-            cache.invalidateAll(event.indicesDeleted());
+    public void update(ClusterChangedEvent event) {
+        assert event.metaDataChanged() : "metaDataChanged must be true if update is called";
 
-            // search for aliases of deleted and created indices, they must be invalidated also
-            if (cache.size() > 0) {
-                for (String index : event.indicesDeleted()) {
-                    invalidateAliases(event.previousState().metaData().index(index).aliases());
-                }
+        // search for aliases of deleted and created indices, they must be invalidated also
+        MetaData prevMetaData = event.previousState().metaData();
+        for (Index index : event.indicesDeleted()) {
+            invalidateFromIndex(index, prevMetaData);
+        }
+        MetaData newMetaData = event.state().metaData();
+        for (String index : event.indicesCreated()) {
+            invalidateAliases(newMetaData.index(index).getAliases());
+        }
+
+        // search for templates with changed meta data => invalidate template aliases
+        ImmutableOpenMap<String, IndexTemplateMetaData> newTemplates = newMetaData.templates();
+        ImmutableOpenMap<String, IndexTemplateMetaData> prevTemplates = prevMetaData.templates();
+        if (!newTemplates.equals(prevTemplates)) {
+            for (ObjectCursor<IndexTemplateMetaData> cursor : newTemplates.values()) {
+                invalidateAliases(cursor.value.aliases());
             }
-            if (cache.size() > 0) {
-                for (String index : event.indicesCreated()) {
-                    invalidateAliases(event.state().metaData().index(index).aliases());
-                }
+            for (ObjectCursor<IndexTemplateMetaData> cursor : prevTemplates.values()) {
+                invalidateAliases(cursor.value.aliases());
             }
+        }
 
-            // search for templates with changed meta data => invalidate template aliases
-            if (cache.size() > 0
-                    && !event.state().metaData().templates().equals(event.previousState().metaData().templates())) {
-                // current state templates
-                for (ObjectCursor<IndexTemplateMetaData> cursor : event.state().metaData().getTemplates().values()) {
-                    invalidateAliases(cursor.value.aliases());
-                }
-                // previous state templates
-                if (cache.size() > 0) {
-                    for (ObjectCursor<IndexTemplateMetaData> cursor : event.previousState().metaData().getTemplates().values()) {
-                        invalidateAliases(cursor.value.aliases());
-                    }
-                }
-            }
+        // search indices with changed meta data
+        Iterator<String> currentTablesIt = cache.asMap().keySet().iterator();
+        ObjectLookupContainer<String> templates = newTemplates.keys();
+        ImmutableOpenMap<String, IndexMetaData> indices = newMetaData.indices();
+        while (currentTablesIt.hasNext()) {
+            String tableName = currentTablesIt.next();
+            String indexName = getIndexName(tableName);
 
-            // search indices with changed meta data
-            Iterator<String> it = cache.asMap().keySet().iterator();
-            MetaData metaData = event.state().getMetaData();
-            ObjectLookupContainer<String> templates = metaData.templates().keys();
-            ImmutableOpenMap<String, IndexMetaData> indices = metaData.indices();
-            while (it.hasNext()) {
-                String tableName = it.next();
-
-                IndexMetaData newIndexMetaData = event.state().getMetaData().index(tableName);
-                if (newIndexMetaData != null && event.indexMetaDataChanged(newIndexMetaData)) {
+            IndexMetaData newIndexMetaData = newMetaData.index(indexName);
+            if (newIndexMetaData == null) {
+                cache.invalidate(tableName);
+            } else {
+                IndexMetaData oldIndexMetaData = prevMetaData.index(indexName);
+                if (oldIndexMetaData != null && ClusterChangedEvent.indexMetaDataChanged(oldIndexMetaData, newIndexMetaData)) {
                     cache.invalidate(tableName);
                     // invalidate aliases of changed indices
-                    invalidateAliases(newIndexMetaData.aliases());
-
-                    IndexMetaData oldIndexMetaData = event.previousState().metaData().index(tableName);
-                    if (oldIndexMetaData != null) {
-                        invalidateAliases(oldIndexMetaData.aliases());
-                    }
+                    invalidateAliases(newIndexMetaData.getAliases());
+                    invalidateAliases(oldIndexMetaData.getAliases());
                 } else {
                     // this is the case if a single partition has been modified using alter table <t> partition (...)
                     String possibleTemplateName = PartitionName.templateName(name(), tableName);
@@ -277,12 +292,60 @@ public class DocSchemaInfo implements SchemaInfo, ClusterStateListener {
                 }
             }
         }
+
+        // re register UDFs for this schema
+        UserDefinedFunctionsMetaData udfMetaData = newMetaData.custom(UserDefinedFunctionsMetaData.TYPE);
+        if (udfMetaData != null) {
+            Stream<UserDefinedFunctionMetaData> udfFunctions = udfMetaData.functionsMetaData().stream()
+                .filter(function -> schemaName.equals(function.schema()));
+            // TODO: the functions field should actually be moved to the udfService for better encapsulation
+            // then the registration of the function implementations of a schema would also move to the udfService
+            functions.registerUdfResolversForSchema(schemaName, toFunctionImpl(udfFunctions::iterator));
+        }
+    }
+
+    @VisibleForTesting
+    Map<FunctionIdent, FunctionImplementation> toFunctionImpl(Iterable<UserDefinedFunctionMetaData> functionsMetadata) {
+        Map<FunctionIdent, FunctionImplementation> udfFunctions = new HashMap<>();
+        for (UserDefinedFunctionMetaData function : functionsMetadata) {
+            try {
+                UDFLanguage lang = udfService.getLanguage(function.language());
+                FunctionImplementation impl = lang.createFunctionImplementation(function);
+                udfFunctions.put(impl.info().ident(), impl);
+            } catch (javax.script.ScriptException | IllegalArgumentException e) {
+                LOGGER.warn(
+                    String.format(Locale.ENGLISH, "Can't create user defined function '%s'",
+                        function.specificName()
+                    ), e);
+            }
+        }
+        return udfFunctions;
+    }
+
+    /**
+     * checks if metaData contains a particular index and
+     * invalidates its aliases if so
+     */
+    @VisibleForTesting
+    void invalidateFromIndex(Index index, MetaData metaData) {
+        IndexMetaData indexMetaData = metaData.index(index);
+        if (indexMetaData != null) {
+            invalidateAliases(indexMetaData.getAliases());
+        }
+    }
+
+    private String getIndexName(String tableName) {
+        if (schemaName.equals(Schemas.DEFAULT_SCHEMA_NAME)) {
+            return tableName;
+        } else {
+            return schemaName + "." + tableName;
+        }
     }
 
     private void invalidateAliases(ImmutableOpenMap<String, AliasMetaData> aliases) {
-        assert aliases != null;
+        assert aliases != null : "aliases must not be null";
         if (aliases.size() > 0) {
-            cache.invalidateAll(Arrays.asList(aliases.keys().toArray(String.class)));
+            aliases.keysIt().forEachRemaining(cache::invalidate);
         }
     }
 
@@ -293,6 +356,11 @@ public class DocSchemaInfo implements SchemaInfo, ClusterStateListener {
 
     @Override
     public Iterator<TableInfo> iterator() {
-        return Iterators.transform(tableNames().iterator(), tableInfoFunction);
+        return Iterators.transform(tableNames().iterator(), this::getTableInfo);
+    }
+
+    @Override
+    public void close() throws Exception {
+        functions.deregisterUdfResolversForSchema(schemaName);
     }
 }

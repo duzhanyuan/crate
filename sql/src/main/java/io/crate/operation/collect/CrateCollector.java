@@ -21,9 +21,27 @@
 
 package io.crate.operation.collect;
 
-import io.crate.breaker.RamAccountingContext;
-import io.crate.operation.RowUpstream;
+import io.crate.data.BatchConsumer;
 
-public interface CrateCollector extends RowUpstream {
-    public void doCollect(RamAccountingContext ramAccountingContext) throws Exception;
+public interface CrateCollector {
+
+    interface Builder {
+
+        /**
+         * Create a CrateCollector
+         *
+         * @param batchConsumer consumer which will receive a BatchIterator to consume data after
+         *                      {@link #doCollect()} has been called.
+         *                      (May be async)
+         */
+        CrateCollector build(BatchConsumer batchConsumer);
+
+        default BatchConsumer applyProjections(BatchConsumer consumer) {
+            return consumer;
+        }
+    }
+
+    void doCollect();
+
+    void kill(Throwable throwable);
 }

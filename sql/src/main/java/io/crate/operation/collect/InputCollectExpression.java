@@ -21,25 +21,25 @@
 
 package io.crate.operation.collect;
 
-import io.crate.core.collections.Row;
+import io.crate.data.Row;
 
-public class InputCollectExpression<ReturnType> extends CollectExpression<ReturnType> {
+public class InputCollectExpression implements CollectExpression<Row, Object> {
 
     private final int position;
-    private ReturnType value;
+    private Object value;
 
     public InputCollectExpression(int position) {
         this.position = position;
     }
 
     @Override
-    public boolean setNextRow(Row row) {
-        value = (ReturnType) row.get(position);
-        return true;
+    public void setNextRow(Row row) {
+        assert row.numColumns() > position : "row smaller than input position " + row.numColumns() + "<=" + position;
+        value = row.get(position);
     }
 
     @Override
-    public ReturnType value() {
+    public Object value() {
         return value;
     }
 
@@ -61,5 +61,10 @@ public class InputCollectExpression<ReturnType> extends CollectExpression<Return
         int result = position;
         result = 31 * result + (value != null ? value.hashCode() : 0);
         return result;
+    }
+
+    @Override
+    public String toString() {
+        return "Input{pos=" + position + '}';
     }
 }

@@ -21,59 +21,62 @@
 
 package io.crate.metadata;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableSet;
 import io.crate.exceptions.InvalidSchemaNameException;
 import io.crate.exceptions.InvalidTableNameException;
+import io.crate.sql.Identifiers;
 import io.crate.sql.tree.Table;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.io.stream.Streamable;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.List;
 import java.util.Set;
 
-public class TableIdent implements Comparable<TableIdent>, Streamable {
+public class TableIdent {
 
     private static final Set<String> INVALID_TABLE_NAME_CHARACTERS = ImmutableSet.of(".");
 
-    @Nullable
-    private String schema;
-    private String name;
+    private final String schema;
+    private final String name;
 
-
-    public static TableIdent of(Table tableNode, @Nullable String fallbackSchema) {
+    public static TableIdent of(Table tableNode, String defaultSchema) {
         List<String> parts = tableNode.getName().getParts();
         Preconditions.checkArgument(parts.size() < 3,
-                "Table with more then 2 QualifiedName parts is not supported. only <schema>.<tableName> works.");
+            "Table with more then 2 QualifiedName parts is not supported. only <schema>.<tableName> works.");
         if (parts.size() == 2) {
             return new TableIdent(parts.get(0), parts.get(1));
         }
-        return new TableIdent(fallbackSchema, parts.get(0));
+        return new TableIdent(defaultSchema, parts.get(0));
     }
 
-    public static TableIdent fromStream(StreamInput in) throws IOException {
-        TableIdent tableIdent = new TableIdent();
-        tableIdent.readFrom(in);
-        return tableIdent;
+    public static TableIdent fromIndexName(String indexName) {
+        if (PartitionName.isPartition(indexName)) {
+            PartitionName pn = PartitionName.fromIndexOrTemplate(indexName);
+            return pn.tableIdent();
+        }
+        int dotPos = indexName.indexOf('.');
+        if (dotPos == -1) {
+            return new TableIdent(null, indexName);
+        }
+        return new TableIdent(indexName.substring(0, dotPos), indexName.substring(dotPos + 1));
+    }
+
+    public TableIdent(StreamInput in) throws IOException {
+        schema = in.readString();
+        name = in.readString();
     }
 
     public TableIdent(@Nullable String schema, String name) {
         assert name != null : "table name must not be null";
-
-        this.schema = schema;
+        this.schema = MoreObjects.firstNonNull(schema, Schemas.DEFAULT_SCHEMA_NAME);
         this.name = name;
     }
 
-    private TableIdent() {
-
-    }
-
-    @Nullable
     public String schema() {
         return schema;
     }
@@ -83,18 +86,22 @@ public class TableIdent implements Comparable<TableIdent>, Streamable {
     }
 
     public String fqn() {
-        if (schema == null || schema.equalsIgnoreCase(ReferenceInfos.DEFAULT_SCHEMA_NAME)) {
-            return name;
-        }
-        return String.format("%s.%s", schema, name);
+        return schema + "." + name;
     }
 
-    public String esName() {
+    public String sqlFqn() {
+        return Identifiers.quoteIfNeeded(schema) + "." + Identifiers.quoteIfNeeded(name);
+    }
+
+    public String indexName() {
+        if (schema.equalsIgnoreCase(Schemas.DEFAULT_SCHEMA_NAME)) {
+            return name;
+        }
         return fqn();
     }
 
     public void validate() throws InvalidSchemaNameException, InvalidTableNameException {
-        if (schema != null && !isValidTableOrSchemaName(schema)) {
+        if (!isValidTableOrSchemaName(schema)) {
             throw new InvalidSchemaNameException(schema);
         }
         if (!isValidTableOrSchemaName(name)) {
@@ -103,10 +110,13 @@ public class TableIdent implements Comparable<TableIdent>, Streamable {
     }
 
     private static boolean isValidTableOrSchemaName(String name) {
-        for (String illegalCharacter: INVALID_TABLE_NAME_CHARACTERS) {
+        for (String illegalCharacter : INVALID_TABLE_NAME_CHARACTERS) {
             if (name.contains(illegalCharacter) || name.length() == 0) {
                 return false;
             }
+        }
+        if (name.startsWith("_")) {
+            return false;
         }
         return true;
     }
@@ -121,41 +131,23 @@ public class TableIdent implements Comparable<TableIdent>, Streamable {
         }
         TableIdent o = (TableIdent) obj;
         return Objects.equal(schema, o.schema) &&
-                Objects.equal(name, o.name);
+               Objects.equal(name, o.name);
     }
 
     @Override
     public int hashCode() {
-        int result = schema != null ? schema.hashCode() : 0;
+        int result = schema.hashCode();
         result = 31 * result + name.hashCode();
         return result;
     }
 
     @Override
     public String toString() {
-        if (schema == null) {
-            return name;
-        }
-        return String.format("%s.%s", schema, name);
+        return fqn();
     }
 
-    @Override
-    public int compareTo(TableIdent o) {
-        return ComparisonChain.start()
-                .compare(schema, o.schema)
-                .compare(name, o.name)
-                .result();
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        schema = in.readOptionalString();
-        name = in.readString();
-    }
-
-    @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeOptionalString(schema);
+        out.writeString(schema);
         out.writeString(name);
     }
 }

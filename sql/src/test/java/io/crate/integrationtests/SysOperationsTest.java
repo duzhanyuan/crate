@@ -21,9 +21,8 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLResponse;
-import io.crate.test.integration.ClassLifecycleIntegrationTest;
-import io.crate.testing.SQLTransportExecutor;
+import io.crate.testing.SQLResponse;
+import io.crate.testing.UseJdbc;
 import org.hamcrest.Matchers;
 import org.junit.After;
 import org.junit.Before;
@@ -33,40 +32,39 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import static org.hamcrest.CoreMatchers.startsWith;
-import static org.hamcrest.core.Is.is;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.startsWith;
 
-public class SysOperationsTest extends ClassLifecycleIntegrationTest {
+@UseJdbc
+public class SysOperationsTest extends SQLTransportIntegrationTest {
 
-    private SQLTransportExecutor executor;
 
     @Before
-    public void before() throws Exception {
-        executor = SQLTransportExecutor.create(ClassLifecycleIntegrationTest.GLOBAL_CLUSTER);
-        executor.exec("set global stats.enabled = true");
+    public void enableStats() throws Exception {
+        execute("set global stats.enabled = true");
     }
 
     @After
-    public void after() {
-        executor.exec("set global stats.enabled = false");
+    public void disableStats() {
+        execute("reset global stats.enabled");
     }
 
     @Test
     public void testDistinctSysOperations() throws Exception {
         // this tests a distributing collect without shards but DOC level granularity
-        SQLResponse response = executor.exec("select distinct name  from sys.operations limit 1");
+        SQLResponse response = execute("select distinct name  from sys.operations limit 1");
         assertThat(response.rowCount(), is(1L));
     }
 
     @Test
     public void testQueryNameFromSysOperations() throws Exception {
-        SQLResponse resp = executor.exec("select name, job_id from sys.operations order by name asc");
+        SQLResponse resp = execute("select name, job_id from sys.operations order by name asc");
 
-        // usually this should return collect on 2 nodes, localMerge on 1 node
+        // usually this should return collect per node and an optional merge on handler
         // but it could be that the collect is finished before the localMerge task is started in which
         // case it is missing.
 
-        assertThat(resp.rowCount(), Matchers.greaterThanOrEqualTo(2L));
+        assertThat(resp.rowCount(), Matchers.greaterThanOrEqualTo((long) internalCluster().numDataNodes()));
         List<String> names = new ArrayList<>();
         for (Object[] objects : resp.rows()) {
             names.add((String) objects[0]);
@@ -77,11 +75,9 @@ public class SysOperationsTest extends ClassLifecycleIntegrationTest {
 
     @Test
     public void testNodeExpressionOnSysOperations() throws Exception {
-        executor.exec("select * from sys.nodes");
-        SQLResponse response = executor.exec("select _node['name'], id from sys.operations limit 1");
+        execute("select * from sys.nodes");
+        SQLResponse response = execute("select _node['name'], id from sys.operations limit 1");
         assertThat(response.rowCount(), is(1L));
-        assertThat(response.rows()[0][0].toString(), startsWith("node"));
+        assertThat(response.rows()[0][0].toString(), startsWith("node_s"));
     }
-
-
 }

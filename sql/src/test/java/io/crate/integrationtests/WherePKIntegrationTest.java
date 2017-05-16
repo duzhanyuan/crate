@@ -21,8 +21,8 @@
 
 package io.crate.integrationtests;
 
-import io.crate.test.integration.CrateIntegrationTest;
 import io.crate.testing.TestingHelpers;
+import io.crate.testing.UseJdbc;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.hamcrest.Matchers;
 import org.junit.Test;
@@ -31,7 +31,7 @@ import java.util.Arrays;
 
 import static org.hamcrest.core.Is.is;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
+@UseJdbc
 public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -41,11 +41,11 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
                 "   name string" +
                 ") clustered into 2 shards with (number_of_replicas = 0)");
         ensureYellow();
-        execute("insert into users (id, name) values (?, ?)", new Object[][] {
-                new Object[] { 1, "Arthur" },
-                new Object[] { 2, "Trillian" },
-                new Object[] { 3, "Marvin" },
-                new Object[] { 4, "Slartibartfast" },
+        execute("insert into users (id, name) values (?, ?)", new Object[][]{
+            new Object[]{1, "Arthur"},
+            new Object[]{2, "Trillian"},
+            new Object[]{3, "Marvin"},
+            new Object[]{4, "Slartibartfast"},
         });
         execute("refresh table users");
 
@@ -63,10 +63,10 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
                 ") clustered into 2 shards with (number_of_replicas = 0)");
         ensureYellow();
         execute("insert into users (id, name) values (?, ?)", new Object[][]{
-                new Object[]{1, "Arthur"},
-                new Object[]{2, "Trillian"},
-                new Object[]{3, "Marvin"},
-                new Object[]{4, "Slartibartfast"},
+            new Object[]{1, "Arthur"},
+            new Object[]{2, "Trillian"},
+            new Object[]{3, "Marvin"},
+            new Object[]{4, "Slartibartfast"},
         });
         execute("refresh table users");
         execute("select substr(name, 1, 1) from users where id in (1, 2, 3) order by substr(name, 1, 1) desc");
@@ -84,10 +84,10 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
                 ") clustered into 2 shards with (number_of_replicas = 0)");
         ensureYellow();
         execute("insert into users (id, name) values (?, ?)", new Object[][]{
-                new Object[]{1, "Arthur"},
-                new Object[]{2, "Trillian"},
-                new Object[]{3, "Marvin"},
-                new Object[]{4, "Slartibartfast"},
+            new Object[]{1, "Arthur"},
+            new Object[]{2, "Trillian"},
+            new Object[]{3, "Marvin"},
+            new Object[]{4, "Slartibartfast"},
         });
         execute("refresh table users");
         execute("select name from users where id in (1, 2, 3) order by id desc");
@@ -95,6 +95,22 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
         assertThat((String) response.rows()[0][0], is("Marvin"));
         assertThat((String) response.rows()[1][0], is("Trillian"));
         assertThat((String) response.rows()[2][0], is("Arthur"));
+    }
+
+    @Test
+    public void testWherePKWithOrderBySymbolThatIsAlsoInSelectList() throws Exception {
+        execute("create table users (" +
+                "   id int primary key," +
+                "   name string" +
+                ") clustered into 2 shards with (number_of_replicas = 0)");
+        ensureYellow();
+        execute("insert into users (id, name) values (?, ?)", new Object[][]{
+            new Object[]{1, "Arthur"},
+            new Object[]{2, "Trillian"},
+            });
+        execute("refresh table users");
+        execute("select name from users where id = 1 order by name desc");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("Arthur\n"));
     }
 
     @Test
@@ -109,9 +125,45 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    public void testWherePkIsNull() throws Exception {
+        execute("create table t (s string primary key) with (number_of_replicas = 0)");
+        ensureYellow();
+
+        execute("select * from t where s in (null)");
+        assertThat(response.rowCount(), is(0L));
+
+        execute("select * from t where s in ('foo', null, 'bar')");
+        assertThat(response.rowCount(), is(0L));
+
+        execute("select * from t where s is null");
+        assertThat(response.rowCount(), is(0L));
+    }
+
+    @Test
+    public void testWhereComplexPkIsNull() throws Exception {
+        execute("create table t (i integer, s string, primary key (i, s)) with (number_of_replicas = 0)");
+        ensureYellow();
+
+        execute("select * from t where s in (null)");
+        assertThat(response.rowCount(), is(0L));
+        execute("select * from t where i in (null)");
+        assertThat(response.rowCount(), is(0L));
+
+        execute("select * from t where s in ('foo', null, 'bar')");
+        assertThat(response.rowCount(), is(0L));
+        execute("select * from t where i in (1, null, 2)");
+        assertThat(response.rowCount(), is(0L));
+
+        execute("select * from t where s is null");
+        assertThat(response.rowCount(), is(0L));
+        execute("select * from t where i is null");
+        assertThat(response.rowCount(), is(0L));
+    }
+
+    @Test
     public void testSelectNestedObjectWherePk() throws Exception {
         execute("create table items (id string primary key, details object as (tags array(string)) )" +
-            "clustered into 3 shards with (number_of_replicas = '0-1')");
+                "clustered into 3 shards with (number_of_replicas = '0-1')");
         ensureYellow();
 
         execute("insert into items (id, details) values (?, ?)", new Object[]{
@@ -123,8 +175,38 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
         assertThat(response.rowCount(), is(1L));
         assertThat((String) response.rows()[0][0], is("123"));
         //noinspection unchecked
-        String[] tags = Arrays.copyOf((Object[])response.rows()[0][1], 2, String[].class);
+        String[] tags = Arrays.copyOf((Object[]) response.rows()[0][1], 2, String[].class);
         assertThat(tags, Matchers.arrayContaining("small", "blue"));
+    }
+
+    @Test
+    public void testSelectByIdWithCustomRoutingUsesSearch() throws Exception {
+        execute("create table users (name string)" +
+                "clustered by (name) with (number_of_replicas = '0')");
+
+        execute("insert into users values ('hoschi'), ('galoschi'), ('x')");
+        execute("refresh table users");
+
+        execute("select _id from users");
+        for (Object[] row : response.rows()) {
+            execute("select name from users where _id=?", row);
+            assertThat(response.rowCount(), is(1L));
+        }
+    }
+
+    @Test
+    public void testSelectByIdWithPartitionsUsesSearch() throws Exception {
+        execute("create table users (name string)" +
+                "  with (number_of_replicas = '0')");
+
+        execute("insert into users values ('hoschi'), ('galoschi'), ('x')");
+        execute("refresh table users");
+        execute("select _id from users");
+
+        for (Object[] row : response.rows()) {
+            execute("select name from users where _id=?", row);
+            assertThat(response.rowCount(), is(1L));
+        }
     }
 
     @Test
@@ -173,9 +255,9 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
 
         if (randomInt(1) == 0) {
             execute("insert into expl_routing (id, name) values (?, ?)", new Object[][]{
-                    new Object[]{1, ""},
-                    new Object[]{2, ""},
-                    new Object[]{1, "1"}
+                new Object[]{1, ""},
+                new Object[]{2, ""},
+                new Object[]{1, "1"}
             });
         } else {
             execute("insert into expl_routing (id, name) values (?, ?)", new Object[]{1, ""});
@@ -185,14 +267,16 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
         execute("refresh table expl_routing");
 
         execute("select count(*) from expl_routing where name = ''");
-        assertThat((Long)response.rows()[0][0], is(2L));
+        assertThat((Long) response.rows()[0][0], is(2L));
 
         execute("select * from expl_routing where name = '' order by id");
         assertThat(response.rowCount(), is(2L));
         assertThat((Integer) response.rows()[0][0], is(1));
-        assertThat((Integer)response.rows()[1][0], is(2));
+        assertThat((Integer) response.rows()[1][0], is(2));
 
         execute("delete from expl_routing where name = ''");
+        assertThat(response.rowCount(), is(2L));
+        refresh();
         execute("select count(*) from expl_routing");
         assertThat((Long) response.rows()[0][0], is(1L));
     }
@@ -213,7 +297,7 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
 
         // does not delete anything - goes to shard 1
         execute("delete from explicit_routing where name='A,W'");
-        assertThat(response.rowCount(), is(-1L));
+        assertThat(response.rowCount(), is(0L));
         execute("refresh table explicit_routing");
 
         execute("select * from explicit_routing");

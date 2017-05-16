@@ -21,43 +21,43 @@
 
 package io.crate.operation.scalar.regex;
 
-import com.google.common.base.Preconditions;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolType;
 import io.crate.metadata.*;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
-import io.crate.planner.symbol.SymbolType;
 import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.apache.lucene.util.BytesRef;
 
-import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
 
-public class MatchesFunction extends Scalar<BytesRef[], Object> implements DynamicFunctionResolver {
+public class MatchesFunction extends Scalar<BytesRef[], Object> {
 
     public static final String NAME = "regexp_matches";
-
-    private static final DataType arrayStringType = new ArrayType(DataTypes.STRING);
-
-    private static FunctionInfo createInfo(List<DataType> types) {
-        return new FunctionInfo(new FunctionIdent(NAME, types), new ArrayType(types.get(0)));
-    }
-    public static void register(ScalarFunctionModule module) {
-        module.register(NAME, new MatchesFunction());
-    }
+    private static final DataType ARRAY_STRING_TYPE = new ArrayType(DataTypes.STRING);
 
     private FunctionInfo info;
     private RegexMatcher regexMatcher;
 
-    private MatchesFunction() {
+    public static void register(ScalarFunctionModule module) {
+        module.register(NAME,
+            new BaseFunctionResolver(
+                Signature.numArgs(2, 3).and(
+                    Signature.withLenientVarArgs(Signature.ArgMatcher.STRING))) {
+
+                @Override
+                public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
+                    return new MatchesFunction(
+                        new FunctionInfo(new FunctionIdent(NAME, dataTypes), new ArrayType(dataTypes.get(0))));
+                }
+            });
     }
 
-    public MatchesFunction(FunctionInfo info) {
+    private MatchesFunction(FunctionInfo info) {
         this.info = info;
     }
 
@@ -66,14 +66,14 @@ public class MatchesFunction extends Scalar<BytesRef[], Object> implements Dynam
         return info;
     }
 
-    public RegexMatcher regexMatcher() {
+    RegexMatcher regexMatcher() {
         return regexMatcher;
     }
 
     @Override
-    public Symbol normalizeSymbol(Function symbol) {
+    public Symbol normalizeSymbol(Function symbol, TransactionContext transactionContext) {
         final int size = symbol.arguments().size();
-        assert (size >= 2 && size <= 3);
+        assert size == 2 || size == 3 : "function's number of arguments must be 2 or 3";
 
         if (anyNonLiterals(symbol.arguments())) {
             return symbol;
@@ -92,14 +92,14 @@ public class MatchesFunction extends Scalar<BytesRef[], Object> implements Dynam
         args[1] = (Input) pattern;
 
         if (size == 3) {
-            args[2] = (Input)symbol.arguments().get(2);
+            args[2] = (Input) symbol.arguments().get(2);
         }
-        return Literal.newLiteral(evaluate(args), arrayStringType);
+        return Literal.of(evaluate(args), ARRAY_STRING_TYPE);
     }
 
     @Override
     public Scalar<BytesRef[], Object> compile(List<Symbol> arguments) {
-        assert arguments.size() > 1;
+        assert arguments.size() > 1 : "number of arguments must be > 1";
         String pattern = null;
         if (arguments.get(1).symbolType() == SymbolType.LITERAL) {
             Literal literal = (Literal) arguments.get(1);
@@ -111,7 +111,8 @@ public class MatchesFunction extends Scalar<BytesRef[], Object> implements Dynam
         }
         BytesRef flags = null;
         if (arguments.size() == 3) {
-            assert arguments.get(2).symbolType() == SymbolType.LITERAL;
+            assert arguments.get(2).symbolType() == SymbolType.LITERAL :
+                "3rd argument must be a " + SymbolType.LITERAL;
             flags = (BytesRef) ((Literal) arguments.get(2)).value();
         }
 
@@ -125,16 +126,16 @@ public class MatchesFunction extends Scalar<BytesRef[], Object> implements Dynam
 
     @Override
     public BytesRef[] evaluate(Input[] args) {
-        assert (args.length > 1 && args.length < 4);
+        assert args.length == 2 || args.length == 3 : "number of args must be 2 or 3";
         Object val = args[0].value();
         final Object patternValue = args[1].value();
         if (val == null || patternValue == null) {
             return null;
         }
-        assert patternValue instanceof BytesRef;
+        assert patternValue instanceof BytesRef : "patternValue must be BytesRef";
         // value can be a string if e.g. result is retrieved by ESSearchTask
         if (val instanceof String) {
-            val = new BytesRef((String)val);
+            val = new BytesRef((String) val);
         }
 
         RegexMatcher matcher;
@@ -149,24 +150,9 @@ public class MatchesFunction extends Scalar<BytesRef[], Object> implements Dynam
             matcher = regexMatcher;
         }
 
-        if (matcher.match((BytesRef)val)) {
+        if (matcher.match((BytesRef) val)) {
             return matcher.groups();
         }
         return null;
     }
-
-    @Override
-    public FunctionImplementation<Function> getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
-        Preconditions.checkArgument(dataTypes.size() > 1 && dataTypes.size() < 4
-                && dataTypes.get(0) == DataTypes.STRING && dataTypes.get(1) == DataTypes.STRING,
-                String.format(Locale.ENGLISH,
-                        "[%s] Function implementation not found for argument types %s",
-                        NAME, Arrays.toString(dataTypes.toArray())));
-        if (dataTypes.size() == 3) {
-            Preconditions.checkArgument(dataTypes.get(2) == DataTypes.STRING, "flags must be of type string");
-        }
-        return new MatchesFunction(createInfo(dataTypes));
-    }
-
-
 }

@@ -24,20 +24,22 @@ package io.crate.types;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import io.crate.TimestampFormat;
+import com.google.common.collect.Iterables;
+import io.crate.Streamer;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 
 import java.io.IOException;
 import java.util.*;
 
-public class DataTypes {
+public final class DataTypes {
 
-    private final static ESLogger logger = Loggers.getLogger(DataTypes.class);
+    private final static Logger logger = Loggers.getLogger(DataTypes.class);
 
     /**
      * If you add types here make sure to update the SizeEstimatorFactory in the SQL module.
@@ -64,28 +66,36 @@ public class DataTypes {
     public final static GeoPointType GEO_POINT = GeoPointType.INSTANCE;
     public final static GeoShapeType GEO_SHAPE = GeoShapeType.INSTANCE;
 
-    public final static ImmutableList<DataType> PRIMITIVE_TYPES = ImmutableList.<DataType>of(
-            BYTE,
-            BOOLEAN,
-            STRING,
-            IP,
-            DOUBLE,
-            FLOAT,
-            SHORT,
-            INTEGER,
-            LONG,
-            TIMESTAMP
-    );
-    public final static ImmutableList<DataType> NUMERIC_PRIMITIVE_TYPES = ImmutableList.<DataType>of(
-            DOUBLE,
-            FLOAT,
-            BYTE,
-            SHORT,
-            INTEGER,
-            LONG
+    public final static DataType DOUBLE_ARRAY = new ArrayType(DOUBLE);
+    public final static DataType OBJECT_ARRAY = new ArrayType(OBJECT);
+
+
+    public final static ImmutableList<DataType> PRIMITIVE_TYPES = ImmutableList.of(
+        BYTE,
+        BOOLEAN,
+        STRING,
+        IP,
+        DOUBLE,
+        FLOAT,
+        SHORT,
+        INTEGER,
+        LONG,
+        TIMESTAMP
     );
 
-    public static final Map<Integer, DataTypeFactory> TYPE_REGISTRY = new MapBuilder<Integer, DataTypeFactory>()
+    public final static ImmutableList<DataType> NUMERIC_PRIMITIVE_TYPES = ImmutableList.of(
+        DOUBLE,
+        FLOAT,
+        BYTE,
+        SHORT,
+        INTEGER,
+        LONG
+    );
+
+    /**
+     * Type registry mapping type ids to the according data type instance.
+     */
+    private static final Map<Integer, DataTypeFactory> TYPE_REGISTRY = new MapBuilder<Integer, DataTypeFactory>()
         .put(UndefinedType.ID, UNDEFINED)
         .put(NotSupportedType.ID, NOT_SUPPORTED)
         .put(ByteType.ID, BYTE)
@@ -101,53 +111,40 @@ public class DataTypes {
         .put(ObjectType.ID, OBJECT)
         .put(GeoPointType.ID, GEO_POINT)
         .put(GeoShapeType.ID, GEO_SHAPE)
-        .put(ArrayType.ID, new CollectionTypeFactory() {
-            @Override
-            public DataType<?> create() {
-                return new ArrayType();
-            }
+        .put(ArrayType.ID, ArrayType::new)
+        .put(SetType.ID, SetType::new).map();
 
-            @Override
-            public DataType<?> create(DataType innerType) {
-                return new ArrayType(innerType);
-            }
-        })
-        .put(SetType.ID, new CollectionTypeFactory() {
-            @Override
-            public DataType<?> create() {
-                return new SetType();
-            }
-
-            @Override
-            public DataType<?> create(DataType innerType) {
-                return new SetType(innerType);
-            }
-        }).map();
 
     private static final Set<DataType> NUMBER_CONVERSIONS = ImmutableSet.<DataType>builder()
-            .addAll(NUMERIC_PRIMITIVE_TYPES)
-            .add(STRING, TIMESTAMP, IP, UNDEFINED)
-            .build();
+        .addAll(NUMERIC_PRIMITIVE_TYPES)
+        .add(BOOLEAN)
+        .add(STRING, TIMESTAMP, IP)
+        .build();
     // allowed conversion from key to one of the value types
     // the key type itself does not need to be in the value set
-    public static final ImmutableMap<Integer, Set<DataType>> ALLOWED_CONVERSIONS = ImmutableMap.<Integer, Set<DataType>>builder()
-            .put(BYTE.id(), NUMBER_CONVERSIONS)
-            .put(SHORT.id(), NUMBER_CONVERSIONS)
-            .put(INTEGER.id(), NUMBER_CONVERSIONS)
-            .put(LONG.id(), NUMBER_CONVERSIONS)
-            .put(FLOAT.id(), NUMBER_CONVERSIONS)
-            .put(DOUBLE.id(), NUMBER_CONVERSIONS)
-            .put(BOOLEAN.id(), ImmutableSet.<DataType>of(STRING, UNDEFINED))
-            .put(STRING.id(), NUMBER_CONVERSIONS)
-            .put(IP.id(), ImmutableSet.<DataType>of(STRING, UNDEFINED))
-            .put(TIMESTAMP.id(), ImmutableSet.<DataType>of(LONG, UNDEFINED))
-            .put(UNDEFINED.id(), ImmutableSet.<DataType>of()) // actually convertible to every type, see NullType
-            .put(NOT_SUPPORTED.id(), ImmutableSet.<DataType>of(UNDEFINED))
-            .put(GEO_POINT.id(), ImmutableSet.<DataType>of(new ArrayType(DOUBLE), UNDEFINED))
-            .put(OBJECT.id(), ImmutableSet.<DataType>of(UNDEFINED))
-            .put(ArrayType.ID, ImmutableSet.<DataType>of()) // convertability handled in ArrayType
-            .put(SetType.ID, ImmutableSet.<DataType>of()) // convertability handled in SetType
-            .build();
+    static final ImmutableMap<Integer, Set<DataType>> ALLOWED_CONVERSIONS = ImmutableMap.<Integer, Set<DataType>>builder()
+        .put(BYTE.id(), NUMBER_CONVERSIONS)
+        .put(SHORT.id(), NUMBER_CONVERSIONS)
+        .put(INTEGER.id(), NUMBER_CONVERSIONS)
+        .put(LONG.id(), NUMBER_CONVERSIONS)
+        .put(FLOAT.id(), NUMBER_CONVERSIONS)
+        .put(DOUBLE.id(), NUMBER_CONVERSIONS)
+        .put(BOOLEAN.id(), ImmutableSet.of(STRING))
+        .put(STRING.id(), ImmutableSet.<DataType>builder()
+            .addAll(NUMBER_CONVERSIONS)
+            .add(GEO_SHAPE)
+            .add(GEO_POINT)
+            .add(BOOLEAN)
+            .add(OBJECT)
+            .build())
+        .put(IP.id(), ImmutableSet.of(STRING))
+        .put(TIMESTAMP.id(), ImmutableSet.of(LONG))
+        .put(UNDEFINED.id(), ImmutableSet.of()) // actually convertible to every type, see NullType
+        .put(GEO_POINT.id(), ImmutableSet.of(new ArrayType(DOUBLE)))
+        .put(OBJECT.id(), ImmutableSet.of(GEO_SHAPE))
+        .put(ArrayType.ID, ImmutableSet.of()) // convertability handled in ArrayType
+        .put(SetType.ID, ImmutableSet.of()) // convertability handled in SetType
+        .build();
 
     public static boolean isCollectionType(DataType type) {
         return type.id() == ArrayType.ID || type.id() == SetType.ID;
@@ -170,86 +167,68 @@ public class DataTypes {
         type.writeTo(out);
     }
 
-    public static DataType<?> guessType(Object value) {
-        return guessType(value, true);
-    }
-
     private static final Map<Class<?>, DataType> POJO_TYPE_MAPPING = ImmutableMap.<Class<?>, DataType>builder()
-            .put(Double.class, DOUBLE)
-            .put(Float.class, FLOAT)
-            .put(Integer.class, INTEGER)
-            .put(Long.class, LONG)
-            .put(Short.class, SHORT)
-            .put(Byte.class, BYTE)
-            .put(Boolean.class, BOOLEAN)
-            .put(Map.class, OBJECT)
-            .put(String.class, STRING)
-            .put(BytesRef.class, STRING)
-            .put(Character.class, STRING)
-            .build();
+        .put(Double.class, DOUBLE)
+        .put(Float.class, FLOAT)
+        .put(Integer.class, INTEGER)
+        .put(Long.class, LONG)
+        .put(Short.class, SHORT)
+        .put(Byte.class, BYTE)
+        .put(Boolean.class, BOOLEAN)
+        .put(Map.class, OBJECT)
+        .put(String.class, STRING)
+        .put(BytesRef.class, STRING)
+        .put(Character.class, STRING)
+        .build();
 
-    public static DataType<?> guessType(Object value, boolean strict) {
+    public static DataType<?> guessType(Object value) {
         if (value == null) {
             return UNDEFINED;
         } else if (value instanceof Map) {
             return OBJECT;
         } else if (value instanceof List) {
-            return valueFromList((List)value, strict);
+            return valueFromList((List) value);
         } else if (value.getClass().isArray()) {
-            return valueFromList(Arrays.asList((Object[]) value), strict);
-        } else if (!strict && (value instanceof BytesRef || value instanceof String)) {
-            // special treatment for timestamp strings
-            if (TimestampFormat.isDateFormat((
-                    value instanceof BytesRef ? ((BytesRef) value).utf8ToString() : (String) value))) {
-                return TIMESTAMP;
-            } else {
-                return STRING;
-            }
+            return valueFromList(Arrays.asList((Object[]) value));
         }
         return POJO_TYPE_MAPPING.get(value.getClass());
     }
 
-    private static DataType valueFromList(List<Object> value, boolean strict) {
-        List<DataType> innerTypes = new ArrayList<>(value.size());
-        if (value.isEmpty()) {
-            return new ArrayType(UNDEFINED);
-        }
+    private static DataType valueFromList(List<Object> value) {
         DataType previous = null;
         DataType current = null;
         for (Object o : value) {
             if (o == null) {
                 continue;
             }
-            current = guessType(o, strict);
+            current = guessType(o);
             if (previous != null && !current.equals(previous)) {
                 throw new IllegalArgumentException("Mixed dataTypes inside a list are not supported");
             }
-            innerTypes.add(current);
             previous = current;
         }
-
-        if (innerTypes.isEmpty() || (innerTypes.size() > 0 && current == null)) {
+        if (current == null) {
             return new ArrayType(UNDEFINED);
-        } else {
-            return new ArrayType(current);
         }
+        return new ArrayType(current);
     }
 
     private static final ImmutableMap<String, DataType> staticTypesNameMap = ImmutableMap.<String, DataType>builder()
-            .put(UNDEFINED.getName(), UNDEFINED)
-            .put(BYTE.getName(), BYTE)
-            .put(BOOLEAN.getName(), BOOLEAN)
-            .put(STRING.getName(), STRING)
-            .put(IP.getName(), IP)
-            .put(DOUBLE.getName(), DOUBLE)
-            .put(FLOAT.getName(), FLOAT)
-            .put(SHORT.getName(), SHORT)
-            .put(INTEGER.getName(), INTEGER)
-            .put(LONG.getName(), LONG)
-            .put(TIMESTAMP.getName(), TIMESTAMP)
-            .put(OBJECT.getName(), OBJECT)
-            .put(GEO_POINT.getName(), GEO_POINT)
-            .build();
+        .put(UNDEFINED.getName(), UNDEFINED)
+        .put(BYTE.getName(), BYTE)
+        .put(BOOLEAN.getName(), BOOLEAN)
+        .put(STRING.getName(), STRING)
+        .put(IP.getName(), IP)
+        .put(DOUBLE.getName(), DOUBLE)
+        .put(FLOAT.getName(), FLOAT)
+        .put(SHORT.getName(), SHORT)
+        .put(INTEGER.getName(), INTEGER)
+        .put(LONG.getName(), LONG)
+        .put(TIMESTAMP.getName(), TIMESTAMP)
+        .put(OBJECT.getName(), OBJECT)
+        .put(GEO_POINT.getName(), GEO_POINT)
+        .put(GEO_SHAPE.getName(), GEO_SHAPE)
+        .build();
 
     public static DataType ofName(String name) {
         DataType dataType = staticTypesNameMap.get(name);
@@ -259,19 +238,73 @@ public class DataTypes {
         return dataType;
     }
 
-    public static DataType ofJsonObject(Object type) {
-        if (type instanceof List) {
-            int idCollectionType = (Integer) ((List) type).get(0);
-            int idInnerType = (Integer) ((List) type).get(1);
-            return ((CollectionTypeFactory) TYPE_REGISTRY.get(idCollectionType)).create(ofJsonObject(idInnerType));
-        }
-        assert type instanceof Integer;
-        return TYPE_REGISTRY.get(type).create();
+    private static final ImmutableMap<String, DataType> MAPPING_NAMES_TO_TYPES = ImmutableMap.<String, DataType>builder()
+        .put("date", DataTypes.TIMESTAMP)
+        .put("string", DataTypes.STRING)
+        .put("keyword", DataTypes.STRING)
+        .put("text", DataTypes.STRING)
+        .put("boolean", DataTypes.BOOLEAN)
+        .put("byte", DataTypes.BYTE)
+        .put("short", DataTypes.SHORT)
+        .put("integer", DataTypes.INTEGER)
+        .put("long", DataTypes.LONG)
+        .put("float", DataTypes.FLOAT)
+        .put("double", DataTypes.DOUBLE)
+        .put("ip", DataTypes.IP)
+        .put("geo_point", DataTypes.GEO_POINT)
+        .put("geo_shape", DataTypes.GEO_SHAPE)
+        .put("object", DataTypes.OBJECT)
+        .put("nested", DataTypes.OBJECT).build();
+
+    @Nullable
+    public static DataType ofMappingName(String name) {
+        return MAPPING_NAMES_TO_TYPES.get(name);
     }
 
+    public static DataType ofMappingNameSafe(String name) {
+        DataType dataType = ofMappingName(name);
+        if (dataType == null) {
+            throw new IllegalArgumentException("Cannot find data type of mapping name " + name);
+        }
+        return dataType;
+    }
+
+    public static boolean isPrimitive(DataType type) {
+        return PRIMITIVE_TYPES.contains(type);
+    }
+
+    /**
+     * Register a custom data type to the type registry.
+     *
+     * <p>Note: If registering is done inside a static block, be sure the class is loaded initially.
+     * Otherwise it might not be registered on all nodes.
+     * </p>
+     */
     public static void register(int id, DataTypeFactory dataTypeFactory) {
         if (TYPE_REGISTRY.put(id, dataTypeFactory) != null) {
             throw new IllegalArgumentException("Already got a dataType with id " + id);
-        };
+        }
     }
+
+    public static Streamer<?>[] getStreamers(Collection<? extends DataType> dataTypes) {
+        Streamer<?>[] streamer = new Streamer[dataTypes.size()];
+        int idx = 0;
+        for (DataType dataType : dataTypes) {
+            streamer[idx] = dataType.streamer();
+            idx++;
+        }
+        return streamer;
+    }
+
+    /**
+     * Returns the first data type that is not {@link UndefinedType}, or {@code UNDEFINED} if none found.
+     */
+    public static DataType tryFindNotNullType(Iterable<? extends DataType> dataTypes) {
+        return Iterables.find(dataTypes, input -> input != UNDEFINED, UNDEFINED);
+    }
+
+    public static DataType fromId(Integer id) {
+        return TYPE_REGISTRY.get(id).create();
+    }
+
 }

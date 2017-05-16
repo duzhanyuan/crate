@@ -21,10 +21,10 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLResponse;
+import io.crate.testing.SQLResponse;
+import io.crate.testing.UseJdbc;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 
 import java.nio.file.Paths;
@@ -38,14 +38,8 @@ import static org.hamcrest.core.Is.is;
  * the contract of having the same value of the routing field on only one shard. So in Crate the behaviour is
  * different and is asserted via tests in this class.
  */
+@UseJdbc
 public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTest {
-
-    static {
-        ClassLoader.getSystemClassLoader().setDefaultAssertionStatus(true);
-    }
-
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
 
     @Rule
     public TemporaryFolder folder = new TemporaryFolder();
@@ -53,7 +47,7 @@ public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTe
     @Test
     public void testInsertEmtpyStringRoutingByValue() throws Exception {
         execute("create table t (i int primary key, c string primary key) clustered by (c)");
-        ensureGreen();
+        ensureYellow();
         execute("insert into t (i, c) values (1, '')");
         execute("insert into t (i, c) values (2, '')");
         refresh();
@@ -65,7 +59,7 @@ public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTe
     @Test
     public void testInsertEmtpyStringRoutingByMultiValue() throws Exception {
         execute("create table t (i int primary key, c string primary key) clustered by (c)");
-        ensureGreen();
+        ensureYellow();
         execute("insert into t (i, c) values (1, ''), (2, '')");
         refresh();
         execute("select c, count(*) from t group by c");
@@ -76,9 +70,10 @@ public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTe
     @Test
     public void testInsertEmtpyStringRoutingByArgs() throws Exception {
         execute("create table t (i int primary key, c string primary key) clustered by (c)");
-        ensureGreen();
+        ensureYellow();
         execute("insert into t (i, c) values (?, ?)", new Object[]{1, ""});
-        execute("insert into t (i, c) values (?, ?)", new Object[]{2, ""});;
+        execute("insert into t (i, c) values (?, ?)", new Object[]{2, ""});
+        ;
         refresh();
         execute("select c, count(*) from t group by c");
         assertThat(response.rowCount(), is(1L));
@@ -88,7 +83,7 @@ public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTe
     @Test
     public void testInsertEmtpyStringRoutingByBulkArgs() throws Exception {
         execute("create table t (i int primary key, c string primary key) clustered by (c)");
-        ensureGreen();
+        ensureYellow();
         execute("insert into t (i, c) values (?, ?)", new Object[][]{{1, ""}, {2, ""}});
         refresh();
         execute("select c, count(*) from t group by c");
@@ -100,7 +95,7 @@ public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTe
     public void testInsertEmtpyStringRoutingIsRealtime() throws Exception {
         execute("create table t (i int primary key, c string primary key, a int)" +
                 " clustered by (c) with (refresh_interval=-1)");
-        ensureGreen();
+        ensureYellow();
 
         execute("insert into t (i, c) values (1, '')");
         execute("select i from t where i=1 and c=''");
@@ -113,20 +108,21 @@ public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTe
     }
 
     @Test
+    @UseJdbc(0) // copy has no rowcount
     public void testCopyFromEmptyStringRouting() throws Exception {
         execute("create table t (i int primary key, c string primary key, a int) clustered by (c)");
-        ensureGreen();
+        ensureYellow();
         execute("insert into t (i, c) values (1, ''), (2, '')");
         refresh();
 
-        String uri = Paths.get(folder.getRoot().toURI()).toString();
-        SQLResponse response = execute("copy t to directory ? with(shared=true)", new Object[] { uri });
+        String uri = Paths.get(folder.getRoot().toURI()).toUri().toString();
+        SQLResponse response = execute("copy t to directory ?", new Object[]{uri});
         assertThat(response.rowCount(), is(2L));
 
         execute("delete from t");
         refresh();
 
-        execute("copy t from ? with (shared=true)", new Object[] { uri + "/t_*" });
+        execute("copy t from ? with (shared=true)", new Object[]{uri + "t_*"});
         refresh();
         response = execute("select c, count(*) from t group by c");
         assertThat(response.rowCount(), is(1L));

@@ -21,50 +21,25 @@
 
 package io.crate.planner.node.dml;
 
-import io.crate.analyze.relations.AnalyzedRelationVisitor;
-import io.crate.analyze.relations.PlannedAnalyzedRelation;
-import io.crate.exceptions.ColumnUnknownException;
-import io.crate.metadata.Path;
 import io.crate.planner.Plan;
 import io.crate.planner.PlanVisitor;
-import io.crate.planner.node.dql.DQLPlanNode;
-import io.crate.planner.projection.Projection;
-import io.crate.planner.symbol.Field;
+import io.crate.planner.UnnestablePlan;
 
-import javax.annotation.Nullable;
 import java.util.List;
+import java.util.UUID;
 
-public class Upsert implements PlannedAnalyzedRelation, Plan {
+public class Upsert extends UnnestablePlan {
 
-    private final List<List<DQLPlanNode>> nodes;
+    private final List<Plan> nodes;
+    private final UUID id;
 
-    public Upsert(List<List<DQLPlanNode>> nodes) {
+    public Upsert(List<Plan> nodes, UUID id) {
         this.nodes = nodes;
+        this.id = id;
     }
 
-    public List<List<DQLPlanNode>> nodes() {
+    public List<Plan> nodes() {
         return nodes;
-    }
-
-    @Override
-    public <C, R> R accept(AnalyzedRelationVisitor<C, R> visitor, C context) {
-        return visitor.visitPlanedAnalyzedRelation(this, context);
-    }
-
-    @Nullable
-    @Override
-    public Field getField(Path path) {
-        throw new UnsupportedOperationException("getField is not supported");
-    }
-
-    @Override
-    public Field getWritableField(Path path) throws UnsupportedOperationException, ColumnUnknownException {
-        throw new UnsupportedOperationException("getWritableField is not supported");
-    }
-
-    @Override
-    public List<Field> fields() {
-        throw new UnsupportedOperationException("fields is not supported");
     }
 
     @Override
@@ -73,23 +48,7 @@ public class Upsert implements PlannedAnalyzedRelation, Plan {
     }
 
     @Override
-    public Plan plan() {
-        return this;
+    public UUID jobId() {
+        return id;
     }
-
-    @Override
-    public void addProjection(Projection projection) {
-        throw new UnsupportedOperationException("adding projection not supported");
-    }
-
-    @Override
-    public boolean resultIsDistributed() {
-        throw new UnsupportedOperationException("resultIsDistributed is not supported");
-    }
-
-    @Override
-    public DQLPlanNode resultNode() {
-        throw new UnsupportedOperationException("resultNode is not supported");
-    }
-
 }

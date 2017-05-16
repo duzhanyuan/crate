@@ -21,99 +21,47 @@
 
 package io.crate.operation.scalar;
 
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
-import io.crate.types.ArrayType;
+import com.google.common.collect.ImmutableSet;
+import io.crate.analyze.symbol.Literal;
 import io.crate.types.DataTypes;
-import org.apache.lucene.util.BytesRef;
+import io.crate.types.SetType;
 import org.junit.Test;
 
-import java.util.Arrays;
-import java.util.List;
+import static io.crate.testing.SymbolMatchers.isFunction;
+import static io.crate.testing.SymbolMatchers.isLiteral;
 
-import static io.crate.testing.TestingHelpers.*;
-import static org.hamcrest.Matchers.instanceOf;
-import static org.hamcrest.Matchers.is;
 
 public class SubscriptFunctionTest extends AbstractScalarFunctionsTest {
 
     @Test
     public void testEvaluate() throws Exception {
-        final Literal<Object[]> term = Literal.newLiteral(
-                new BytesRef[]{ new BytesRef("Youri"), new BytesRef("Ruben") },
-                new ArrayType(DataTypes.STRING));
-        final Literal<Integer> termIndex = Literal.newLiteral(1);
-        final BytesRef expected = new BytesRef("Youri");
-
-        List<Symbol> arguments = Arrays.<Symbol>asList(
-                createReference("names", term.valueType()),
-                termIndex
-        );
-        Function function = createFunction(SubscriptFunction.NAME, DataTypes.STRING, arguments);
-        SubscriptFunction subscriptFunction = (SubscriptFunction) functions.get(function.info().ident());
-
-        Input[] args = new Input[2];
-        args[0] = new Input<Object>() {
-            @Override
-            public Object value() {
-                return term.value();
-            }
-        };
-        args[1] = new Input<Object>() {
-            @Override
-            public Object value() {
-                return termIndex.value();
-            }
-        };
-
-        assertEquals(expected, subscriptFunction.evaluate(args));
+        assertNormalize("subscript(['Youri', 'Ruben'], cast(1 as integer))", isLiteral("Youri"));
     }
 
     @Test
     public void testNormalizeSymbol() throws Exception {
-        final Literal<Object[]> term = Literal.newLiteral(
-                new BytesRef[]{ new BytesRef("Youri"), new BytesRef("Ruben") },
-                new ArrayType(DataTypes.STRING));
-        final Literal<Integer> termIndex = Literal.newLiteral(1);
-        final BytesRef expected = new BytesRef("Youri");
-        List<Symbol> arguments = Arrays.<Symbol>asList(
-                term,
-                termIndex
-        );
-        Function function = createFunction(SubscriptFunction.NAME, DataTypes.STRING, arguments);
-        SubscriptFunction subscriptFunction = (SubscriptFunction) functions.get(function.info().ident());
-
-        Symbol result = subscriptFunction.normalizeSymbol(function);
-        assertLiteralSymbol(result, expected.utf8ToString());
-
-        arguments = Arrays.<Symbol>asList(
-                createReference("text", term.valueType()),
-                termIndex
-        );
-        function = createFunction(SubscriptFunction.NAME, DataTypes.STRING, arguments);
-        subscriptFunction = (SubscriptFunction) functions.get(function.info().ident());
-
-        result = subscriptFunction.normalizeSymbol(function);
-        assertThat(result, instanceOf(Function.class));
-        assertThat((Function)result, is(function));
+        assertNormalize("subscript(tags, cast(1 as integer))", isFunction("subscript"));
     }
 
     @Test
     public void testIndexOutOfRange() throws Exception {
-        final Literal<Object[]> term = Literal.newLiteral(
-                new BytesRef[]{ new BytesRef("Youri"), new BytesRef("Ruben") },
-                new ArrayType(DataTypes.STRING));
-        List<Symbol> arguments = Arrays.<Symbol>asList(
-                term,
-                Literal.newLiteral(3)
-        );
-        Function function = createFunction(SubscriptFunction.NAME, DataTypes.STRING, arguments);
-        SubscriptFunction subscriptFunction = (SubscriptFunction) functions.get(function.info().ident());
-
-        Symbol result = subscriptFunction.normalizeSymbol(function);
-        assertThat(result, isLiteral(null, DataTypes.STRING));
+        assertNormalize("subscript(['Youri', 'Ruben'], cast(3 as integer))", isLiteral(null));
     }
 
+    @Test
+    public void testNotRegisteredForSets() throws Exception {
+        expectedException.expect(UnsupportedOperationException.class);
+        expectedException.expectMessage("unknown function: subscript(long_set, integer)");
+        assertEvaluate("subscript(long_set, a)", 3L,
+            Literal.of(ImmutableSet.of(3L, 7L), new SetType(DataTypes.LONG)),
+            Literal.of(DataTypes.INTEGER, 1)
+        );
+    }
+
+    @Test
+    public void testIndexExpressionIsNotInteger() throws Exception {
+        expectedException.expect(UnsupportedOperationException.class);
+        expectedException.expectMessage("unknown function: subscript(string_array, long)");
+        assertNormalize("subscript(['Youri', 'Ruben'], 1 + 1)", isLiteral("Ruben"));
+    }
 }

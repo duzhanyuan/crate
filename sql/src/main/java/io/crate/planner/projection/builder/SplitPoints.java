@@ -22,42 +22,41 @@
 package io.crate.planner.projection.builder;
 
 import io.crate.analyze.QuerySpec;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Symbol;
 
 import java.util.ArrayList;
 
+
 /**
-* Created by bd on 30.1.15.
-*/
+ * SplitPoints contain a separated representation of aggregations and toCollect (aggregation sources).
+ * They can be created from a QuerySpec which contains aggregations.
+ * <pre>
+ *     Example:
+ *
+ *     Input QuerySpec:
+ *       outputs: [add(sum(coalesce(x, 10)), 10)]
+ *
+ *     SplitPoints:
+ *       aggregations:  [sum(coalesce(x, 10))]
+ *       toCollect:     [coalesce(x, 10)]
+ * </pre>
+ */
 public class SplitPoints {
+
     private final ArrayList<Symbol> toCollect;
     private final ArrayList<Function> aggregates;
-    private final ArrayList<Symbol> leaves;
-    private final QuerySpec querySpec;
 
-    SplitPoints(QuerySpec querySpec) {
+    public static SplitPoints create(QuerySpec querySpec) {
+        SplitPoints splitPoints = new SplitPoints(querySpec);
+        SplitPointVisitor.addAggregatesAndToCollectSymbols(querySpec, splitPoints);
+        return splitPoints;
+    }
+
+    private SplitPoints(QuerySpec querySpec) {
         int estimate = querySpec.outputs().size();
-        this.querySpec = querySpec;
         this.toCollect = new ArrayList<>(estimate);
         this.aggregates = new ArrayList<>(estimate);
-        this.leaves = new ArrayList<>(estimate);
-    }
-
-    void allocateCollectSymbol(Symbol symbol){
-        if (!toCollect.contains(symbol)) {
-            toCollect.add(symbol);
-        }
-    }
-
-    void allocateAggregate(Function aggregate){
-        if (!aggregates.contains(aggregate)) {
-            aggregates.add(aggregate);
-        }
-    }
-
-    public QuerySpec querySpec() {
-        return querySpec;
     }
 
     public ArrayList<Symbol> toCollect() {
@@ -66,9 +65,5 @@ public class SplitPoints {
 
     public ArrayList<Function> aggregates() {
         return aggregates;
-    }
-
-    public ArrayList<Symbol> leaves() {
-        return leaves;
     }
 }

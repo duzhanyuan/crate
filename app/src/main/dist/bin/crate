@@ -6,6 +6,7 @@
 #   -v: print crate version to stdout
 #   -h: print usage information
 #   -D: set a java system property value
+#   -C: set a Crate property value
 #   -X: set a nonstandard java option
 
 # CONTROLLING STARTUP:
@@ -13,7 +14,6 @@
 # This script relies on few environment variables to determine startup
 # behavior, those variables are:
 #
-#   CRATE_CLASSPATH -- A Java classpath containing everything necessary to run.
 #   JAVA_OPTS    -- Additional arguments to the JVM for heap size, etc
 #   CRATE_JAVA_OPTS -- External Java Opts on top of the defaults set
 #
@@ -71,10 +71,6 @@ CRATE_HOME=`dirname "$SCRIPT"`/..
 # make CRATE_HOME absolute
 CRATE_HOME=`cd "$CRATE_HOME"; pwd`
 
-# define crate config file
-CRATE_CONFIG=$CRATE_HOME/config/crate.yml
-
-
 # If an include wasn't specified in the environment, then search for one...
 if [ "x$CRATE_INCLUDE" = "x" ]; then
     # Locations (in order) to use when searching for an include file.
@@ -100,7 +96,7 @@ else
 fi
 
 if [ -z "$CRATE_CLASSPATH" ]; then
-    echo "You must set the CRATE_CLASSPATH var" >&2
+    echo "CRATE_CLASSPATH should've been initialized via crate.in.sh" >&2
     exit 1
 fi
 
@@ -116,21 +112,21 @@ launch_service()
 {
     pidpath=$1
     daemonized=$2
-    props=$3
-    es_parms="-Dcrate"
+    javaProperties=$3
+    props="-Epath.home=$CRATE_HOME $4"
 
     if [ "x$pidpath" != "x" ]; then
-        es_parms="$es_parms -Des.pidfile=$pidpath"
+        props="-Epidfile=$pidpath $props"
     fi
 
     if [ "x$daemonized" = "x" ]; then
-        exec "$JAVA" $JAVA_OPTS $CRATE_JAVA_OPTS $es_parms -Des.path.home="$CRATE_HOME" -Des.config="$CRATE_CONFIG" -cp "$CRATE_CLASSPATH" $props \
-                io.crate.bootstrap.CrateF
+        exec "$JAVA" $JAVA_OPTS $CRATE_JAVA_OPTS $javaProperties -cp "$CRATE_CLASSPATH" \
+             io.crate.bootstrap.CrateDB $props
         execval=$?
     else
         # Startup Crate, background it, and write the pid.
-        exec "$JAVA" $JAVA_OPTS $CRATE_JAVA_OPTS $es_parms -Des.path.home="$CRATE_HOME" -Des.config="$CRATE_CONFIG" -cp "$CRATE_CLASSPATH" $props \
-                    io.crate.bootstrap.Crate <&- &
+        exec "$JAVA" $JAVA_OPTS $CRATE_JAVA_OPTS $javaProperties -cp "$CRATE_CLASSPATH" \
+             io.crate.bootstrap.CrateDB $props -d <&- &
         execval=$?
         [ ! -z "$pidpath" ] && printf '%d' $! > "$pidpath"
     fi
@@ -138,9 +134,15 @@ launch_service()
     return $execval
 }
 
+args=$@
+if test "${args#*"-Des."}" != "$args"; then
+    echo "Support for defining Crate specific settings with the -D option and the es prefix has been dropped."
+    echo "Please use the -C option to configure Crate.\n"
+    exit 1
+fi
+
 # Parse any command line options.
-args=`getopt vdhp:D:X: "$@"`
-eval set -- "$args"
+eval set -- "`getopt vdhp:D:X:C: $args`"
 
 while true; do
     case $1 in
@@ -173,7 +175,11 @@ while true; do
             exit 0
         ;;
         -D)
-            properties="$properties -D$2"
+            javaProperties="$javaProperties -D$2"
+            shift 2
+        ;;
+        -C)
+            properties="$properties -E$2"
             shift 2
         ;;
         -X)
@@ -192,6 +198,6 @@ while true; do
 done
 
 # Start up the service
-launch_service "$pidfile" "$daemonized" "$properties"
+launch_service "$pidfile" "$daemonized" "$javaProperties" "$properties"
 
 exit $?

@@ -21,52 +21,49 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.ReferenceInfos;
+import io.crate.metadata.Schemas;
 import io.crate.metadata.TableIdent;
-import io.crate.sql.tree.Assignment;
-import io.crate.sql.tree.DefaultTraversalVisitor;
-import io.crate.sql.tree.Node;
+import io.crate.metadata.doc.DocTableInfo;
+import io.crate.metadata.table.Operation;
+import io.crate.operation.user.User;
 import io.crate.sql.tree.RefreshStatement;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
+import io.crate.sql.tree.Table;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
-@Singleton
-public class RefreshTableAnalyzer extends DefaultTraversalVisitor<RefreshTableAnalyzedStatement, Analysis> {
+class RefreshTableAnalyzer {
 
-    private final ReferenceInfos referenceInfos;
+    private final Schemas schemas;
 
-    @Inject
-    public RefreshTableAnalyzer(ReferenceInfos referenceInfos) {
-        this.referenceInfos = referenceInfos;
+    RefreshTableAnalyzer(Schemas schemas) {
+        this.schemas = schemas;
     }
 
-    public RefreshTableAnalyzedStatement analyze(Node node, Analysis analysis) {
-        analysis.expectsAffectedRows(true);
-        return super.process(node, analysis);
+    public RefreshTableAnalyzedStatement analyze(RefreshStatement refreshStatement, Analysis analysis) {
+        return new RefreshTableAnalyzedStatement(getIndexNames(
+            refreshStatement.tables(),
+            schemas,
+            analysis.parameterContext(),
+            analysis.sessionContext().defaultSchema(),
+            analysis.sessionContext().user()
+        ));
     }
 
-    @Override
-    public RefreshTableAnalyzedStatement visitRefreshStatement(RefreshStatement node, Analysis analysis) {
-        RefreshTableAnalyzedStatement statement = new RefreshTableAnalyzedStatement(referenceInfos);
-        statement.table(TableIdent.of(node.table(), analysis.parameterContext().defaultSchema()));
-        if (!node.table().partitionProperties().isEmpty()) {
-            setParitionIdent(node.table().partitionProperties(), statement, analysis.parameterContext());
+    private static Set<String> getIndexNames(List<Table> tables,
+                                             Schemas schemas,
+                                             ParameterContext parameterContext,
+                                             String defaultSchema,
+                                             User user) {
+        Set<String> indexNames = new HashSet<>(tables.size());
+        for (Table nodeTable : tables) {
+            DocTableInfo tableInfo = schemas.getTableInfo(
+                TableIdent.of(nodeTable, defaultSchema), Operation.REFRESH, user);
+            indexNames.addAll(TableAnalyzer.filteredIndices(
+                    parameterContext,
+                    nodeTable.partitionProperties(), tableInfo));
         }
-
-        return statement;
+        return indexNames;
     }
-
-    private void setParitionIdent(List<Assignment> properties,
-                                  RefreshTableAnalyzedStatement statement,
-                                  ParameterContext parameterContext) {
-        String partitionIdent = PartitionPropertiesAnalyzer.toPartitionIdent(
-                statement.table(),
-                properties,
-                parameterContext.parameters()
-        );
-        statement.partitionIdent(partitionIdent);
-    }
-
 }

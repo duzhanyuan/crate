@@ -21,12 +21,12 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.ReferenceInfos;
+import io.crate.metadata.blob.BlobTableInfo;
 
-public class DropBlobTableAnalyzedStatement extends AbstractDropTableAnalyzedStatement {
+public class DropBlobTableAnalyzedStatement extends AbstractDropTableAnalyzedStatement<BlobTableInfo> {
 
-    public DropBlobTableAnalyzedStatement(ReferenceInfos referenceInfos, boolean ignoreNonExistentTable) {
-        super(referenceInfos, ignoreNonExistentTable);
+    public DropBlobTableAnalyzedStatement(BlobTableInfo tableInfo, boolean isNoop, boolean ignoreNonExistentTable) {
+        super(tableInfo, isNoop, ignoreNonExistentTable);
     }
 
     @Override

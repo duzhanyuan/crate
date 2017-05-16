@@ -22,14 +22,11 @@
 package io.crate.operation.aggregation.impl;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.metadata.FunctionIdent;
 import io.crate.operation.aggregation.AggregationTest;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.apache.lucene.util.BytesRef;
 import org.junit.Test;
-
-import static org.junit.Assert.assertEquals;
 
 public class MaximumAggregationTest extends AggregationTest {
 
@@ -39,8 +36,7 @@ public class MaximumAggregationTest extends AggregationTest {
 
     @Test
     public void testReturnType() throws Exception {
-        FunctionIdent fi = new FunctionIdent("max", ImmutableList.<DataType>of(DataTypes.INTEGER));
-        assertEquals(DataTypes.INTEGER, functions.get(fi).info().returnType());
+        assertEquals(DataTypes.INTEGER, functions.getBuiltin("max", ImmutableList.of(DataTypes.INTEGER)).info().returnType());
     }
 
     @Test
@@ -81,7 +77,7 @@ public class MaximumAggregationTest extends AggregationTest {
     @Test
     public void testString() throws Exception {
         Object[][] result = executeAggregation(DataTypes.STRING,
-                new Object[][]{{new BytesRef("Youri")}, {new BytesRef("Ruben")}});
+            new Object[][]{{new BytesRef("Youri")}, {new BytesRef("Ruben")}});
 
         assertEquals(new BytesRef("Youri"), result[0][0]);
     }

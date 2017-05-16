@@ -21,31 +21,13 @@
 
 package io.crate.operation.aggregation.impl;
 
-import io.crate.metadata.DynamicFunctionResolver;
-import io.crate.metadata.FunctionIdent;
-import io.crate.metadata.FunctionImplementation;
+import io.crate.operation.AbstractFunctionModule;
 import io.crate.operation.aggregation.AggregationFunction;
-import org.elasticsearch.common.inject.AbstractModule;
-import org.elasticsearch.common.inject.multibindings.MapBinder;
 
-public class AggregationImplModule extends AbstractModule {
-
-    private MapBinder<FunctionIdent, FunctionImplementation> functionBinder;
-    private MapBinder<String, DynamicFunctionResolver> resolverBinder;
-
-    public void register(AggregationFunction impl) {
-        functionBinder.addBinding(impl.info().ident()).toInstance(impl);
-    }
-
-    public void register(String name, DynamicFunctionResolver dynamicFunctionResolver) {
-        resolverBinder.addBinding(name).toInstance(dynamicFunctionResolver);
-    }
+public class AggregationImplModule extends AbstractFunctionModule<AggregationFunction> {
 
     @Override
-    protected void configure() {
-        functionBinder = MapBinder.newMapBinder(binder(), FunctionIdent.class, FunctionImplementation.class);
-        resolverBinder = MapBinder.newMapBinder(binder(), String.class, DynamicFunctionResolver.class);
-
+    public void configureFunctions() {
         AverageAggregation.register(this);
         MinimumAggregation.register(this);
         MaximumAggregation.register(this);
@@ -53,6 +35,7 @@ public class AggregationImplModule extends AbstractModule {
         SumAggregation.register(this);
         CountAggregation.register(this);
         CollectSetAggregation.register(this);
+        PercentileAggregation.register(this);
 
         VarianceAggregation.register(this);
         GeometricMeanAggregation.register(this);

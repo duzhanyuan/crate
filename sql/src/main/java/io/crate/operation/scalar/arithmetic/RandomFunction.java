@@ -22,14 +22,14 @@
 package io.crate.operation.scalar.arithmetic;
 
 
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Symbol;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
 import io.crate.metadata.Scalar;
-import io.crate.operation.Input;
+import io.crate.metadata.TransactionContext;
+import io.crate.data.Input;
 import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Symbol;
-import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 
 import java.util.Collections;
@@ -40,20 +40,20 @@ public class RandomFunction extends Scalar<Double, Void> {
     public static final String NAME = "random";
 
     protected final static FunctionInfo info = new FunctionInfo(
-            new FunctionIdent(NAME, Collections.<DataType>emptyList()), DataTypes.DOUBLE,
-            FunctionInfo.Type.SCALAR, false);
+        new FunctionIdent(NAME, Collections.emptyList()), DataTypes.DOUBLE,
+        FunctionInfo.Type.SCALAR, FunctionInfo.NO_FEATURES);
 
     private final Random random = new Random();
 
-    public static void register(ScalarFunctionModule module){
+    public static void register(ScalarFunctionModule module) {
         module.register(new RandomFunction());
     }
 
     @Override
-    public Symbol normalizeSymbol(Function symbol) {
+    public Symbol normalizeSymbol(Function symbol, TransactionContext transactionContext) {
         /* There is no evaluation here, so the function is executed
            per row. Else every row would contain the same random value*/
-        assert symbol.arguments().size() == 0;
+        assert symbol.arguments().size() == 0 : "function's number of arguments must be 0";
         return symbol;
     }
 
@@ -65,7 +65,7 @@ public class RandomFunction extends Scalar<Double, Void> {
 
     @Override
     public Double evaluate(Input[] args) {
-        assert args.length == 0;
+        assert args.length == 0 : "number of args must be 0";
         return this.random.nextDouble();
     }
 }

@@ -33,7 +33,8 @@ public class DoubleType extends DataType<Double> implements FixedWidthType, Stre
     public static final DoubleType INSTANCE = new DoubleType();
     public static final int ID = 6;
 
-    private DoubleType() {}
+    private DoubleType() {
+    }
 
     @Override
     public int id() {
@@ -59,17 +60,17 @@ public class DoubleType extends DataType<Double> implements FixedWidthType, Stre
             return (Double) value;
         }
         if (value instanceof String) {
-            return Double.valueOf((String)value);
+            return Double.valueOf((String) value);
         }
         if (value instanceof BytesRef) {
-            return Double.valueOf(((BytesRef)value).utf8ToString());
+            return Double.valueOf(((BytesRef) value).utf8ToString());
         }
-        return ((Number)value).doubleValue();
+        return ((Number) value).doubleValue();
     }
 
     @Override
     public int compareValueTo(Double val1, Double val2) {
-        return Double.compare(val1, val2);
+        return nullSafeCompareValueTo(val1, val2, Double::compare);
     }
 
     @Override

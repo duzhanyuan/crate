@@ -21,23 +21,29 @@
 
 package io.crate.operation.projectors;
 
-import io.crate.core.collections.Buckets;
-import io.crate.core.collections.Row;
+import com.google.common.base.MoreObjects;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.data.BatchIterator;
+import io.crate.data.Input;
+import io.crate.data.Projector;
+import io.crate.data.Row;
+import io.crate.executor.transport.ShardUpsertRequest;
 import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.TableIdent;
-import io.crate.operation.Input;
+import io.crate.metadata.Functions;
+import io.crate.metadata.Reference;
 import io.crate.operation.collect.CollectExpression;
-import io.crate.planner.symbol.InputColumn;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
+import io.crate.operation.collect.RowShardResolver;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.action.admin.indices.create.TransportCreateIndexAction;
+import org.elasticsearch.action.admin.indices.create.TransportBulkCreateIndicesAction;
+import org.elasticsearch.action.bulk.BulkRequestExecutor;
 import org.elasticsearch.action.bulk.BulkRetryCoordinatorPool;
+import org.elasticsearch.action.bulk.BulkShardProcessor;
 import org.elasticsearch.client.Requests;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
-import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.BigArrays;
@@ -46,120 +52,95 @@ import org.elasticsearch.common.xcontent.support.XContentMapValues;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.function.Supplier;
 
-public class IndexWriterProjector extends AbstractIndexWriterProjector {
+public class IndexWriterProjector implements Projector {
 
-    private final SourceInjectorRow row;
-
-    private static final class SourceInjectorRow implements Row {
-
-        private final int idx;
-        private final BytesRefGenerator generator;
-        Row delegate = null;
-
-        private SourceInjectorRow(int idx, BytesRefGenerator generator) {
-            this.idx = idx;
-            this.generator = generator;
-        }
-
-
-        @Override
-        public int size() {
-            return delegate.size();
-        }
-
-        @Override
-        public Object get(int index) {
-            if (index == idx){
-                return generator.generateSource();
-            }
-            return delegate.get(index);
-        }
-
-        @Override
-        public Object[] materialize() {
-            return Buckets.materialize(this);
-        }
-    }
-
+    private final Input<BytesRef> sourceInput;
+    private final RowShardResolver rowShardResolver;
+    private final Supplier<String> indexNameResolver;
+    private final Iterable<? extends CollectExpression<Row, ?>> collectExpressions;
+    private final BulkShardProcessor<ShardUpsertRequest> bulkShardProcessor;
 
     public IndexWriterProjector(ClusterService clusterService,
+                                Functions functions,
+                                IndexNameExpressionResolver indexNameExpressionResolver,
                                 Settings settings,
-                                TransportCreateIndexAction transportCreateIndexAction,
+                                TransportBulkCreateIndicesAction transportBulkCreateIndicesAction,
+                                BulkRequestExecutor<ShardUpsertRequest> shardUpsertAction,
+                                Supplier<String> indexNameResolver,
                                 BulkRetryCoordinatorPool bulkRetryCoordinatorPool,
-                                TableIdent tableIdent,
-                                @Nullable String partitionIdent,
                                 Reference rawSourceReference,
                                 List<ColumnIdent> primaryKeyIdents,
-                                List<Symbol> primaryKeySymbols,
-                                List<Input<?>> partitionedByInputs,
+                                List<? extends Symbol> primaryKeySymbols,
                                 @Nullable Symbol routingSymbol,
+                                ColumnIdent clusteredByColumn,
                                 Input<?> sourceInput,
-                                InputColumn sourceInputColumn,
-                                CollectExpression<?>[] collectExpressions,
+                                Iterable<? extends CollectExpression<Row, ?>> collectExpressions,
                                 @Nullable Integer bulkActions,
                                 @Nullable String[] includes,
                                 @Nullable String[] excludes,
                                 boolean autoCreateIndices,
-                                boolean overwriteDuplicates) {
-        super(bulkRetryCoordinatorPool, tableIdent, partitionIdent, primaryKeyIdents, primaryKeySymbols, partitionedByInputs,
-                routingSymbol, collectExpressions);
-
+                                boolean overwriteDuplicates,
+                                UUID jobId) {
+        this.indexNameResolver = indexNameResolver;
+        this.collectExpressions = collectExpressions;
         if (includes == null && excludes == null) {
             //noinspection unchecked
-            row = new SourceInjectorRow(sourceInputColumn.index(), new BytesRefInput((Input<BytesRef>) sourceInput));
+            this.sourceInput = (Input<BytesRef>) sourceInput;
         } else {
             //noinspection unchecked
-            row = new SourceInjectorRow(sourceInputColumn.index(),
-                    new MapInput((Input<Map<String, Object>>) sourceInput, includes, excludes));
+            this.sourceInput =
+                new MapInput((Input<Map<String, Object>>) sourceInput, includes, excludes);
         }
+        rowShardResolver = new RowShardResolver(functions, primaryKeyIdents, primaryKeySymbols, clusteredByColumn, routingSymbol);
+        ShardUpsertRequest.Builder builder = new ShardUpsertRequest.Builder(
+            BulkShardProcessor.BULK_REQUEST_TIMEOUT_SETTING.setting().get(settings),
+            overwriteDuplicates,
+            true,
+            null,
+            new Reference[]{rawSourceReference},
+            jobId,
+            false);
 
-        Map<Reference, Symbol> insertAssignments = new HashMap<>(1);
-        insertAssignments.put(rawSourceReference, sourceInputColumn);
+        bulkShardProcessor = new BulkShardProcessor<>(
+            clusterService,
+            transportBulkCreateIndicesAction,
+            indexNameExpressionResolver,
+            settings,
+            bulkRetryCoordinatorPool,
+            autoCreateIndices,
+            MoreObjects.firstNonNull(bulkActions, 100),
+            builder,
+            shardUpsertAction,
+            jobId
+        );
+    }
 
-        createBulkShardProcessor(
-                clusterService,
-                settings,
-                transportCreateIndexAction,
-                bulkActions,
-                autoCreateIndices,
-                overwriteDuplicates,
-                null,
-                insertAssignments);
+
+    @Override
+    public BatchIterator apply(BatchIterator batchIterator) {
+        Supplier<ShardUpsertRequest.Item> updateItemSupplier = () -> new ShardUpsertRequest.Item(
+            rowShardResolver.id(), null, new Object[]{sourceInput.value()}, null);
+
+        return IndexWriterCountBatchIterator.newIndexInstance(batchIterator, indexNameResolver,
+            collectExpressions, rowShardResolver, bulkShardProcessor, updateItemSupplier);
     }
 
     @Override
-    protected Row updateRow(Row row) {
-        this.row.delegate = row;
-        return this.row;
+    public boolean providesIndependentScroll() {
+        return false;
     }
 
-    private interface BytesRefGenerator {
-        public BytesRef generateSource();
-    }
-
-    private static class BytesRefInput implements BytesRefGenerator {
-        private final Input<BytesRef> input;
-
-        private BytesRefInput(Input<BytesRef> input) {
-            this.input = input;
-        }
-
-        @Override
-        public BytesRef generateSource() {
-            return input.value();
-        }
-    }
-
-    private static class MapInput implements BytesRefGenerator {
+    private static class MapInput implements Input<BytesRef> {
 
         private final Input<Map<String, Object>> sourceInput;
         private final String[] includes;
         private final String[] excludes;
-        private static final ESLogger logger = Loggers.getLogger(MapInput.class);
+        private static final Logger logger = Loggers.getLogger(MapInput.class);
         private int lastSourceSize;
 
         private MapInput(Input<Map<String, Object>> sourceInput, String[] includes, String[] excludes) {
@@ -170,7 +151,7 @@ public class IndexWriterProjector extends AbstractIndexWriterProjector {
         }
 
         @Override
-        public BytesRef generateSource() {
+        public BytesRef value() {
             Map<String, Object> value = sourceInput.value();
             if (value == null) {
                 return null;
@@ -178,7 +159,7 @@ public class IndexWriterProjector extends AbstractIndexWriterProjector {
             Map<String, Object> filteredMap = XContentMapValues.filter(value, includes, excludes);
             try {
                 BytesReference bytes = new XContentBuilder(Requests.INDEX_CONTENT_TYPE.xContent(),
-                        new BytesStreamOutput(lastSourceSize)).map(filteredMap).bytes();
+                    new BytesStreamOutput(lastSourceSize)).map(filteredMap).bytes();
                 lastSourceSize = bytes.length();
                 return bytes.toBytesRef();
             } catch (IOException ex) {

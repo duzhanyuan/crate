@@ -22,17 +22,16 @@
 package io.crate.sql.tree;
 
 import com.google.common.base.Objects;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 
+import java.util.Optional;
+
 public class SingleColumn
-        extends SelectItem
-{
+    extends SelectItem {
     private Optional<String> alias;
     private Expression expression;
 
-    public SingleColumn(Expression expression, Optional<String> alias)
-    {
+    public SingleColumn(Expression expression, Optional<String> alias) {
         Preconditions.checkNotNull(expression, "expression is null");
         Preconditions.checkNotNull(alias, "alias is null");
 
@@ -40,38 +39,20 @@ public class SingleColumn
         this.alias = alias;
     }
 
-    public SingleColumn(Expression expression, String alias)
-    {
-        this(expression, Optional.of(alias));
+    public SingleColumn(Expression expression) {
+        this(expression, Optional.empty());
     }
 
-    public SingleColumn(Expression expression)
-    {
-        this(expression, Optional.<String>absent());
-    }
-
-    public Optional<String> getAlias()
-    {
+    public Optional<String> getAlias() {
         return alias;
     }
 
-    public void setAlias(String alias) {
-        Preconditions.checkNotNull(alias);
-        this.alias = Optional.of(alias);
-    }
-
-    public Expression getExpression()
-    {
+    public Expression getExpression() {
         return expression;
     }
 
-    public void setExpression(Expression expression) {
-        this.expression = expression;
-    }
-
     @Override
-    public boolean equals(Object obj)
-    {
+    public boolean equals(Object obj) {
         if (this == obj) {
             return true;
         }
@@ -83,13 +64,11 @@ public class SingleColumn
     }
 
     @Override
-    public int hashCode()
-    {
+    public int hashCode() {
         return Objects.hashCode(alias, expression);
     }
 
-    public String toString()
-    {
+    public String toString() {
         if (alias.isPresent()) {
             return expression.toString() + " " + alias.get();
         }
@@ -98,8 +77,7 @@ public class SingleColumn
     }
 
     @Override
-    public <R, C> R accept(AstVisitor<R, C> visitor, C context)
-    {
+    public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitSingleColumn(this, context);
     }
 }

@@ -25,18 +25,17 @@ import io.crate.metadata.FunctionImplementation;
 import io.crate.metadata.FunctionInfo;
 import io.crate.operation.operator.LikeOperator;
 import io.crate.operation.operator.OperatorModule;
-import io.crate.planner.symbol.Function;
 
 import java.util.regex.Pattern;
 
-public class AnyNotLikeOperator extends AbstractAnyLikeOperator<AnyNotLikeOperator> {
+public class AnyNotLikeOperator extends AbstractAnyLikeOperator {
 
     public static final String NAME = AnyOperator.OPERATOR_PREFIX + "not_like";
 
     static class AnyNotLikeResolver extends AnyResolver {
 
         @Override
-        public FunctionImplementation<Function> newInstance(FunctionInfo info) {
+        public FunctionImplementation newInstance(FunctionInfo info) {
             return new AnyNotLikeOperator(info);
         }
 
@@ -50,15 +49,15 @@ public class AnyNotLikeOperator extends AbstractAnyLikeOperator<AnyNotLikeOperat
         operatorModule.registerDynamicOperatorFunction(NAME, new AnyNotLikeResolver());
     }
 
-    public AnyNotLikeOperator(FunctionInfo info) {
+    AnyNotLikeOperator(FunctionInfo info) {
         super(info);
     }
 
     @Override
     protected boolean matches(String expression, String pattern) {
         return !Pattern.matches(
-                LikeOperator.patternToRegex(pattern, LikeOperator.DEFAULT_ESCAPE, true),
-                expression
+            LikeOperator.patternToRegex(pattern, LikeOperator.DEFAULT_ESCAPE, true),
+            expression
         );
     }
 }

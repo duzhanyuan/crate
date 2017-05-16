@@ -21,21 +21,37 @@
 
 package io.crate.operation.projectors;
 
-import com.carrotsearch.hppc.IntObjectOpenHashMap;
-import com.google.common.base.Optional;
+import com.google.common.collect.Iterables;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.EvaluatingNormalizer;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.Symbols;
+import io.crate.analyze.symbol.ValueSymbolVisitor;
 import io.crate.breaker.RamAccountingContext;
+import io.crate.data.Input;
+import io.crate.data.Projector;
+import io.crate.data.Row;
+import io.crate.executor.transport.ShardDeleteRequest;
+import io.crate.executor.transport.ShardUpsertRequest;
 import io.crate.executor.transport.TransportActionProvider;
-import io.crate.metadata.ColumnIdent;
-import io.crate.operation.ImplementationSymbolVisitor;
-import io.crate.operation.Input;
+import io.crate.metadata.*;
+import io.crate.operation.AggregationContext;
+import io.crate.operation.InputFactory;
+import io.crate.operation.RowFilter;
 import io.crate.operation.collect.CollectExpression;
-import io.crate.planner.consumer.OrderByPositionVisitor;
+import io.crate.operation.projectors.fetch.FetchProjector;
+import io.crate.operation.projectors.fetch.FetchProjectorContext;
+import io.crate.operation.projectors.fetch.TransportFetchOperation;
+import io.crate.operation.projectors.sorting.OrderingByPosition;
+import io.crate.operation.reference.sys.RowContextReferenceResolver;
+import io.crate.operation.reference.sys.SysRowUpdater;
 import io.crate.planner.projection.*;
-import io.crate.planner.symbol.*;
 import io.crate.types.StringType;
 import org.elasticsearch.action.bulk.BulkRetryCoordinatorPool;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.action.bulk.BulkShardProcessor;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -43,362 +59,437 @@ import org.elasticsearch.threadpool.ThreadPool;
 import javax.annotation.Nullable;
 import java.util.*;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 
-public class ProjectionToProjectorVisitor extends ProjectionVisitor<ProjectionToProjectorVisitor.Context, Projector> {
+public class ProjectionToProjectorVisitor
+    extends ProjectionVisitor<ProjectionToProjectorVisitor.Context, Projector> implements ProjectorFactory {
 
     private final ClusterService clusterService;
-    private ThreadPool threadPool;
+    private final Functions functions;
+    private final IndexNameExpressionResolver indexNameExpressionResolver;
+    private final ThreadPool threadPool;
     private final Settings settings;
     private final TransportActionProvider transportActionProvider;
     private final BulkRetryCoordinatorPool bulkRetryCoordinatorPool;
-    private final ImplementationSymbolVisitor symbolVisitor;
+    private final InputFactory inputFactory;
     private final EvaluatingNormalizer normalizer;
+    private final Function<TableIdent, SysRowUpdater<?>> sysUpdaterGetter;
     @Nullable
     private final ShardId shardId;
-    @Nullable
 
     public ProjectionToProjectorVisitor(ClusterService clusterService,
+                                        Functions functions,
+                                        IndexNameExpressionResolver indexNameExpressionResolver,
                                         ThreadPool threadPool,
                                         Settings settings,
                                         TransportActionProvider transportActionProvider,
                                         BulkRetryCoordinatorPool bulkRetryCoordinatorPool,
-                                        ImplementationSymbolVisitor symbolVisitor,
+                                        InputFactory inputFactory,
                                         EvaluatingNormalizer normalizer,
+                                        Function<TableIdent, SysRowUpdater<?>> sysUpdaterGetter,
                                         @Nullable ShardId shardId) {
         this.clusterService = clusterService;
+        this.functions = functions;
+        this.indexNameExpressionResolver = indexNameExpressionResolver;
         this.threadPool = threadPool;
         this.settings = settings;
         this.transportActionProvider = transportActionProvider;
         this.bulkRetryCoordinatorPool = bulkRetryCoordinatorPool;
-        this.symbolVisitor = symbolVisitor;
+        this.inputFactory = inputFactory;
         this.normalizer = normalizer;
+        this.sysUpdaterGetter = sysUpdaterGetter;
         this.shardId = shardId;
     }
 
     public ProjectionToProjectorVisitor(ClusterService clusterService,
+                                        Functions functions,
+                                        IndexNameExpressionResolver indexNameExpressionResolver,
                                         ThreadPool threadPool,
                                         Settings settings,
                                         TransportActionProvider transportActionProvider,
                                         BulkRetryCoordinatorPool bulkRetryCoordinatorPool,
-                                        ImplementationSymbolVisitor symbolVisitor,
-                                        EvaluatingNormalizer normalizer) {
-        this(clusterService, threadPool, settings, transportActionProvider, bulkRetryCoordinatorPool, symbolVisitor, normalizer, null);
-    }
-
-    public ProjectionToProjectorVisitor(ClusterService clusterService,
-                                        ThreadPool threadPool,
-                                        Settings settings,
-                                        TransportActionProvider transportActionProvider,
-                                        BulkRetryCoordinatorPool bulkRetryCoordinatorPool,
-                                        ImplementationSymbolVisitor symbolVisitor) {
-        this(clusterService, threadPool, settings, transportActionProvider, bulkRetryCoordinatorPool, symbolVisitor,
-                new EvaluatingNormalizer(
-                        symbolVisitor.functions(),
-                        symbolVisitor.rowGranularity(),
-                        symbolVisitor.referenceResolver())
+                                        InputFactory inputFactory,
+                                        EvaluatingNormalizer normalizer,
+                                        Function<TableIdent, SysRowUpdater<?>> sysUpdaterGetter) {
+        this(clusterService,
+            functions,
+            indexNameExpressionResolver,
+            threadPool,
+            settings,
+            transportActionProvider,
+            bulkRetryCoordinatorPool,
+            inputFactory,
+            normalizer,
+            sysUpdaterGetter,
+            null
         );
     }
 
-    public Projector process(Projection projection, RamAccountingContext ramAccountingContext) {
-        return super.process(projection, new Context(ramAccountingContext));
-    }
+    @Override
+    public Projector visitOrderedTopN(OrderedTopNProjection projection, Context context) {
+        /* OrderBy symbols are added to the rows to enable sorting on them post-collect. E.g.:
+         *
+         * outputs: [x]
+         * orderBy: [y]
+         *
+         * topLevelInputs: [x, y]
+         *                    /
+         * orderByIndices: [1]
+         */
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForInputColumns();
+        ctx.add(projection.outputs());
+        ctx.add(projection.orderBy());
 
-    public Projector process(Projection projection,
-                             RamAccountingContext ramAccountingContext,
-                             Optional<UUID> jobId) {
-        return super.process(projection, new Context(ramAccountingContext, jobId));
-    }
-
-    public Projector process(Projection projection,
-                             RamAccountingContext ramAccountingContext,
-                             Optional<UUID> jobId,
-                             Optional<IntObjectOpenHashMap<String>> jobSearchContextIdToNode,
-                             Optional<IntObjectOpenHashMap<ShardId>> jobSearchContextIdToShard) {
-        return super.process(projection, new Context(ramAccountingContext, jobId,
-                jobSearchContextIdToNode, jobSearchContextIdToShard));
+        int numOutputs = projection.outputs().size();
+        List<Input<?>> inputs = ctx.topLevelInputs();
+        int[] orderByIndices = new int[inputs.size() - numOutputs];
+        int idx = 0;
+        for (int i = numOutputs; i < inputs.size(); i++) {
+            orderByIndices[idx++] = i;
+        }
+        if (projection.limit() > TopN.NO_LIMIT) {
+            return new SortingTopNProjector(
+                inputs,
+                ctx.expressions(),
+                numOutputs,
+                OrderingByPosition.arrayOrdering(orderByIndices, projection.reverseFlags(), projection.nullsFirst()),
+                projection.limit(),
+                projection.offset()
+            );
+        }
+        return new SortingProjector(
+            inputs,
+            ctx.expressions(),
+            numOutputs,
+            OrderingByPosition.arrayOrdering(orderByIndices, projection.reverseFlags(), projection.nullsFirst()),
+            projection.offset()
+        );
     }
 
     @Override
     public Projector visitTopNProjection(TopNProjection projection, Context context) {
-        Projector projector;
-        List<Input<?>> inputs = new ArrayList<>();
-        List<CollectExpression<?>> collectExpressions = new ArrayList<>();
-
-        ImplementationSymbolVisitor.Context ctx = symbolVisitor.process(projection.outputs());
-        inputs.addAll(ctx.topLevelInputs());
-        collectExpressions.addAll(ctx.collectExpressions());
-
-        if (projection.isOrdered()) {
-            int numOutputs = inputs.size();
-            ImplementationSymbolVisitor.Context orderByCtx = symbolVisitor.process(projection.orderBy());
-
-            // append orderby inputs to row, needed for sorting on them
-            inputs.addAll(orderByCtx.topLevelInputs());
-            collectExpressions.addAll(orderByCtx.collectExpressions());
-
-            int[] orderByIndices = new int[inputs.size() - numOutputs];
-            int idx = 0;
-            for (int i = numOutputs; i < inputs.size(); i++) {
-                orderByIndices[idx++] = i;
-            }
-
-            projector = new SortingTopNProjector(
-                    inputs.toArray(new Input<?>[inputs.size()]),
-                    collectExpressions.toArray(new CollectExpression[collectExpressions.size()]),
-                    numOutputs,
-                    orderByIndices,
-                    projection.reverseFlags(),
-                    projection.nullsFirst(),
-                    projection.limit(),
-                    projection.offset());
-        } else {
-            projector = new SimpleTopNProjector(
-                    inputs,
-                    collectExpressions.toArray(new CollectExpression[collectExpressions.size()]),
-                    projection.limit(),
-                    projection.offset());
-        }
-        return projector;
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForInputColumns(projection.outputs());
+        assert projection.limit() > TopN.NO_LIMIT : "TopNProjection must have a limit";
+        return new SimpleTopNProjector(
+            ctx.topLevelInputs(),
+            ctx.expressions(),
+            projection.limit(),
+            projection.offset());
     }
 
     @Override
-    public Projector visitMergeProjection(MergeProjection projection, Context context) {
-        int[] orderByIndices = OrderByPositionVisitor.orderByPositions(projection.orderBy(),
-                (List<Symbol>)projection.outputs());
-        return new MergeProjector(
-                orderByIndices,
-                projection.reverseFlags(),
-                projection.nullsFirst());
+    public Projector visitEvalProjection(EvalProjection projection, Context context) {
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForInputColumns(projection.outputs());
+        return new InputRowProjector(ctx.topLevelInputs(), ctx.expressions());
     }
 
     @Override
     public Projector visitGroupProjection(GroupProjection projection, Context context) {
-        ImplementationSymbolVisitor.Context symbolContext = symbolVisitor.process(projection.keys());
-        List<Input<?>> keyInputs = symbolContext.topLevelInputs();
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForAggregations();
 
-        for (Aggregation aggregation : projection.values()) {
-            symbolVisitor.process(aggregation, symbolContext);
-        }
+        ctx.add(projection.keys());
+        ctx.add(projection.values());
+
+        List<Input<?>> keyInputs = ctx.topLevelInputs();
         return new GroupingProjector(
-                Symbols.extractTypes(projection.keys()),
-                keyInputs,
-                symbolContext.collectExpressions().toArray(new CollectExpression[symbolContext.collectExpressions().size()]),
-                symbolContext.aggregations(),
-                context.ramAccountingContext
+            Symbols.extractTypes(projection.keys()),
+            keyInputs,
+            Iterables.toArray(ctx.expressions(), CollectExpression.class),
+            projection.mode(),
+            ctx.aggregations().toArray(new AggregationContext[0]),
+            context.ramAccountingContext
         );
+    }
+
+    @Override
+    public Projector visitMergeCountProjection(MergeCountProjection projection, Context context) {
+        return new MergeCountProjector();
     }
 
     @Override
     public Projector visitAggregationProjection(AggregationProjection projection, Context context) {
-        ImplementationSymbolVisitor.Context symbolContext = new ImplementationSymbolVisitor.Context();
-        for (Aggregation aggregation : projection.aggregations()) {
-            symbolVisitor.process(aggregation, symbolContext);
-        }
-        return new AggregationProjector(
-                symbolContext.collectExpressions(),
-                symbolContext.aggregations(),
-                context.ramAccountingContext);
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForAggregations();
+        ctx.add(projection.aggregations());
+        return new AggregationPipe(
+            ctx.expressions(),
+            projection.mode(),
+            ctx.aggregations().toArray(new AggregationContext[0]),
+            context.ramAccountingContext);
     }
 
     @Override
     public Projector visitWriterProjection(WriterProjection projection, Context context) {
-        ImplementationSymbolVisitor.Context symbolContext = new ImplementationSymbolVisitor.Context();
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForInputColumns();
 
         List<Input<?>> inputs = null;
         if (!projection.inputs().isEmpty()) {
-            inputs = new ArrayList<>(projection.inputs().size());
-            for (Symbol symbol : projection.inputs()) {
-                inputs.add(symbolVisitor.process(symbol, symbolContext));
-            }
+            ctx.add(projection.inputs());
+            inputs = ctx.topLevelInputs();
         }
-        Map<ColumnIdent, Object> overwrites = symbolMapToObject(projection.overwrites(), symbolContext);
+        Map<ColumnIdent, Object> overwrites = symbolMapToObject(projection.overwrites(), ctx, context.transactionContext);
 
-        projection = projection.normalize(normalizer);
+        projection = projection.normalize(normalizer, context.transactionContext);
         String uri = ValueSymbolVisitor.STRING.process(projection.uri());
-        if (projection.isDirectoryUri()) {
-            StringBuilder sb = new StringBuilder(uri);
-            Symbol resolvedFileName = normalizer.normalize(WriterProjection.DIRECTORY_TO_FILENAME);
-            assert resolvedFileName instanceof Literal;
-            assert resolvedFileName.valueType() == StringType.INSTANCE;
-            String fileName = ValueSymbolVisitor.STRING.process(resolvedFileName);
-            if (!uri.endsWith("/")) {
-                sb.append("/");
-            }
-            sb.append(fileName);
-            if (projection.settings().get("compression", "").equalsIgnoreCase("gzip")) {
-                sb.append(".gz");
-            }
-            uri = sb.toString();
+        assert uri != null : "URI must not be null";
+
+        StringBuilder sb = new StringBuilder(uri);
+        Symbol resolvedFileName = normalizer.normalize(WriterProjection.DIRECTORY_TO_FILENAME, context.transactionContext);
+        assert resolvedFileName instanceof Literal : "resolvedFileName must be a Literal, but is: " + resolvedFileName;
+        assert resolvedFileName.valueType() == StringType.INSTANCE :
+            "resolvedFileName.valueType() must be " + StringType.INSTANCE;
+        String fileName = ValueSymbolVisitor.STRING.process(resolvedFileName);
+        if (!uri.endsWith("/")) {
+            sb.append("/");
         }
-        return new WriterProjector(
-                ((ThreadPoolExecutor) threadPool.generic()),
-                uri,
-                projection.settings(),
-                inputs,
-                symbolContext.collectExpressions(),
-                overwrites
+        sb.append(fileName);
+        if (projection.compressionType() == WriterProjection.CompressionType.GZIP) {
+            sb.append(".gz");
+        }
+        uri = sb.toString();
+
+        return new FileWriterProjector(
+            ((ThreadPoolExecutor) threadPool.generic()),
+            uri,
+            projection.compressionType(),
+            inputs,
+            ctx.expressions(),
+            overwrites,
+            projection.outputNames(),
+            projection.outputFormat()
         );
     }
 
-    protected Map<ColumnIdent, Object> symbolMapToObject(Map<ColumnIdent, Symbol> symbolMap,
-                                                         ImplementationSymbolVisitor.Context symbolContext) {
+    private Map<ColumnIdent, Object> symbolMapToObject(Map<ColumnIdent, Symbol> symbolMap,
+                                                       InputFactory.Context symbolContext,
+                                                       TransactionContext transactionContext) {
         Map<ColumnIdent, Object> objectMap = new HashMap<>(symbolMap.size());
         for (Map.Entry<ColumnIdent, Symbol> entry : symbolMap.entrySet()) {
+            Symbol symbol = entry.getValue();
+            assert symbol != null : "symbol must not be null";
             objectMap.put(
-                    entry.getKey(),
-                    symbolVisitor.process(normalizer.normalize(entry.getValue()), symbolContext).value()
+                entry.getKey(),
+                symbolContext.add(normalizer.normalize(symbol, transactionContext)).value()
             );
         }
         return objectMap;
     }
 
+    @Override
     public Projector visitSourceIndexWriterProjection(SourceIndexWriterProjection projection, Context context) {
-        ImplementationSymbolVisitor.Context symbolContext = new ImplementationSymbolVisitor.Context();
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForInputColumns();
         List<Input<?>> partitionedByInputs = new ArrayList<>(projection.partitionedBySymbols().size());
         for (Symbol partitionedBySymbol : projection.partitionedBySymbols()) {
-            partitionedByInputs.add(symbolVisitor.process(partitionedBySymbol, symbolContext));
+            partitionedByInputs.add(ctx.add(partitionedBySymbol));
         }
-        Input<?> sourceInput = symbolVisitor.process(projection.rawSource(), symbolContext);
+        Input<?> sourceInput = ctx.add(projection.rawSource());
+        Supplier<String> indexNameResolver =
+            IndexNameResolver.create(projection.tableIdent(), projection.partitionIdent(), partitionedByInputs);
         return new IndexWriterProjector(
-                clusterService,
-                settings,
-                transportActionProvider.transportCreateIndexAction(),
-                bulkRetryCoordinatorPool,
-                projection.tableIdent(),
-                projection.partitionIdent(),
-                projection.rawSourceReference(),
-                projection.primaryKeys(),
-                projection.ids(),
-                partitionedByInputs,
-                projection.clusteredBy(),
-                sourceInput,
-                projection.rawSource(),
-                symbolContext.collectExpressions().toArray(new CollectExpression[symbolContext.collectExpressions().size()]),
-                projection.bulkActions(),
-                projection.includes(),
-                projection.excludes(),
-                projection.autoCreateIndices(),
-                projection.overwriteDuplicates()
+            clusterService,
+            functions,
+            indexNameExpressionResolver,
+            clusterService.state().metaData().settings(),
+            transportActionProvider.transportBulkCreateIndicesAction(),
+            transportActionProvider.transportShardUpsertAction()::execute,
+            indexNameResolver,
+            bulkRetryCoordinatorPool,
+            projection.rawSourceReference(),
+            projection.primaryKeys(),
+            projection.ids(),
+            projection.clusteredBy(),
+            projection.clusteredByIdent(),
+            sourceInput,
+            ctx.expressions(),
+            projection.bulkActions(),
+            projection.includes(),
+            projection.excludes(),
+            projection.autoCreateIndices(),
+            projection.overwriteDuplicates(),
+            context.jobId
         );
     }
 
     @Override
     public Projector visitColumnIndexWriterProjection(ColumnIndexWriterProjection projection, Context context) {
-        final ImplementationSymbolVisitor.Context symbolContext = new ImplementationSymbolVisitor.Context();
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForInputColumns();
         List<Input<?>> partitionedByInputs = new ArrayList<>(projection.partitionedBySymbols().size());
         for (Symbol partitionedBySymbol : projection.partitionedBySymbols()) {
-            partitionedByInputs.add(symbolVisitor.process(partitionedBySymbol, symbolContext));
+            partitionedByInputs.add(ctx.add(partitionedBySymbol));
+        }
+        List<Input<?>> insertInputs = new ArrayList<>(projection.columnSymbols().size());
+        for (Symbol symbol : projection.columnSymbols()) {
+            insertInputs.add(ctx.add(symbol));
         }
         return new ColumnIndexWriterProjector(
-                clusterService,
-                settings,
-                transportActionProvider.transportCreateIndexAction(),
-                bulkRetryCoordinatorPool,
-                projection.tableIdent(),
-                projection.partitionIdent(),
-                projection.primaryKeys(),
-                projection.ids(),
-                partitionedByInputs,
-                projection.clusteredBy(),
-                projection.columnReferences(),
-                projection.columnSymbols(),
-                symbolContext.collectExpressions().toArray(new CollectExpression[symbolContext.collectExpressions().size()]),
-                projection.onDuplicateKeyAssignments(),
-                projection.bulkActions(),
-                projection.autoCreateIndices()
+            clusterService,
+            functions,
+            indexNameExpressionResolver,
+            clusterService.state().metaData().settings(),
+            IndexNameResolver.create(projection.tableIdent(), projection.partitionIdent(), partitionedByInputs),
+            transportActionProvider,
+            bulkRetryCoordinatorPool,
+            projection.primaryKeys(),
+            projection.ids(),
+            projection.clusteredBy(),
+            projection.clusteredByIdent(),
+            projection.columnReferences(),
+            insertInputs,
+            ctx.expressions(),
+            projection.onDuplicateKeyAssignments(),
+            projection.bulkActions(),
+            projection.autoCreateIndices(),
+            context.jobId
         );
     }
 
     @Override
     public Projector visitFilterProjection(FilterProjection projection, Context context) {
-        ImplementationSymbolVisitor.Context ctx = new ImplementationSymbolVisitor.Context();
-
-        Input<Boolean> condition;
-        if (projection.query() != null) {
-            condition = (Input)symbolVisitor.process(projection.query(), ctx);
-        } else {
-            condition = Literal.newLiteral(true);
-        }
-
-        return new FilterProjector(
-                ctx.collectExpressions().toArray(new CollectExpression[ctx.collectExpressions().size()]),
-                condition);
+        Predicate<Row> rowFilter = RowFilter.create(inputFactory, projection.query());
+        return new FilterProjector(rowFilter);
     }
 
     @Override
-    public Projector visitUpdateProjection(UpdateProjection projection, Context context) {
+    public Projector visitUpdateProjection(final UpdateProjection projection, Context context) {
+        checkShardLevel("Update projection can only be executed on a shard");
+
+        ShardUpsertRequest.Builder builder = new ShardUpsertRequest.Builder(
+            BulkShardProcessor.BULK_REQUEST_TIMEOUT_SETTING.setting().get(settings),
+            false,
+            false,
+            projection.assignmentsColumns(),
+            null,
+            context.jobId
+        );
+        BulkShardProcessor<ShardUpsertRequest> bulkShardProcessor = new BulkShardProcessor<>(
+            clusterService,
+            transportActionProvider.transportBulkCreateIndicesAction(),
+            indexNameExpressionResolver,
+            settings,
+            bulkRetryCoordinatorPool,
+            false, // autoCreateIndices -> can only update existing things
+            BulkShardProcessor.DEFAULT_BULK_SIZE,
+            builder,
+            transportActionProvider.transportShardUpsertAction()::execute,
+            context.jobId
+        );
+
+        return new DMLProjector<>(
+            shardId,
+            resolveUidCollectExpression(projection.uidSymbol()),
+            bulkShardProcessor,
+            id -> new ShardUpsertRequest.Item(id, projection.assignments(), null, projection.requiredVersion())
+        );
+    }
+
+    @Override
+    public Projector visitDeleteProjection(DeleteProjection projection, Context context) {
+        checkShardLevel("Delete projection can only be executed on a shard");
+        ShardDeleteRequest.Builder builder = new ShardDeleteRequest.Builder(
+            BulkShardProcessor.BULK_REQUEST_TIMEOUT_SETTING.setting().get(settings),
+            context.jobId
+        );
+        BulkShardProcessor<ShardDeleteRequest> bulkShardProcessor = new BulkShardProcessor<>(
+            clusterService,
+            transportActionProvider.transportBulkCreateIndicesAction(),
+            indexNameExpressionResolver,
+            settings,
+            bulkRetryCoordinatorPool,
+            false,
+            BulkShardProcessor.DEFAULT_BULK_SIZE,
+            builder,
+            transportActionProvider.transportShardDeleteAction()::execute,
+            context.jobId
+        );
+        return new DMLProjector<>(
+            shardId,
+            resolveUidCollectExpression(projection.uidSymbol()),
+            bulkShardProcessor,
+            ShardDeleteRequest.Item::new
+        );
+    }
+
+    private void checkShardLevel(String errorMessage) {
         if (shardId == null) {
-            throw new UnsupportedOperationException("Update projection can only be executed on a shard");
+            throw new UnsupportedOperationException(errorMessage);
         }
+    }
 
-        ImplementationSymbolVisitor.Context ctx = new ImplementationSymbolVisitor.Context();
-        symbolVisitor.process(projection.uidSymbol(), ctx);
-        assert ctx.collectExpressions().size() == 1;
-
-        return new UpdateProjector(
-                clusterService,
-                settings,
-                shardId,
-                transportActionProvider.transportCreateIndexAction(),
-                bulkRetryCoordinatorPool,
-                ctx.collectExpressions().toArray(new CollectExpression[ctx.collectExpressions().size()])[0],
-                projection.assignmentsColumns(),
-                projection.assignments(),
-                projection.requiredVersion());
+    private CollectExpression<Row, ?> resolveUidCollectExpression(Symbol uidSymbol) {
+        InputFactory.Context<CollectExpression<Row, ?>> ctx = inputFactory.ctxForInputColumns();
+        ctx.add(uidSymbol);
+        return Iterables.getOnlyElement(ctx.expressions());
     }
 
     @Override
     public Projector visitFetchProjection(FetchProjection projection, Context context) {
-        assert context.jobId.isPresent() : "FetchProjector needs a jobId";
-        assert context.jobSearchContextIdToNode.isPresent() : "FetchProjector needs jobSearchContextIdToNode";
-        assert context.jobSearchContextIdToShard.isPresent() : "FetchProjector needs jobSearchContextIdToShard";
-
-        ImplementationSymbolVisitor.Context ctxDocId = new ImplementationSymbolVisitor.Context();
-        symbolVisitor.process(projection.docIdSymbol(), ctxDocId);
-        assert ctxDocId.collectExpressions().size() == 1;
-
+        FetchProjectorContext projectorContext = new FetchProjectorContext(
+            projection.fetchSources(),
+            projection.nodeReaders(),
+            projection.readerIndices(),
+            projection.indicesToIdents()
+        );
         return new FetchProjector(
+            new TransportFetchOperation(
                 transportActionProvider.transportFetchNodeAction(),
-                transportActionProvider.transportCloseContextNodeAction(),
-                symbolVisitor.functions(),
-                context.jobId.get(),
-                ctxDocId.collectExpressions().iterator().next(),
-                projection.inputSymbols(),
-                projection.outputSymbols(),
-                projection.partitionedBy(),
-                context.jobSearchContextIdToNode.get(),
-                context.jobSearchContextIdToShard.get(),
-                projection.executionNodes(),
-                projection.bulkSize(),
-                projection.closeContexts()
-                );
+                projectorContext.nodeIdsToStreamers(),
+                context.jobId,
+                projection.collectPhaseId()
+            ),
+            functions,
+            projection.outputSymbols(),
+            projectorContext,
+            projection.getFetchSize()
+        );
     }
 
-    public static class Context {
+    @Override
+    public Projector visitSysUpdateProjection(SysUpdateProjection projection, Context context) {
+        Map<Reference, Symbol> assignments = projection.assignments();
+        assert !assignments.isEmpty() : "at least one assignement is required";
+        InputFactory.Context<RowCollectExpression<?, ?>> readCtx = inputFactory.ctxForRefs(RowContextReferenceResolver.INSTANCE);
+
+        List<Input<?>> valueInputs = new ArrayList<>(assignments.size());
+        List<ColumnIdent> assignmentCols = new ArrayList<>(assignments.size());
+
+        TableIdent tableIdent = null;
+
+        for (Map.Entry<Reference, Symbol> e : assignments.entrySet()) {
+            Reference ref = e.getKey();
+            assert tableIdent == null || tableIdent.equals(ref.ident().tableIdent()) : "mixed table assignments found";
+            tableIdent = ref.ident().tableIdent();
+            assignmentCols.add(ref.ident().columnIdent());
+            Input<?> sourceInput = readCtx.add(e.getValue());
+            valueInputs.add(sourceInput);
+        }
+
+        SysRowUpdater<?> rowUpdater = sysUpdaterGetter.apply(tableIdent);
+        assert rowUpdater != null: "row updater needs to exist";
+        Consumer<Object> rowWriter = rowUpdater.newRowWriter(assignmentCols, valueInputs, readCtx.expressions());
+        return new SysUpdateProjector(rowWriter);
+    }
+
+    @Override
+    public Projector create(Projection projection, RamAccountingContext ramAccountingContext, UUID jobId) {
+        return process(projection, new Context(ramAccountingContext, jobId));
+    }
+
+    @Override
+    protected Projector visitProjection(Projection projection, Context context) {
+        throw new UnsupportedOperationException("Unsupported projection");
+    }
+
+    static class Context {
 
         private final RamAccountingContext ramAccountingContext;
-        private final Optional<UUID> jobId;
-        private final Optional<IntObjectOpenHashMap<String>> jobSearchContextIdToNode;
-        private final Optional<IntObjectOpenHashMap<ShardId>> jobSearchContextIdToShard;
+        private final UUID jobId;
+        private final TransactionContext transactionContext = new TransactionContext(SessionContext.SYSTEM_SESSION);
 
-        public Context(RamAccountingContext ramAccountingContext) {
-            this(ramAccountingContext, Optional.<UUID>absent());
-        }
-
-        public Context(RamAccountingContext ramAccountingContext, Optional<UUID> jobId) {
-            this(ramAccountingContext, jobId, Optional.<IntObjectOpenHashMap<String>>absent(),
-                    Optional.<IntObjectOpenHashMap<ShardId>>absent());
-        }
-
-        public Context(RamAccountingContext ramAccountingContext,
-                       Optional<UUID> jobId,
-                       Optional<IntObjectOpenHashMap<String>> jobSearchContextIdToNode,
-                       Optional<IntObjectOpenHashMap<ShardId>> jobSearchContextIdToShard) {
+        public Context(RamAccountingContext ramAccountingContext, UUID jobId) {
             this.ramAccountingContext = ramAccountingContext;
             this.jobId = jobId;
-            this.jobSearchContextIdToNode = jobSearchContextIdToNode;
-            this.jobSearchContextIdToShard = jobSearchContextIdToShard;
         }
-
     }
 }

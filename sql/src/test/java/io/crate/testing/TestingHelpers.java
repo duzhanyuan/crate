@@ -22,35 +22,57 @@
 package io.crate.testing;
 
 import com.google.common.base.Joiner;
+import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Ordering;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
+import io.crate.Version;
+import io.crate.analyze.symbol.ValueSymbolVisitor;
 import io.crate.analyze.where.DocKeys;
-import io.crate.core.collections.*;
+import io.crate.core.collections.Sorted;
+import io.crate.data.Bucket;
+import io.crate.data.Buckets;
+import io.crate.data.Row;
 import io.crate.metadata.*;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.*;
+import io.crate.operation.aggregation.impl.AggregationImplModule;
+import io.crate.operation.operator.OperatorModule;
+import io.crate.operation.predicate.PredicateModule;
+import io.crate.operation.scalar.ScalarFunctionModule;
+import io.crate.operation.tablefunctions.TableFunctionModule;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.inject.ModulesBuilder;
+import org.elasticsearch.common.xcontent.json.JsonXContent;
+import org.elasticsearch.threadpool.ThreadPool;
+import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
 import org.hamcrest.Matcher;
 import org.hamcrest.TypeSafeDiagnosingMatcher;
-import org.hamcrest.TypeSafeMatcher;
+import org.mockito.Mockito;
+import org.mockito.invocation.InvocationOnMock;
+import org.mockito.stubbing.Answer;
 
 import javax.annotation.Nullable;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.reflect.Array;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
-import static org.hamcrest.Matchers.instanceOf;
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.*;
+import static org.hamcrest.core.Is.is;
+import static org.mockito.Matchers.anyString;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.*;
 
 public class TestingHelpers {
 
@@ -74,78 +96,68 @@ public class TestingHelpers {
         for (Object[] row : rows) {
             boolean first = true;
             for (Object o : row) {
-                if (!first) {
-                    out.print("| ");
-                } else {
-                    first = false;
-                }
-                if (o == null) {
-                    out.print("NULL");
-                } else if (o instanceof BytesRef) {
-                    out.print(((BytesRef) o).utf8ToString());
-                } else if (o.getClass().isArray()) {
-                    out.print(Arrays.deepToString((Object[])o));
-                } else {
-                    out.print(o.toString());
-                }
+                first = printObject(out, first, o);
             }
             out.print("\n");
         }
         return os.toString();
     }
 
-    private final static Joiner.MapJoiner MAP_JOINER = Joiner.on(", ").withKeyValueSeparator("=");
-
-    private static LinkedHashMap<String, Object> sortMapByKeyRecursive(Map<String, Object> map) {
-        LinkedHashMap<String, Object> sortedMap = new LinkedHashMap<>(map.size(), 1.0f);
-        ArrayList<String> sortedKeys = Lists.newArrayList(map.keySet());
-        Collections.sort(sortedKeys);
-        for (String sortedKey : sortedKeys) {
-            Object o = map.get(sortedKey);
-            if (o instanceof Map) {
-                //noinspection unchecked
-                sortedMap.put(sortedKey, sortMapByKeyRecursive((Map<String, Object>) o));
-            } else if (o instanceof Collection){
-                sortedMap.put(sortedKey, sortCollectionRecursive((Collection) o));
-            } else {
-                sortedMap.put(sortedKey, o);
-            }
+    private static boolean printObject(PrintStream out, boolean first, Object o) {
+        if (!first) {
+            out.print("| ");
+        } else {
+            first = false;
         }
-        return sortedMap;
+        if (o == null) {
+            out.print("NULL");
+        } else if (o instanceof BytesRef) {
+            out.print(((BytesRef) o).utf8ToString());
+        } else if (o instanceof Object[]) {
+            out.print("[");
+            Object[] oArray = (Object[]) o;
+            for (int i = 0; i < oArray.length; i++) {
+                printObject(out, true, oArray[i]);
+                if (i < oArray.length - 1) {
+                    out.print(", ");
+                }
+            }
+            out.print("]");
+        } else if (o.getClass().isArray()) {
+            out.print("[");
+            boolean arrayFirst = true;
+            for (int i = 0, length = Array.getLength(o); i < length; i++) {
+                if (!arrayFirst) {
+                    out.print(",v");
+                } else {
+                    arrayFirst = false;
+                }
+                printObject(out, first, Array.get(o, i));
+            }
+            out.print("]");
+        } else if (o instanceof Map) {
+            out.print("{");
+            out.print(MAP_JOINER.join(Sorted.sortRecursive((Map<String, Object>) o, true)));
+            out.print("}");
+        } else {
+            out.print(o.toString());
+        }
+        return first;
     }
 
-    private static Collection sortCollectionRecursive(Collection collection) {
-        if (collection.size() == 0) {
-            return collection;
-        }
-        Object firstElement = collection.iterator().next();
-        if (firstElement instanceof Map) {
-            ArrayList sortedList = new ArrayList(collection.size());
-            for (Object obj : collection) {
-                //noinspection unchecked
-                sortedList.add(sortMapByKeyRecursive((Map<String, Object>) obj));
-            }
-            Collections.sort(sortedList);
-            return sortedList;
-        }
-
-        ArrayList sortedList = Lists.newArrayList(collection);
-        Collections.sort(sortedList);
-        return sortedList;
-    }
+    private final static Joiner.MapJoiner MAP_JOINER = Joiner.on(", ").useForNull("null").withKeyValueSeparator("=");
 
     public static String mapToSortedString(Map<String, Object> map) {
-        return MAP_JOINER.join(sortMapByKeyRecursive(map));
+        return MAP_JOINER.join(Sorted.sortRecursive(map));
     }
 
-    public static Function createFunction(String functionName, DataType returnType, Symbol... arguments) {
-        return createFunction(functionName, returnType, Arrays.asList(arguments));
-    }
-
-    public static Function createFunction(String functionName, DataType returnType, List<Symbol> arguments) {
-        List<DataType> dataTypes = Symbols.extractTypes(arguments);
-        return new Function(
-                new FunctionInfo(new FunctionIdent(functionName, dataTypes), returnType), arguments);
+    public static Functions getFunctions() {
+        return new ModulesBuilder()
+            .add(new AggregationImplModule())
+            .add(new PredicateModule())
+            .add(new TableFunctionModule())
+            .add(new ScalarFunctionModule())
+            .add(new OperatorModule()).createInjector().getInstance(Functions.class);
     }
 
     public static Reference createReference(String columnName, DataType dataType) {
@@ -157,11 +169,10 @@ public class TestingHelpers {
     }
 
     public static Reference createReference(String tableName, ColumnIdent columnIdent, DataType dataType) {
-        return new Reference(new ReferenceInfo(
-                new ReferenceIdent(new TableIdent(null, tableName), columnIdent),
-                RowGranularity.DOC,
-                dataType
-        ));
+        return new Reference(
+            new ReferenceIdent(new TableIdent(null, tableName), columnIdent),
+            RowGranularity.DOC,
+            dataType);
     }
 
     public static String readFile(String path) throws IOException {
@@ -169,140 +180,22 @@ public class TestingHelpers {
         return new BytesRef(encoded).utf8ToString();
     }
 
-    public static void assertLiteralSymbol(Symbol symbol, Map<String, Object> expectedValue) {
-        assertLiteral(symbol, expectedValue, DataTypes.OBJECT);
-    }
-
-    public static void assertLiteralSymbol(Symbol symbol, Boolean expectedValue) {
-        assertLiteral(symbol, expectedValue, DataTypes.BOOLEAN);
-    }
-
-    @SuppressWarnings("unchecked")
-    public static void assertLiteralSymbol(Symbol symbol, String expectedValue) {
-        assertThat(symbol, instanceOf(Literal.class));
-        Object value = ((Literal) symbol).value();
-
-        if (value instanceof String) {
-            assertThat((String) value, is(expectedValue));
-        } else {
-            assertThat(((BytesRef) value).utf8ToString(), is(expectedValue));
-        }
-        assertEquals(DataTypes.STRING, ((Literal) symbol).valueType());
-    }
-
-    public static void assertLiteralSymbol(Symbol symbol, Long expectedValue) {
-        assertLiteral(symbol, expectedValue, DataTypes.LONG);
-    }
-
-    public static void assertLiteralSymbol(Symbol symbol, Integer expectedValue) {
-        assertLiteral(symbol, expectedValue, DataTypes.INTEGER);
-    }
-
-    public static void assertLiteralSymbol(Symbol symbol, Double expectedValue) {
-        assertLiteral(symbol, expectedValue, DataTypes.DOUBLE);
-    }
-
-    public static void assertLiteralSymbol(Symbol symbol, Float expectedValue) {
-        assertLiteral(symbol, expectedValue, DataTypes.FLOAT);
-    }
-
-    public static void assertLiteralSymbol(Symbol symbol, Byte expectedValue) {
-        assertLiteral(symbol, expectedValue, DataTypes.BYTE);
-    }
-
-    public static void assertLiteralSymbol(Symbol symbol, Short expectedValue) {
-        assertLiteral(symbol, expectedValue, DataTypes.SHORT);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static <T> void assertLiteral(Symbol symbol, T expectedValue, DataType type) {
-        assertThat(symbol, instanceOf(Literal.class));
-        assertEquals(type, ((Literal) symbol).valueType());
-        assertThat((T) ((Literal) symbol).value(), is(expectedValue));
-    }
-
-    public static <T> void assertNullLiteral(Symbol symbol, T expectedValue) {
-        assertLiteral(symbol, (T) ((Literal) symbol).value(), DataTypes.UNDEFINED);
-    }
-
-    public static void assertLiteralSymbol(Symbol symbol, Object expectedValue, DataType type) {
-        assertThat(symbol, instanceOf(Literal.class));
-        assertEquals(type, ((Literal) symbol).valueType());
-        assertThat(((Literal) symbol).value(), is(expectedValue));
-    }
-
-    public static Matcher<Symbol> isLiteral(Object expectedValue) {
-        return isLiteral(expectedValue, null);
-    }
-
-    public static Matcher<Symbol> isLiteral(Object expectedObject, @Nullable final DataType type) {
-        final Object expectedValue = stringToBytesRef.apply(expectedObject);
-        return new TypeSafeDiagnosingMatcher<Symbol>() {
-            @Override
-            protected boolean matchesSafely(Symbol item, Description mismatchDescription) {
-                boolean result = true;
-                if (!(item instanceof Literal)) {
-                    mismatchDescription.appendText("not a Literal: ").appendValue(item.getClass().getName());
-                    return false;
-                }
-
-                if (type != null && !item.valueType().equals(type)) {
-                    mismatchDescription.appendText("wrong type ").appendValue(item.valueType());
-                    result = false;
-                }
-                if (((Literal) item).value() == null && expectedValue != null) {
-                    mismatchDescription.appendText("wrong value ").appendValue(
-                            ((Literal) item).value());
-                    result = false;
-                } else if (((Literal) item).value() == null && expectedValue == null) {
-                    return true;
-                }
-                if (!((Literal) item).value().equals(expectedValue)) {
-                    mismatchDescription.appendText("wrong value ").appendValue(
-                            bytesRefToString.apply(((Literal) item).value()));
-                    result = false;
-                }
-                return result;
-            }
-
-            @Override
-            public void describeTo(Description description) {
-                description.appendText("Literal: value:").appendValue(expectedValue);
-                if (type != null) {
-                    description.appendText("type:").appendValue(type);
-                }
-            }
-        };
-    }
 
     private static final com.google.common.base.Function<Object, Object> bytesRefToString =
-            new com.google.common.base.Function<Object, Object>() {
+        new com.google.common.base.Function<Object, Object>() {
 
-                @Nullable
-                @Override
-                public Object apply(@Nullable Object input) {
-                    if (input instanceof BytesRef) {
-                        return ((BytesRef) input).utf8ToString();
-                    }
-                    return input;
+            @Nullable
+            @Override
+            public Object apply(@Nullable Object input) {
+                if (input instanceof BytesRef) {
+                    return ((BytesRef) input).utf8ToString();
                 }
-            };
-
-    private static final com.google.common.base.Function<Object, Object> stringToBytesRef =
-            new com.google.common.base.Function<Object, Object>() {
-
-                @Nullable
-                @Override
-                public Object apply(@Nullable Object input) {
-                    if (input instanceof String) {
-                        return new BytesRef(input.toString());
-                    }
-                    return input;
-                }
-            };
+                return input;
+            }
+        };
 
     public static Matcher<Row> isNullRow() {
-        return isRow((Object)null);
+        return isRow((Object) null);
     }
 
     public static Matcher<Row> isRow(Object... cells) {
@@ -313,20 +206,20 @@ public class TestingHelpers {
         return new TypeSafeDiagnosingMatcher<Row>() {
             @Override
             protected boolean matchesSafely(Row item, Description mismatchDescription) {
-                if (item.size() != expected.size()) {
+                if (item.numColumns() != expected.size()) {
                     mismatchDescription.appendText("row size does not match: ")
-                            .appendValue(item.size()).appendText(" != ").appendValue(expected.size());
+                        .appendValue(item.numColumns()).appendText(" != ").appendValue(expected.size());
                     return false;
                 }
-                for (int i = 0; i < item.size(); i++) {
+                for (int i = 0; i < item.numColumns(); i++) {
                     Object actual = bytesRefToString.apply(item.get(i));
                     if (!Objects.equals(expected.get(i), actual)) {
                         mismatchDescription.appendText("value at pos ")
-                                .appendValue(i)
-                                .appendText(" does not match: ")
-                                .appendValue(expected.get(i))
-                                .appendText(" != ")
-                                .appendValue(actual);
+                            .appendValue(i)
+                            .appendText(" does not match: ")
+                            .appendValue(expected.get(i))
+                            .appendText(" != ")
+                            .appendValue(actual);
                         return false;
                     }
                 }
@@ -336,7 +229,7 @@ public class TestingHelpers {
             @Override
             public void describeTo(Description description) {
                 description.appendText("is Row with cells: ")
-                        .appendValue(expected);
+                    .appendValue(expected);
             }
         };
     }
@@ -351,7 +244,7 @@ public class TestingHelpers {
             @Override
             protected boolean matchesSafely(DocKeys.DocKey item, Description mismatchDescription) {
                 List objects = Lists.transform(
-                        Lists.transform(item.values(), ValueSymbolVisitor.VALUE.function), bytesRefToString);
+                    Lists.transform(item.values(), ValueSymbolVisitor.VALUE.function), bytesRefToString);
                 if (!expected.equals(objects)) {
                     mismatchDescription.appendText("is DocKey with values: ").appendValue(objects);
                     return false;
@@ -362,128 +255,7 @@ public class TestingHelpers {
             @Override
             public void describeTo(Description description) {
                 description.appendText("is DocKey with values: ")
-                        .appendValue(expected);
-            }
-        };
-    }
-
-
-    public static Matcher<Symbol> isField(final String expectedName) {
-        return isField(expectedName, null);
-    }
-
-    public static Matcher<Symbol> isField(final String expectedName, @Nullable final DataType dataType) {
-        return new TypeSafeDiagnosingMatcher<Symbol>() {
-
-            @Override
-            public boolean matchesSafely(Symbol item, Description desc) {
-                if (!(item instanceof Field)) {
-                    desc.appendText("not a Field: ").appendText(item.getClass().getName());
-                    return false;
-                }
-                String name = ((Field) item).path().outputName();
-                if (!name.equals(expectedName)) {
-                    desc.appendText("different path ").appendValue(name);
-                    return false;
-                }
-                if (dataType != null && !((Field) item).valueType().equals(dataType)) {
-                    desc.appendText("different type ").appendValue(dataType.toString());
-                }
-                return true;
-            }
-
-            @Override
-            public void describeTo(Description description) {
-                StringBuilder builder = new StringBuilder("a Field with path ").append(expectedName);
-                if (dataType != null) {
-                    builder.append(" and type").append(dataType.toString());
-                }
-                description.appendText(builder.toString());
-            }
-        };
-    }
-
-
-    public static Matcher<Symbol> isReference(String expectedName) {
-        return isReference(expectedName, null);
-    }
-
-    public static Matcher<Symbol> isReference(final String expectedName, @Nullable final DataType dataType) {
-        return new TypeSafeDiagnosingMatcher<Symbol>() {
-
-            @Override
-            public boolean matchesSafely(Symbol item, Description desc) {
-                if (!(item instanceof Reference)) {
-                    desc.appendText("not a Reference: ").appendText(item.getClass().getName());
-                    return false;
-                }
-                String name = ((Reference) item).info().ident().columnIdent().outputName();
-                if (!name.equals(expectedName)) {
-                    desc.appendText("different name ").appendValue(name);
-                    return false;
-                }
-                if (dataType != null && !((Reference) item).info().type().equals(dataType)) {
-                    desc.appendText("different type ").appendValue(dataType.toString());
-                }
-                return true;
-            }
-
-            @Override
-            public void describeTo(Description description) {
-                StringBuilder builder = new StringBuilder("a Reference with name ").append(expectedName);
-                if (dataType != null) {
-                    builder.append(" and type").append(dataType.toString());
-                }
-                description.appendText(builder.toString());
-            }
-        };
-    }
-
-    public static Matcher<Symbol> isFunction(String name) {
-        return isFunction(name, null);
-    }
-
-    public static Matcher<Symbol> isFunction(final String name, @Nullable final List<DataType> argumentTypes) {
-        return new TypeSafeDiagnosingMatcher<Symbol>() {
-            @Override
-            public boolean matchesSafely(Symbol item, Description mismatchDescription) {
-                if (!(item instanceof Function)) {
-                    mismatchDescription.appendText("not a Function: ").appendValue(item.getClass().getName());
-                    return false;
-                }
-                FunctionIdent actualIdent = ((Function) item).info().ident();
-                if (!actualIdent.name().equals(name)) {
-                    mismatchDescription.appendText("wrong Function: ").appendValue(actualIdent.name());
-                    return false;
-                }
-                if (argumentTypes != null) {
-                    if (actualIdent.argumentTypes().size() != argumentTypes.size()) {
-                        mismatchDescription.appendText("wrong number of arguments: ").appendValue(actualIdent.argumentTypes().size());
-                        return false;
-                    }
-
-                    List<DataType> types = ((Function) item).info().ident().argumentTypes();
-                    for (int i = 0, typesSize = types.size(); i < typesSize; i++) {
-                        DataType type = types.get(i);
-                        DataType expected = argumentTypes.get(i);
-                        if (!expected.equals(type)) {
-                            mismatchDescription.appendText("argument ").appendValue(i + 1).appendText(" has wrong type ").appendValue(type.toString());
-                            return false;
-                        }
-                    }
-                }
-                return true;
-            }
-
-            @Override
-            public void describeTo(Description description) {
-                description.appendText("is function ").appendText(name);
-                if (argumentTypes != null) {
-                    description.appendText(" with argument types: ");
-                    for (DataType type : argumentTypes) {
-                        description.appendText(type.toString()).appendText(" ");
-                    }
-                }
+                    .appendValue(expected);
             }
         };
     }
@@ -504,66 +276,83 @@ public class TestingHelpers {
         return column;
     }
 
-    private static class CauseMatcher extends TypeSafeMatcher<Throwable> {
+    public static ThreadPool newMockedThreadPool() {
+        ThreadPool threadPool = Mockito.mock(ThreadPool.class);
+        final ExecutorService executorService = Executors.newSingleThreadExecutor();
 
-        private final Class<? extends Throwable> type;
-        private final String expectedMessage;
-
-        public CauseMatcher(Class<? extends Throwable> type, @Nullable String expectedMessage) {
-            this.type = type;
-            this.expectedMessage = expectedMessage;
-        }
-
-        @Override
-        protected boolean matchesSafely(Throwable item) {
-            return item.getClass().isAssignableFrom(type)
-                    && (null == expectedMessage || item.getMessage().contains(expectedMessage));
-        }
-
-        @Override
-        public void describeTo(Description description) {
-            description.appendText("expects type ")
-                    .appendValue(type);
-            if (expectedMessage != null) {
-                description.appendText(" and a message ")
-                        .appendValue(expectedMessage);
+        doAnswer(new Answer() {
+            @Override
+            public Object answer(InvocationOnMock invocation) throws Throwable {
+                executorService.shutdown();
+                return null;
             }
+        }).when(threadPool).shutdown();
+        when(threadPool.executor(anyString())).thenReturn(executorService);
+
+        try {
+            doAnswer(new Answer() {
+                @Override
+                public Object answer(InvocationOnMock invocation) throws Throwable {
+                    executorService.awaitTermination(1, TimeUnit.SECONDS);
+                    return null;
+                }
+            }).when(threadPool).awaitTermination(anyLong(), any(TimeUnit.class));
+        } catch (InterruptedException e) {
+            throw Throwables.propagate(e);
         }
+
+        return threadPool;
     }
 
-    public static Matcher<Throwable> cause(Class<? extends Throwable> type) {
-        return cause(type, null);
-    }
+    public static Reference refInfo(String fqColumnName, DataType dataType, RowGranularity rowGranularity, String... nested) {
+        String[] parts = fqColumnName.split("\\.");
+        ReferenceIdent refIdent;
 
-    public static Matcher<Throwable> cause(Class<? extends Throwable> type, String expectedMessage) {
-        return new CauseMatcher(type, expectedMessage);
-    }
-
-    public static BucketPage createPage(List<Object[]> ... buckets) {
-        List<ListenableFuture<Bucket>> futures = new ArrayList<>();
-        for (List<Object[]> bucket : buckets) {
-            Bucket realBucket = new CollectionBucket(bucket);
-            futures.add(Futures.immediateFuture(realBucket));
+        List<String> nestedParts = null;
+        if (nested.length > 0) {
+            nestedParts = Arrays.asList(nested);
         }
-        return new BucketPage(futures);
-    }
-
-    public static Object[][] range(int from, int to) {
-        int size = to-from;
-        Object[][] result = new Object[to-from][];
-        for (int i = 0; i < size; i++) {
-            result[i] = new Object[] { i + from };
+        switch (parts.length) {
+            case 2:
+                refIdent = new ReferenceIdent(new TableIdent(null, parts[0]), parts[1], nestedParts);
+                break;
+            case 3:
+                refIdent = new ReferenceIdent(new TableIdent(parts[0], parts[1]), parts[2], nestedParts);
+                break;
+            default:
+                throw new IllegalArgumentException("fqColumnName must contain <table>.<column> or <schema>.<table>.<column>");
         }
-        return result;
+        return new Reference(refIdent, rowGranularity, dataType);
     }
 
-    public static Matcher<Bucket> isSorted(int sortingPos) {
-        return isSorted(sortingPos, false, null);
+    public static <T> Matcher<T> isSQL(final String stmt) {
+        return new BaseMatcher<T>() {
+            @Override
+            public boolean matches(Object item) {
+                return SQLPrinter.print(item).equals(stmt);
+            }
+
+            @Override
+            public void describeTo(Description description) {
+                description.appendText(stmt);
+            }
+
+            @Override
+            public void describeMismatch(Object item, Description description) {
+                description.appendText(SQLPrinter.print(item));
+            }
+        };
     }
 
-    public static Matcher<Bucket> isSorted(final int sortingPos, final boolean reverse, @Nullable final Boolean nullsFirst) {
-        Ordering ordering = Ordering.natural();
-        if (reverse) {
+    public static <T, K extends Comparable> Matcher<Iterable<? extends T>> isSortedBy(final com.google.common.base.Function<T, K> extractSortingKeyFunction) {
+        return isSortedBy(extractSortingKeyFunction, false, null);
+    }
+
+    public static <T, K extends Comparable> Matcher<Iterable<? extends T>> isSortedBy(final com.google.common.base.Function<T, K> extractSortingKeyFunction,
+                                                                                      final boolean descending,
+                                                                                      @Nullable final Boolean nullsFirst) {
+        Ordering<K> ordering = Ordering.natural();
+        if (descending) {
             ordering = ordering.reverse();
         }
         if (nullsFirst != null && nullsFirst) {
@@ -571,23 +360,24 @@ public class TestingHelpers {
         } else {
             ordering = ordering.nullsLast();
         }
-        final Ordering ord = ordering;
-        return new TypeSafeDiagnosingMatcher<Bucket>() {
+        final Ordering<K> ord = ordering;
 
-
+        return new TypeSafeDiagnosingMatcher<Iterable<? extends T>>() {
             @Override
-            protected boolean matchesSafely(Bucket item, Description mismatchDescription) {
-                Object previous = null;
+            protected boolean matchesSafely(Iterable<? extends T> item, Description mismatchDescription) {
+                K previous = null;
                 int i = 0;
-                for (Row row : item) {
-                    Object current = row.get(sortingPos);
+                for (T elem : item) {
+                    K current = extractSortingKeyFunction.apply(elem);
                     if (previous != null) {
                         if (ord.compare(previous, current) > 0) {
                             mismatchDescription
-                                    .appendText("element ").appendValue(current)
-                                    .appendText("at position ").appendValue(i)
-                                    .appendText("is bigger than previous element ")
-                                    .appendValue(previous);
+                                .appendText("element ").appendValue(current)
+                                .appendText(" at position ").appendValue(i)
+                                .appendText(" is ")
+                                .appendText(descending ? "bigger" : "smaller")
+                                .appendText(" than previous element ")
+                                .appendValue(previous);
                             return false;
                         }
                     }
@@ -599,15 +389,75 @@ public class TestingHelpers {
 
             @Override
             public void describeTo(Description description) {
-                description.appendText("expected bucket to be sorted by position: ")
-                        .appendValue(sortingPos);
-                if (reverse) {
-                    description.appendText(" reverse ");
+                description.appendText("expected iterable to be sorted ");
+                if (descending) {
+                    description.appendText("in DESCENDING order");
+                } else {
+                    description.appendText("in ASCENDING order");
                 }
-                description.appendText("nulls ").appendText(nullsFirst != null && nullsFirst ? "first" : "last");
             }
         };
     }
 
+    public static Matcher<Iterable<? extends Row>> hasSortedRows(final int sortingPos, final boolean reverse, @Nullable final Boolean nullsFirst) {
+        return TestingHelpers.isSortedBy(new com.google.common.base.Function<Row, Comparable>() {
+            @Nullable
+            @Override
+            public Comparable apply(@Nullable Row input) {
+                assert input != null;
+                return (Comparable) input.get(sortingPos);
+            }
+        }, reverse, nullsFirst);
+    }
 
+    public static DataType randomPrimitiveType() {
+        return DataTypes.PRIMITIVE_TYPES.get(ThreadLocalRandom.current().nextInt(DataTypes.PRIMITIVE_TYPES.size()));
+    }
+
+    public static Map<String, Object> jsonMap(String json) {
+        try {
+            return JsonXContent.jsonXContent.createParser(json).map();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Convert {@param s} into UTF8 encoded BytesRef with random offset and extra length
+     * <p>
+     * This should be preferred over `new BytesRef` in tests to make sure that implementations using BytesRef
+     * handle offset and length correctly (use {@link BytesRef#length} instead of {@link BytesRef#bytes#length}
+     */
+    public static BytesRef bytesRef(String s, Random random) {
+        byte[] strBytes = s.getBytes(StandardCharsets.UTF_8);
+        int extraLength = random.nextInt(100);
+        int offset = 0;
+        if (extraLength > 0) {
+            offset = random.nextInt(extraLength);
+        }
+        byte[] buffer = new byte[strBytes.length + extraLength];
+        random.nextBytes(buffer);
+        System.arraycopy(strBytes, 0, buffer, offset, strBytes.length);
+        return new BytesRef(buffer, offset, strBytes.length);
+    }
+
+    /**
+     * Converts file path separators of a string into canonical form
+     * e.g. Windows: "/test/" --> "\test\"
+     *      UNIX: "/test/"   --> "/test/"
+     * @param str The string that contains file path separator
+     * @return the resolved string
+     */
+    public static String resolveCanonicalString(String str) {
+        return str.replaceAll("/", java.util.regex.Matcher.quoteReplacement(File.separator));
+    }
+
+    public static void assertCrateVersion(Object object, Version versionCreated, Version versionUpgraded) {
+        assertThat((Map<String, String>) object,
+            allOf(
+                hasEntry(is(Version.Property.CREATED.toString()),
+                    versionCreated == null ? nullValue() : is(Version.toStringMap(versionCreated))),
+                hasEntry(is(Version.Property.UPGRADED.toString()),
+                    versionUpgraded == null ? nullValue() : is(Version.toStringMap(versionUpgraded)))));
+    }
 }

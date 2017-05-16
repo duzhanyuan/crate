@@ -21,10 +21,12 @@
 
 package io.crate.analyze.relations;
 
+import io.crate.analyze.symbol.Field;
 import io.crate.exceptions.AmbiguousColumnException;
 import io.crate.exceptions.ColumnUnknownException;
+import io.crate.exceptions.RelationUnknownException;
 import io.crate.metadata.ColumnIdent;
-import io.crate.planner.symbol.Field;
+import io.crate.metadata.table.Operation;
 import io.crate.sql.tree.QualifiedName;
 
 import javax.annotation.Nullable;
@@ -34,11 +36,11 @@ import java.util.Map;
 
 /**
  * Resolves QualifiedNames to Fields considering multiple AnalyzedRelations.
- *
+ * <p>
  * The Resolver also takes full qualified names so the name may contain table
  * and / or schema.
  */
-public class FullQualifedNameFieldProvider implements FieldProvider {
+public class FullQualifedNameFieldProvider implements FieldProvider<Field> {
 
     private Map<QualifiedName, AnalyzedRelation> sources;
 
@@ -47,11 +49,11 @@ public class FullQualifedNameFieldProvider implements FieldProvider {
         this.sources = sources;
     }
 
-    public Field resolveField(QualifiedName qualifiedName, boolean forWrite) {
-        return resolveField(qualifiedName, null, forWrite);
+    public Field resolveField(QualifiedName qualifiedName, Operation operation) {
+        return resolveField(qualifiedName, null, operation);
     }
 
-    public Field resolveField(QualifiedName qualifiedName, @Nullable List<String> path, boolean forWrite) {
+    public Field resolveField(QualifiedName qualifiedName, @Nullable List<String> path, Operation operation) {
         List<String> parts = qualifiedName.getParts();
         String columnSchema = null;
         String columnTableName = null;
@@ -60,16 +62,16 @@ public class FullQualifedNameFieldProvider implements FieldProvider {
             case 1:
                 break;
             case 2:
-                columnTableName = parts.get(0).toLowerCase(Locale.ENGLISH);
+                columnTableName = parts.get(0);
                 break;
             case 3:
-                columnSchema = parts.get(0).toLowerCase(Locale.ENGLISH);
-                columnTableName = parts.get(1).toLowerCase(Locale.ENGLISH);
+                columnSchema = parts.get(0);
+                columnTableName = parts.get(1);
                 break;
             default:
                 throw new IllegalArgumentException("Column reference \"%s\" has too many parts. " +
-                        "A column reference can have at most 3 parts and must have one of the following formats:  " +
-                        "\"<column>\", \"<table>.<column>\" or \"<schema>.<table>.<column>\"");
+                                                   "A column reference can have at most 3 parts and must have one of the following formats:  " +
+                                                   "\"<column>\", \"<table>.<column>\" or \"<schema>.<table>.<column>\"");
         }
 
         boolean schemaMatched = false;
@@ -88,7 +90,7 @@ public class FullQualifedNameFieldProvider implements FieldProvider {
                 sourceTableOrAlias = sourceParts.get(1);
             } else {
                 throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
-                        "sources key (QualifiedName) must have 1 or 2 parts, not %d", sourceParts.size()));
+                    "sources key (QualifiedName) must have 1 or 2 parts, not %d", sourceParts.size()));
             }
             AnalyzedRelation sourceRelation = entry.getValue();
 
@@ -101,12 +103,7 @@ public class FullQualifedNameFieldProvider implements FieldProvider {
             }
             tableNameMatched = true;
 
-            Field newField;
-            if (forWrite) {
-                newField = sourceRelation.getWritableField(columnIdent);
-            } else {
-                newField = sourceRelation.getField(columnIdent);
-            }
+            Field newField = sourceRelation.getField(columnIdent, operation);
             if (newField != null) {
                 if (lastField != null) {
                     throw new AmbiguousColumnException(columnIdent);
@@ -115,12 +112,8 @@ public class FullQualifedNameFieldProvider implements FieldProvider {
             }
         }
         if (lastField == null) {
-            if (!schemaMatched) {
-                throw new IllegalArgumentException(String.format(
-                        "Cannot resolve relation '%s.%s'", columnSchema, columnTableName));
-            }
-            if (!tableNameMatched) {
-                throw new IllegalArgumentException(String.format("Cannot resolve relation '%s'", columnTableName));
+            if (!schemaMatched || !tableNameMatched) {
+                throw RelationUnknownException.of(columnSchema, columnTableName);
             }
             throw new ColumnUnknownException(columnIdent.sqlFqn());
         }

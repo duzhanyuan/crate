@@ -21,11 +21,10 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.ColumnIdent;
+import io.crate.analyze.symbol.Symbol;
 import io.crate.metadata.PartitionName;
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.table.TableInfo;
-import io.crate.planner.symbol.Symbol;
+import io.crate.metadata.Reference;
+import io.crate.metadata.doc.DocTableInfo;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.lucene.BytesRefs;
 
@@ -44,15 +43,19 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
 
     private final List<String> ids = new ArrayList<>();
     private final List<String> routingValues = new ArrayList<>();
-    private final boolean isBulkRequest;
+    private final List<Integer> bulkIndices = new ArrayList<>();
 
-    public InsertFromValuesAnalyzedStatement(TableInfo tableInfo, boolean isBulkRequest) {
-        this.isBulkRequest = isBulkRequest;
+    private final int numBulkResponses;
+
+    private int numAddedGeneratedColumns = 0;
+
+    public InsertFromValuesAnalyzedStatement(DocTableInfo tableInfo, int numBulkResponses) {
+        this.numBulkResponses = numBulkResponses;
         super.tableInfo(tableInfo);
         if (tableInfo.isPartitioned()) {
             for (Map<String, String> partitionMap : partitionMaps) {
                 partitionMap = new HashMap<>(tableInfo.partitionedByColumns().size());
-                for (ReferenceInfo partInfo : tableInfo.partitionedByColumns()) {
+                for (Reference partInfo : tableInfo.partitionedByColumns()) {
                     // initialize with null values for missing partitioned columns
                     partitionMap.put(partInfo.ident().columnIdent().name(), null);
                 }
@@ -67,7 +70,7 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
     // create and add a new partition map
     public Map<String, String> newPartitionMap() {
         Map<String, String> map = new HashMap<>(tableInfo().partitionedByColumns().size());
-        for (ReferenceInfo partInfo : tableInfo().partitionedByColumns()) {
+        for (Reference partInfo : tableInfo().partitionedByColumns()) {
             // initialize with null values for missing partitioned columns
             map.put(partInfo.ident().columnIdent().fqn(), null);
         }
@@ -75,8 +78,19 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
         return map;
     }
 
-    public @Nullable Map<String, String> currentPartitionMap() {
-        return partitionMaps.get(partitionMaps.size()-1);
+    public
+    @Nullable
+    Map<String, String> currentPartitionMap() {
+        return partitionMaps.get(partitionMaps.size() - 1);
+    }
+
+    private List<String> partitionedByColumnNames() {
+        assert tableInfo != null : "tableInfo must not be null";
+        List<String> names = new ArrayList<>(tableInfo.partitionedByColumns().size());
+        for (Reference info : tableInfo.partitionedByColumns()) {
+            names.add(info.ident().columnIdent().fqn());
+        }
+        return names;
     }
 
     public List<String> generatePartitions() {
@@ -87,8 +101,8 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
             for (String columnName : columnNames) {
                 values.add(BytesRefs.toBytesRef(map.get(columnName)));
             }
-            PartitionName partitionName = new PartitionName(tableInfo().ident().schema(), tableInfo().ident().name(), values);
-            partitionValues.add(partitionName.stringValue());
+            PartitionName partitionName = new PartitionName(tableInfo().ident(), values);
+            partitionValues.add(partitionName.asIndexName());
         }
         return partitionValues;
     }
@@ -97,17 +111,11 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
         return sourceMaps;
     }
 
-    protected void addIdAndRouting(List<BytesRef> primaryKeyValues, String clusteredByValue) {
-        ColumnIdent clusteredBy = tableInfo().clusteredBy();
-        Id id = new Id(tableInfo().primaryKey(), primaryKeyValues, clusteredBy == null ? null : clusteredBy, true);
-        if (id.isValid()) {
-            String idString = id.stringValue();
-            ids.add(idString);
-            if (clusteredByValue == null) {
-                clusteredByValue = idString;
-            }
-        }
-        if (clusteredByValue != null) {
+    protected void addIdAndRouting(String id, @Nullable String clusteredByValue) {
+        ids.add(id);
+        if (clusteredByValue == null) {
+            routingValues.add(id);
+        } else {
             routingValues.add(clusteredByValue);
         }
     }
@@ -143,7 +151,20 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
         return analyzedStatementVisitor.visitInsertFromValuesStatement(this, context);
     }
 
-    public boolean isBulkRequest() {
-        return isBulkRequest;
+    public int numBulkResponses() {
+        return numBulkResponses;
+    }
+
+    public void addGeneratedColumn(Reference reference) {
+        columns().add(reference);
+        numAddedGeneratedColumns++;
+    }
+
+    public int numAddedGeneratedColumns() {
+        return numAddedGeneratedColumns;
+    }
+
+    public List<Integer> bulkIndices() {
+        return bulkIndices;
     }
 }

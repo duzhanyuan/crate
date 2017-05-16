@@ -21,54 +21,70 @@
 
 package io.crate.executor.transport;
 
+import com.carrotsearch.hppc.IntObjectHashMap;
+import com.carrotsearch.hppc.IntObjectMap;
+import com.carrotsearch.hppc.cursors.IntObjectCursor;
 import io.crate.Streamer;
-import io.crate.core.collections.ArrayBucket;
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.Row;
+import io.crate.data.Bucket;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.transport.TransportResponse;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 
 public class NodeFetchResponse extends TransportResponse {
 
-    private Bucket rows;
-    private final Streamer<?>[] streamers;
+    private final IntObjectMap<Streamer[]> streamers;
 
+    @Nullable
+    private IntObjectMap<StreamBucket> fetched;
 
-    public NodeFetchResponse(Streamer<?>[] streamers) {
+    public static NodeFetchResponse forSending(IntObjectMap<StreamBucket> fetched) {
+        return new NodeFetchResponse(null, fetched);
+    }
+
+    public static NodeFetchResponse forReceiveing(@Nullable IntObjectMap<Streamer[]> streamers) {
+        return new NodeFetchResponse(streamers, null);
+    }
+
+    private NodeFetchResponse(@Nullable IntObjectMap<Streamer[]> streamers,
+                              @Nullable IntObjectMap<StreamBucket> fetched) {
         this.streamers = streamers;
+        this.fetched = fetched;
     }
 
-    public void rows(Bucket rows) {
-        this.rows = rows;
-    }
-
-    public Bucket rows() {
-        return rows;
+    @Nullable
+    public IntObjectMap<? extends Bucket> fetched() {
+        return fetched;
     }
 
     @Override
     public void readFrom(StreamInput in) throws IOException {
         super.readFrom(in);
-        Object[][] rows = new Object[in.readVInt()][];
-        for (int r = 0; r < rows.length; r++) {
-            rows[r] = new Object[streamers.length];
-            for (int c = 0; c < rows[r].length; c++) {
-                rows[r][c] = streamers[c].readValueFrom(in);
+        int numReaders = in.readVInt();
+        if (numReaders > 0) {
+            assert streamers != null : "streamers must not be null";
+            fetched = new IntObjectHashMap<>(numReaders);
+            for (int i = 0; i < numReaders; i++) {
+                int readerId = in.readVInt();
+                StreamBucket bucket = new StreamBucket(streamers.get(readerId));
+                bucket.readFrom(in);
+                fetched.put(readerId, bucket);
             }
         }
-        this.rows = new ArrayBucket(rows);
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        out.writeVInt(rows.size());
-        for (Row row : rows) {
-            for (int c = 0; c < streamers.length; c++) {
-                streamers[c].writeValueTo(out, row.get(c));
+        if (fetched == null) {
+            out.writeVInt(0);
+        } else {
+            out.writeVInt(fetched.size());
+            for (IntObjectCursor<StreamBucket> cursor : fetched) {
+                out.writeVInt(cursor.key);
+                cursor.value.writeTo(out);
             }
         }
     }

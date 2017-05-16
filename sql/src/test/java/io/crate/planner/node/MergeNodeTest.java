@@ -21,26 +21,30 @@
 
 package io.crate.planner.node;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
-import io.crate.metadata.FunctionIdent;
-import io.crate.metadata.FunctionInfo;
+import io.crate.analyze.symbol.AggregateMode;
+import io.crate.analyze.symbol.Aggregation;
+import io.crate.analyze.symbol.InputColumn;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.metadata.Reference;
+import io.crate.metadata.RowGranularity;
 import io.crate.operation.aggregation.impl.CountAggregation;
-import io.crate.planner.node.dql.MergeNode;
+import io.crate.planner.distribution.DistributionInfo;
+import io.crate.planner.node.dql.MergePhase;
 import io.crate.planner.projection.GroupProjection;
+import io.crate.planner.projection.Projection;
 import io.crate.planner.projection.TopNProjection;
-import io.crate.planner.symbol.Aggregation;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.testing.TestingHelpers;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
-import org.elasticsearch.common.io.stream.BytesStreamInput;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 
 import static org.hamcrest.core.Is.is;
@@ -50,37 +54,45 @@ public class MergeNodeTest extends CrateUnitTest {
 
     @Test
     public void testSerialization() throws Exception {
-        MergeNode node = new MergeNode("merge", 2);
-        node.jobId(UUID.randomUUID());
-        node.executionNodes(Sets.newHashSet("node1", "node2"));
-        node.inputTypes(Arrays.<DataType>asList(DataTypes.UNDEFINED, DataTypes.STRING));
 
         Reference nameRef = TestingHelpers.createReference("name", DataTypes.STRING);
-        GroupProjection groupProjection = new GroupProjection();
-        groupProjection.keys(Arrays.<Symbol>asList(nameRef));
-        groupProjection.values(Arrays.asList(
-                new Aggregation(
-                        new FunctionInfo(new FunctionIdent(CountAggregation.NAME, ImmutableList.<DataType>of()), DataTypes.LONG),
-                        ImmutableList.<Symbol>of(),
-                        Aggregation.Step.PARTIAL,
-                        Aggregation.Step.FINAL
-                )
-        ));
-        TopNProjection topNProjection = new TopNProjection(10, 0);
+        List<Symbol> keys = Collections.singletonList(nameRef);
+        List<Aggregation> aggregations = Collections.singletonList(
+            new Aggregation(
+                CountAggregation.COUNT_STAR_FUNCTION,
+                CountAggregation.COUNT_STAR_FUNCTION.returnType(),
+                Collections.emptyList()
+            )
+        );
+        GroupProjection groupProjection = new GroupProjection(
+            keys, aggregations, AggregateMode.PARTIAL_FINAL, RowGranularity.CLUSTER);
+        TopNProjection topNProjection = new TopNProjection(10, 0, InputColumn.fromSymbols(groupProjection.outputs()));
 
-        node.projections(Arrays.asList(groupProjection, topNProjection));
+        List<Projection> projections = Arrays.asList(groupProjection, topNProjection);
+        MergePhase node = new MergePhase(
+            UUID.randomUUID(),
+            0,
+            "merge",
+            2,
+            Sets.newHashSet("node1", "node2"),
+            Arrays.<DataType>asList(DataTypes.UNDEFINED, DataTypes.STRING),
+            projections,
+            DistributionInfo.DEFAULT_BROADCAST,
+            null
+        );
 
         BytesStreamOutput output = new BytesStreamOutput();
         node.writeTo(output);
 
 
-        BytesStreamInput input = new BytesStreamInput(output.bytes());
-        MergeNode node2 = new MergeNode();
-        node2.readFrom(input);
+        StreamInput input = output.bytes().streamInput();
+        MergePhase node2 = new MergePhase(input);
 
         assertThat(node.numUpstreams(), is(node2.numUpstreams()));
-        assertThat(node.executionNodes(), is(node2.executionNodes()));
+        assertThat(node.nodeIds(), is(node2.nodeIds()));
         assertThat(node.jobId(), is(node2.jobId()));
-        assertThat(node.inputTypes(), is(node2.inputTypes()));
+        assertEquals(node.inputTypes(), node2.inputTypes());
+        assertThat(node.phaseId(), is(node2.phaseId()));
+        assertThat(node.distributionInfo(), is(node2.distributionInfo()));
     }
 }

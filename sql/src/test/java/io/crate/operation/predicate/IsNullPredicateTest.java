@@ -21,81 +21,34 @@
 
 package io.crate.operation.predicate;
 
-import io.crate.metadata.*;
-import io.crate.operation.Input;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.*;
-import io.crate.test.integration.CrateUnitTest;
-import io.crate.types.DataType;
+import io.crate.analyze.symbol.Literal;
+import io.crate.operation.scalar.AbstractScalarFunctionsTest;
 import io.crate.types.DataTypes;
 import org.junit.Test;
 
-import java.util.Arrays;
+import static io.crate.testing.SymbolMatchers.isFunction;
+import static io.crate.testing.SymbolMatchers.isLiteral;
 
-import static io.crate.testing.TestingHelpers.assertLiteralSymbol;
-import static org.hamcrest.CoreMatchers.instanceOf;
-import static org.hamcrest.core.Is.is;
-
-public class IsNullPredicateTest extends CrateUnitTest {
-
-    IsNullPredicate predicate = new IsNullPredicate(new FunctionInfo(
-            new FunctionIdent(IsNullPredicate.NAME, Arrays.<DataType>asList(DataTypes.STRING)),
-            DataTypes.BOOLEAN
-    ));
+public class IsNullPredicateTest extends AbstractScalarFunctionsTest {
 
     @Test
     public void testNormalizeSymbolFalse() throws Exception {
-        Function isNull = new Function(predicate.info(), Arrays.<Symbol>asList(Literal.newLiteral("a")));
-        Symbol symbol = predicate.normalizeSymbol(isNull);
-        assertLiteralSymbol(symbol, false);
+        assertNormalize("'a' is null", isLiteral(false));
     }
 
     @Test
     public void testNormalizeSymbolTrue() throws Exception {
-        Function isNull = new Function(predicate.info(), Arrays.<Symbol>asList(Literal.NULL));
-        Symbol symbol = predicate.normalizeSymbol(isNull);
-        assertLiteralSymbol(symbol, true);
+        assertNormalize("null is null", isLiteral(true));
     }
 
     @Test
     public void testNormalizeReference() throws Exception {
-        Reference name_ref = new Reference(new ReferenceInfo(
-                new ReferenceIdent(new TableIdent(null, "dummy"), "name"),
-                RowGranularity.DOC,
-                DataTypes.STRING));
-        Function isNull = new Function(predicate.info(), Arrays.<Symbol>asList(name_ref));
-        Symbol symbol = predicate.normalizeSymbol(isNull);
-        assertThat(symbol, instanceOf(Function.class));
-    }
-
-    @Test
-    public void testNormalizeDynamicReference() throws Exception {
-        DynamicReference name_ref = new DynamicReference(new ReferenceInfo(
-                new ReferenceIdent(new TableIdent(null, "dummy"), "name"),
-                RowGranularity.DOC,
-                DataTypes.UNDEFINED));
-        Function isNull = new Function(predicate.info(), Arrays.<Symbol>asList(name_ref));
-        Symbol symbol = predicate.normalizeSymbol(isNull);
-        assertLiteralSymbol(symbol, true);
-    }
-
-    @Test
-    public void testNormalizeSymbolWithStringLiteralThatIsNull() throws Exception {
-        Function isNull = new Function(predicate.info(),
-                Arrays.<Symbol>asList(Literal.newLiteral(DataTypes.STRING, null)));
-        Symbol symbol = predicate.normalizeSymbol(isNull);
-        assertThat((Boolean) ((Input) symbol).value(), is(true));
+        assertNormalize("name is null", isFunction(IsNullPredicate.NAME));
     }
 
     @Test
     public void testEvaluateWithInputThatReturnsNull() throws Exception {
-        Boolean result = predicate.evaluate(new Input[]{new Input() {
-            @Override
-            public Object value() {
-                return null;
-            }
-        }});
-        assertThat(result, is(true));
+        assertEvaluate("name is null", true, Literal.of(DataTypes.STRING, null));
     }
 }
 

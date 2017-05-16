@@ -1,5 +1,5 @@
 /*
- * Licensed to CRATE Technology GmbH ("Crate") under one or more contributor
+ * Licensed to Crate.IO GmbH ("Crate") under one or more contributor
  * license agreements.  See the NOTICE file distributed with this work for
  * additional information regarding copyright ownership.  Crate licenses
  * this file to you under the Apache License, Version 2.0 (the "License");
@@ -21,82 +21,30 @@
 
 package io.crate.executor.transport.distributed;
 
-import com.google.common.base.Throwables;
-import com.google.common.collect.Lists;
-import io.crate.Streamer;
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.Row;
-import io.crate.executor.transport.StreamBucket;
-import org.apache.lucene.util.BytesRef;
-import org.apache.lucene.util.StringHelper;
+import io.crate.data.Bucket;
+import io.crate.data.Row;
 
-import javax.annotation.Nullable;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-
-
-public class MultiBucketBuilder extends ResultProviderBase {
-
-    private final List<StreamBucket.Builder> bucketBuilders;
-
-
-    public MultiBucketBuilder(Streamer<?>[] streamers, int numBuckets) {
-        bucketBuilders = new ArrayList<>(numBuckets);
-        for (int i = 0; i < numBuckets; i++) {
-            bucketBuilders.add(new StreamBucket.Builder(streamers));
-        }
-    }
-
-    public List<Bucket> build() {
-        return Lists.transform(bucketBuilders, StreamBucket.Builder.BUILD_FUNCTION);
-    }
+/**
+ * Builder used to build one or more buckets
+ */
+public interface MultiBucketBuilder {
 
     /**
-     * get bucket number by doing modulo hashcode of first row-element
+     * add a row to the page
      */
-    protected int getBucket(Row row) {
-        int hash = hashCode(row.get(0));
-        if (hash == Integer.MIN_VALUE) {
-            hash = 0; // Math.abs(Integer.MIN_VALUE) == Integer.MIN_VALUE
-        }
-        return Math.abs(hash) % bucketBuilders.size();
-    }
+    void add(Row row);
 
-    private static int hashCode(@Nullable Object value) {
-        if (value == null) {
-            return 0;
-        }
-        if (value instanceof BytesRef) {
-            // since lucene 4.8
-            // BytesRef.hashCode() uses a random seed across different jvm
-            // which causes the hashCode / routing to be different on each node
-            // this breaks the group by redistribution logic - need to use a fixed seed here
-            // to be consistent.
-            return StringHelper.murmurhash3_x86_32(((BytesRef) value), 1);
-        }
-        return value.hashCode();
-    }
+    /**
+     * current number of rows within the page.
+     * Will be reset to 0 on each build call.
+     */
+    int size();
 
-    @Override
-    public Bucket doFinish() {
-        // No actual results here, since this projection sends the rows to the buckets.
-        return Bucket.EMPTY;
-    }
-
-    @Override
-    public Throwable doFail(Throwable t) {
-        return t;
-    }
-
-    @Override
-    public synchronized boolean setNextRow(Row row) {
-        try {
-            bucketBuilders.get(getBucket(row)).add(row);
-        } catch (IOException e) {
-            Throwables.propagate(e);
-        }
-        return true;
-    }
-
+    /**
+     * Builds the buckets and writes them into the provided array.
+     * The provided array must have size N where N is the number of buckets the page contains.
+     * <p>
+     * N is usually specified in the constructor of a specific PageBuilder implementation.
+     */
+    void build(Bucket[] buckets);
 }

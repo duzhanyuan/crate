@@ -21,99 +21,76 @@
 
 package io.crate.planner.projection;
 
-import io.crate.metadata.ReferenceInfo;
-import io.crate.operation.projectors.FetchProjector;
-import io.crate.planner.symbol.Symbol;
-import org.elasticsearch.common.io.stream.StreamInput;
+import com.carrotsearch.hppc.IntSet;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.collections.Lists2;
+import io.crate.metadata.TableIdent;
+import io.crate.planner.node.fetch.FetchSource;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.function.Function;
 
 public class FetchProjection extends Projection {
 
-    public static final ProjectionFactory<FetchProjection> FACTORY = new ProjectionFactory<FetchProjection>() {
-        @Override
-        public FetchProjection newInstance() {
-            return new FetchProjection();
-        }
-    };
+    private final int collectPhaseId;
+    private final int fetchSize;
+    private final Map<TableIdent, FetchSource> fetchSources;
+    private final List<Symbol> outputSymbols;
+    private final Map<String, IntSet> nodeReaders;
+    private final TreeMap<Integer, String> readerIndices;
+    private final Map<String, TableIdent> indicesToIdents;
 
-    private Symbol docIdSymbol;
-    private List<Symbol> inputSymbols;
-    private List<Symbol> outputSymbols;
-    private List<ReferenceInfo> partitionBy;
-    private Set<String> executionNodes;
-    private int bulkSize;
-    private boolean closeContexts;
-
-    private FetchProjection() {
-    }
-
-    public FetchProjection(Symbol docIdSymbol,
-                           List<Symbol> inputSymbols,
+    public FetchProjection(int collectPhaseId,
+                           int fetchSize,
+                           Map<TableIdent, FetchSource> fetchSources,
                            List<Symbol> outputSymbols,
-                           List<ReferenceInfo> partitionBy,
-                           Set<String> executionNodes) {
-        this(docIdSymbol, inputSymbols, outputSymbols, partitionBy, executionNodes,
-                FetchProjector.NO_BULK_REQUESTS, false);
-    }
-
-    public FetchProjection(Symbol docIdSymbol,
-                           List<Symbol> inputSymbols,
-                           List<Symbol> outputSymbols,
-                           List<ReferenceInfo> partitionBy,
-                           Set<String> executionNodes,
-                           int bulkSize) {
-        this(docIdSymbol, inputSymbols, outputSymbols, partitionBy, executionNodes,
-                bulkSize, false);
-    }
-
-    public FetchProjection(Symbol docIdSymbol,
-                           List<Symbol> inputSymbols,
-                           List<Symbol> outputSymbols,
-                           List<ReferenceInfo> partitionBy,
-                           Set<String> executionNodes,
-                           int bulkSize,
-                           boolean closeContexts) {
-        this.docIdSymbol = docIdSymbol;
-        this.inputSymbols = inputSymbols;
+                           Map<String, IntSet> nodeReaders,
+                           TreeMap<Integer, String> readerIndices,
+                           Map<String, TableIdent> indicesToIdents) {
+        this.collectPhaseId = collectPhaseId;
+        this.fetchSize = fetchSize;
+        this.fetchSources = fetchSources;
         this.outputSymbols = outputSymbols;
-        this.partitionBy = partitionBy;
-        this.executionNodes = executionNodes;
-        this.bulkSize = bulkSize;
-        this.closeContexts = closeContexts;
+        this.nodeReaders = nodeReaders;
+        this.readerIndices = readerIndices;
+        this.indicesToIdents = indicesToIdents;
     }
 
-    public Symbol docIdSymbol() {
-        return docIdSymbol;
+    public int collectPhaseId() {
+        return collectPhaseId;
     }
 
-    public List<Symbol> inputSymbols() {
-        return inputSymbols;
+    public int getFetchSize() {
+        return fetchSize;
+    }
+
+    public Map<TableIdent, FetchSource> fetchSources() {
+        return fetchSources;
     }
 
     public List<Symbol> outputSymbols() {
         return outputSymbols;
     }
 
-    public List<ReferenceInfo> partitionedBy() {
-        return partitionBy;
+    public Map<String, IntSet> nodeReaders() {
+        return nodeReaders;
     }
 
-    public Set<String> executionNodes() {
-        return executionNodes;
+    public TreeMap<Integer, String> readerIndices() {
+        return readerIndices;
     }
 
-    public int bulkSize() {
-        return bulkSize;
+    public Map<String, TableIdent> indicesToIdents() {
+        return indicesToIdents;
     }
 
-    public boolean closeContexts() {
-        return closeContexts;
+    @Override
+    public void replaceSymbols(Function<Symbol, Symbol> replaceFunction) {
+        Lists2.replaceItems(outputSymbols, replaceFunction);
     }
 
     @Override
@@ -135,81 +112,18 @@ public class FetchProjection extends Projection {
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
-
         FetchProjection that = (FetchProjection) o;
-
-        if (closeContexts != that.closeContexts) return false;
-        if (bulkSize != that.bulkSize) return false;
-        if (executionNodes != that.executionNodes) return false;
-        if (!docIdSymbol.equals(that.docIdSymbol)) return false;
-        if (!inputSymbols.equals(that.inputSymbols)) return false;
-        if (!outputSymbols.equals(that.outputSymbols)) return false;
-        if (!outputSymbols.equals(that.outputSymbols)) return false;
-        return partitionBy.equals(that.partitionBy);
+        return collectPhaseId == that.collectPhaseId;
     }
 
     @Override
     public int hashCode() {
-        int result = super.hashCode();
-        result = 31 * result + docIdSymbol.hashCode();
-        result = 31 * result + inputSymbols.hashCode();
-        result = 31 * result + outputSymbols.hashCode();
-        result = 31 * result + partitionBy.hashCode();
-        result = 31 * result + executionNodes.hashCode();
-        result = 31 * result + bulkSize;
-        result = 31 * result + (closeContexts ? 1 : 0);
-        return result;
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        docIdSymbol = Symbol.fromStream(in);
-        int inputSymbolsSize = in.readVInt();
-        inputSymbols = new ArrayList<>(inputSymbolsSize);
-        for (int i = 0; i < inputSymbolsSize; i++) {
-            inputSymbols.add(Symbol.fromStream(in));
-        }
-        int outputSymbolsSize = in.readVInt();
-        outputSymbols = new ArrayList<>(outputSymbolsSize);
-        for (int i = 0; i < outputSymbolsSize; i++) {
-            outputSymbols.add(Symbol.fromStream(in));
-        }
-        int partitionedBySize = in.readVInt();
-        partitionBy = new ArrayList<>(partitionedBySize);
-        for (int i = 0; i < partitionedBySize; i++) {
-            ReferenceInfo referenceInfo = new ReferenceInfo();
-            referenceInfo.readFrom(in);
-            partitionBy.add(referenceInfo);
-        }
-        int executionNodesSize = in.readVInt();
-        executionNodes = new HashSet<>(executionNodesSize);
-        for (int i = 0; i < executionNodesSize; i++) {
-            executionNodes.add(in.readString());
-        }
-        bulkSize = in.readVInt();
-        closeContexts = in.readBoolean();
+        return collectPhaseId;
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        Symbol.toStream(docIdSymbol, out);
-        out.writeVInt(inputSymbols.size());
-        for (Symbol symbol : inputSymbols) {
-            Symbol.toStream(symbol, out);
-        }
-        out.writeVInt(outputSymbols.size());
-        for (Symbol symbol : outputSymbols) {
-            Symbol.toStream(symbol, out);
-        }
-        out.writeVInt(partitionBy.size());
-        for (ReferenceInfo referenceInfo : partitionBy) {
-            referenceInfo.writeTo(out);
-        }
-        out.writeVInt(executionNodes.size());
-        for (String nodeId : executionNodes) {
-            out.writeString(nodeId);
-        }
-        out.writeVInt(bulkSize);
-        out.writeBoolean(closeContexts);
+        throw new UnsupportedOperationException("writeTo is not supported for " +
+                                                FetchProjection.class.getSimpleName());
     }
 }

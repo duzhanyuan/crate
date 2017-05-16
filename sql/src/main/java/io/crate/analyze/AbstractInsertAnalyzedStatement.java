@@ -21,20 +21,17 @@
 
 package io.crate.analyze;
 
-import com.carrotsearch.hppc.IntOpenHashSet;
+import com.carrotsearch.hppc.IntHashSet;
 import com.carrotsearch.hppc.IntSet;
+import io.crate.analyze.symbol.DynamicReference;
 import io.crate.exceptions.ColumnUnknownException;
 import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.ReferenceIdent;
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.table.TableInfo;
-import io.crate.planner.symbol.DynamicReference;
-import io.crate.planner.symbol.Reference;
+import io.crate.metadata.Reference;
+import io.crate.metadata.doc.DocTableInfo;
 
-import javax.annotation.Nullable;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -42,13 +39,13 @@ import java.util.Set;
  */
 public abstract class AbstractInsertAnalyzedStatement implements AnalyzedStatement {
 
-    private List<Reference> columns;
-    private IntSet primaryKeyColumnIndices = new IntOpenHashSet();
-    private IntSet partitionedByColumnsIndices = new IntOpenHashSet();
+    protected List<Reference> columns;
+    private IntSet primaryKeyColumnIndices = new IntHashSet();
+    private IntSet partitionedByColumnsIndices = new IntHashSet();
     private int routingColumnIndex = -1;
-    private TableInfo tableInfo;
+    protected DocTableInfo tableInfo;
 
-    private final Set<ReferenceInfo> allocatedReferences = new HashSet<>();
+    private final Set<Reference> allocatedReferences = new HashSet<>();
 
     public List<Reference> columns() {
         return columns;
@@ -74,14 +71,6 @@ public abstract class AbstractInsertAnalyzedStatement implements AnalyzedStateme
         this.primaryKeyColumnIndices.add(primaryKeyColumnIdx);
     }
 
-    protected List<String> partitionedByColumnNames() {
-        assert tableInfo != null;
-        List<String> names = new ArrayList<>(tableInfo.partitionedByColumns().size());
-        for (ReferenceInfo info : tableInfo.partitionedByColumns()) {
-            names.add(info.ident().columnIdent().fqn());
-        }
-        return names;
-    }
 
     public void routingColumnIndex(int routingColumnIndex) {
         this.routingColumnIndex = routingColumnIndex;
@@ -91,45 +80,37 @@ public abstract class AbstractInsertAnalyzedStatement implements AnalyzedStateme
         return routingColumnIndex;
     }
 
-    /**
-     *
-     * @return routing column if it is used in insert statement
-     */
-    public @Nullable ColumnIdent routingColumn() {
-        if (routingColumnIndex < 0) { return null; }
-        else {
-            return tableInfo.clusteredBy();
-        }
-    }
-
-    public TableInfo tableInfo() {
+    public DocTableInfo tableInfo() {
         return tableInfo;
     }
 
-    public void tableInfo(TableInfo tableInfo) {
+    public void tableInfo(DocTableInfo tableInfo) {
         this.tableInfo = tableInfo;
     }
 
-    public Reference allocateUniqueReference(ReferenceIdent ident) {
-        ColumnIdent column = ident.columnIdent();
-        ReferenceInfo referenceInfo = tableInfo.getReferenceInfo(column);
-        if (referenceInfo == null) {
-            referenceInfo = tableInfo.indexColumn(column);
-            if (referenceInfo == null) {
+    Reference allocateUniqueReference(ColumnIdent column) {
+        Reference ref = tableInfo.getReference(column);
+        if (ref == null) {
+            ref = tableInfo.indexColumn(column);
+            if (ref == null) {
                 DynamicReference reference = tableInfo.getDynamic(column, true);
                 if (reference == null) {
-                    throw new ColumnUnknownException(column.fqn());
+                    throw new ColumnUnknownException(column.sqlFqn());
                 }
-                referenceInfo = reference.info();
-                if (!allocatedReferences.add(referenceInfo)) {
-                    throw new IllegalArgumentException(String.format("reference '%s' repeated", ident.columnIdent().sqlFqn()));
+                if (!allocatedReferences.add(reference)) {
+                    throw new IllegalArgumentException(String.format(Locale.ENGLISH, "reference '%s' repeated", column.sqlFqn()));
                 }
                 return reference;
             }
         }
-        if (!allocatedReferences.add(referenceInfo)) {
-            throw new IllegalArgumentException(String.format("reference '%s' repeated", ident.columnIdent().sqlFqn()));
+        if (!allocatedReferences.add(ref)) {
+            throw new IllegalArgumentException(String.format(Locale.ENGLISH, "reference '%s' repeated", column.sqlFqn()));
         }
-        return new Reference(referenceInfo);
+        return ref;
+    }
+
+    @Override
+    public boolean isWriteOperation() {
+        return true;
     }
 }

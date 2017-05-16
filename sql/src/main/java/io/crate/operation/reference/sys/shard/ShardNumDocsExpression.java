@@ -21,19 +21,15 @@
 
 package io.crate.operation.reference.sys.shard;
 
-import org.elasticsearch.common.inject.Inject;
+import io.crate.metadata.ReferenceImplementation;
 import org.elasticsearch.index.shard.IllegalIndexShardStateException;
-import org.elasticsearch.index.shard.service.IndexShard;
+import org.elasticsearch.index.shard.IndexShard;
 
-public class ShardNumDocsExpression extends SysShardExpression<Long> {
-
-    public static final String NAME = "num_docs";
+public class ShardNumDocsExpression implements ReferenceImplementation<Long> {
 
     private final IndexShard indexShard;
 
-    @Inject
     public ShardNumDocsExpression(IndexShard indexShard) {
-        super(NAME);
         this.indexShard = indexShard;
     }
 

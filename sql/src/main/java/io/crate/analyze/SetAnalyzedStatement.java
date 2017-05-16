@@ -21,52 +21,43 @@
 
 package io.crate.analyze;
 
-import org.elasticsearch.common.settings.Settings;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.SetStatement;
 
-import javax.annotation.Nullable;
-import java.util.Set;
+import java.util.List;
+import java.util.Map;
 
 public class SetAnalyzedStatement implements AnalyzedStatement {
-    private Settings settings;
-    private Set<String> settingsToRemove;
-    private boolean persistent = false;
-    private boolean isReset = false;
 
-    public Settings settings() {
-        return settings;
-    }
+    private final Map<String, List<Expression>> settings;
+    private final SetStatement.Scope scope;
+    private final boolean persistent;
 
-    public void settings(Settings settings) {
+    SetAnalyzedStatement(SetStatement.Scope scope, Map<String, List<Expression>> settings, boolean persistent) {
+        this.scope = scope;
         this.settings = settings;
+        this.persistent = persistent;
     }
 
-    @Nullable
-    public Set<String> settingsToRemove() {
-        return settingsToRemove;
+    public SetStatement.Scope scope() {
+        return scope;
     }
 
-    public void settingsToRemove(Set<String> settingsToRemove) {
-        this.settingsToRemove = settingsToRemove;
+    public Map<String, List<Expression>> settings() {
+        return settings;
     }
 
     public boolean isPersistent() {
         return persistent;
     }
 
-    public boolean isReset() {
-        return isReset;
-    }
-
-    public void isReset(boolean isReset) {
-        this.isReset = isReset;
-    }
-
-    public void persistent(boolean persistent) {
-        this.persistent = persistent;
-    }
-
     @Override
     public <C, R> R accept(AnalyzedStatementVisitor<C, R> analyzedStatementVisitor, C context) {
         return analyzedStatementVisitor.visitSetStatement(this, context);
+    }
+
+    @Override
+    public boolean isWriteOperation() {
+        return SetStatement.Scope.GLOBAL.equals(scope);
     }
 }

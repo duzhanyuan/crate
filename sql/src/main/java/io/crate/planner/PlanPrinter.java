@@ -21,306 +21,233 @@
 
 package io.crate.planner;
 
-import com.google.common.base.Joiner;
-import com.google.common.base.MoreObjects;
-import com.google.common.base.Objects;
-import com.google.common.base.Strings;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
-import io.crate.planner.node.PlanNode;
-import io.crate.planner.node.PlanNodeVisitor;
-import io.crate.planner.node.dml.SymbolBasedUpsertByIdNode;
-import io.crate.planner.node.dml.Upsert;
+import com.google.common.base.Function;
+import com.google.common.collect.FluentIterable;
+import com.google.common.collect.ImmutableMap;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.format.SymbolPrinter;
+import io.crate.planner.distribution.DistributionInfo;
+import io.crate.planner.distribution.UpstreamPhase;
+import io.crate.planner.node.ExecutionPhase;
+import io.crate.planner.node.ExecutionPhaseVisitor;
 import io.crate.planner.node.dql.*;
-import io.crate.planner.projection.*;
-import io.crate.planner.symbol.Aggregation;
-import io.crate.planner.symbol.Symbol;
-import io.crate.planner.symbol.SymbolFormatter;
-import io.crate.planner.symbol.SymbolVisitor;
+import io.crate.planner.node.dql.join.NestedLoop;
+import io.crate.planner.node.dql.join.NestedLoopPhase;
+import io.crate.planner.node.fetch.FetchPhase;
+import io.crate.planner.projection.Projection;
+import io.crate.planner.projection.ProjectionVisitor;
+import io.crate.planner.projection.TopNProjection;
 
-import java.util.Arrays;
+import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
-import static java.lang.String.format;
+public class PlanPrinter {
 
-public class PlanPrinter extends PlanVisitor<PlanPrinter.PrintContext, Void> {
+    private PlanPrinter() {
+    }
 
-    static class PrintContext {
+    public static Map<String, Object> objectMap(Plan plan) {
+        return Plan2MapVisitor.toMap(plan);
+    }
 
-        private int indent = 0;
-        private final StringBuilder output;
+    private static List<Object> refs(Collection<? extends Symbol> symbols) {
+        List<Object> refs = new ArrayList<>(symbols.size());
+        for (Symbol s : symbols) {
+            refs.add(SymbolPrinter.INSTANCE.print(s, SymbolPrinter.Style.FULL_QUALIFIED));
+        }
+        return refs;
+    }
 
-        PrintContext(StringBuilder output) {
-            this.output = output;
+    private static class ExecutionPhase2MapVisitor extends ExecutionPhaseVisitor<Void, ImmutableMap.Builder<String, Object>> {
+
+        public static final ExecutionPhase2MapVisitor INSTANCE = new ExecutionPhase2MapVisitor();
+
+        private ExecutionPhase2MapVisitor() {
         }
 
-        public int indent() {
-            return ++indent;
+        static ImmutableMap.Builder<String, Object> toBuilder(ExecutionPhase executionPhase) {
+            assert executionPhase != null : "executionPhase must not be null";
+            return INSTANCE.process(executionPhase, null);
         }
 
-        public int dedent() {
-            return --indent;
+        private static Iterable<Map<String, Object>> projections(Iterable<Projection> projections) {
+            return FluentIterable.from(projections).transform(new Function<Projection, Map<String, Object>>() {
+                @Nullable
+                @Override
+                public Map<String, Object> apply(@Nullable Projection projection) {
+                    assert projection != null : "projection must not be null";
+                    return Projection2MapVisitor.toBuilder(projection).build();
+                }
+            }).toList();
+            // need to use a List because this is part of a map which is streamed to the client.
+            // Map streaming uses StreamOutput#writeGenericValue which can't handle Iterable
         }
 
-        private void print(String format, Object... args) {
-            String value;
-            if (args.length == 0) {
-                value = format;
+        private static ImmutableMap.Builder<String, Object> newBuilder() {
+            return ImmutableMap.builder();
+        }
+
+        @Override
+        protected ImmutableMap.Builder<String, Object> visitExecutionPhase(ExecutionPhase phase, Void context) {
+            return newBuilder()
+                .put("phaseType", phase.type().toString())
+                .put("id", phase.phaseId())
+                // Converting TreeMap.keySet() to be able to stream
+                .put("executionNodes", new ArrayList<>(phase.nodeIds())
+                );
+        }
+
+        private ImmutableMap.Builder<String, Object> process(DistributionInfo info) {
+            return newBuilder()
+                .put("distributedByColumn", info.distributeByColumn())
+                .put("type", info.distributionType().toString());
+        }
+
+        private ImmutableMap.Builder<String, Object> upstreamPhase(UpstreamPhase phase, ImmutableMap.Builder<String, Object> b) {
+            return b.put("distribution", process(phase.distributionInfo()).build());
+        }
+
+        private ImmutableMap.Builder<String, Object> dqlPlanNode(AbstractProjectionsPhase phase, ImmutableMap.Builder<String, Object> b) {
+            if (phase.hasProjections()) {
+                b.put("projections", projections(phase.projections()));
+            }
+            return b;
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitRoutedCollectPhase(RoutedCollectPhase phase, Void context) {
+            ImmutableMap.Builder<String, Object> builder = visitCollectPhase(phase, context);
+            builder = dqlPlanNode(phase, builder);
+            builder.put("routing", phase.routing().locations());
+            return builder;
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitCollectPhase(CollectPhase phase, Void context) {
+            ImmutableMap.Builder<String, Object> builder = upstreamPhase(phase, visitExecutionPhase(phase, context));
+            builder.put("toCollect", refs(phase.toCollect()));
+            return builder;
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitCountPhase(CountPhase phase, Void context) {
+            return upstreamPhase(phase, visitExecutionPhase(phase, context));
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitFetchPhase(FetchPhase phase, Void context) {
+            return visitExecutionPhase(phase, context)
+                .put("fetchRefs", refs(phase.fetchRefs()));
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitMergePhase(MergePhase phase, Void context) {
+            ImmutableMap.Builder<String, Object> b = upstreamPhase(phase, visitExecutionPhase(phase, context));
+            return dqlPlanNode(phase, b);
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitNestedLoopPhase(NestedLoopPhase phase, Void context) {
+            ImmutableMap.Builder<String, Object> b = upstreamPhase(phase, visitExecutionPhase(phase, context));
+            return dqlPlanNode(phase, b);
+        }
+    }
+
+
+    private static class Projection2MapVisitor extends ProjectionVisitor<Void, ImmutableMap.Builder<String, Object>> {
+
+        private static final Projection2MapVisitor INSTANCE = new Projection2MapVisitor();
+
+        private static ImmutableMap.Builder<String, Object> newBuilder() {
+            return ImmutableMap.builder();
+        }
+
+        static ImmutableMap.Builder<String, Object> toBuilder(Projection projection) {
+            assert projection != null : "projection must not be null";
+            return INSTANCE.process(projection, null);
+        }
+
+        @Override
+        protected ImmutableMap.Builder<String, Object> visitProjection(Projection projection, Void context) {
+            return newBuilder().put("type", projection.projectionType().toString());
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitTopNProjection(TopNProjection projection, Void context) {
+            return visitProjection(projection, context)
+                .put("rows", projection.offset() + "-" + projection.limit());
+        }
+    }
+
+    private static class Plan2MapVisitor extends PlanVisitor<Void, ImmutableMap.Builder<String, Object>> {
+
+        private static final Plan2MapVisitor INSTANCE = new Plan2MapVisitor();
+
+        private static ImmutableMap.Builder<String, Object> newBuilder() {
+            return ImmutableMap.builder();
+        }
+
+        @Override
+        protected ImmutableMap.Builder<String, Object> visitPlan(Plan plan, Void context) {
+            return newBuilder()
+                .put("planType", plan.getClass().getSimpleName());
+        }
+
+        private static Map<String, Object> phaseMap(@Nullable ExecutionPhase node) {
+            if (node == null) {
+                return null;
             } else {
-                value = format(format, args);
+                return ExecutionPhase2MapVisitor.toBuilder(node).build();
             }
-            output.append(Strings.repeat("  ", indent)).append(value).append('\n');
         }
-    }
 
-
-    class ProjectionPrinter extends ProjectionVisitor<PrintContext, Void> {
-
-        @Override
-        protected Void visitProjection(Projection projection, PrintContext context) {
-            context.print("Projection: %s", projection);
-            return null;
+        static Map<String, Object> toMap(Plan plan) {
+            assert plan != null : "plan must not be null";
+            return INSTANCE.process(plan, null).build();
         }
 
         @Override
-        public Void visitAggregationProjection(AggregationProjection projection, PrintContext context) {
-            context.print("AggregationProjection:");
-            context.indent();
-            context.print("aggregations:");
-            context.indent();
-            for (Aggregation aggregation : projection.aggregations()) {
-                symbolPrinter.process(aggregation, context);
-            }
-            context.dedent();
-            context.dedent();
-            return null;
+        public ImmutableMap.Builder<String, Object> visitCollect(Collect plan, Void context) {
+            ImmutableMap.Builder<String, Object> b = visitPlan(plan, context)
+                .put("collectPhase", phaseMap(plan.collectPhase()));
+            return b;
         }
 
         @Override
-        public Void visitGroupProjection(GroupProjection projection, PrintContext context) {
-            context.print("GroupProjection:");
-            context.indent();
-            context.print("group by keys:");
-            context.indent();
-            for (Symbol key : projection.keys()) {
-                symbolPrinter.process(key, context);
-            }
-            context.dedent();
-            context.print("aggregations:");
-            context.indent();
-            for (Aggregation aggregation : projection.values()) {
-                symbolPrinter.process(aggregation, context);
-            }
-            context.dedent();
-            context.print("outputs:");
-            context.indent();
-            for (Symbol output : projection.outputs()) {
-                symbolPrinter.process(output, context);
-            }
-            context.dedent();
-            context.dedent();
-            return null;
+        public ImmutableMap.Builder<String, Object> visitNestedLoop(NestedLoop plan, Void context) {
+            return newBuilder()
+                .put("planType", plan.getClass().getSimpleName())
+                .put("left", process(plan.left(), context).build())
+                .put("right", process(plan.right(), context).build())
+                .put("nestedLoopPhase", phaseMap(plan.nestedLoopPhase()));
         }
 
         @Override
-        public Void visitFilterProjection(FilterProjection projection, PrintContext context) {
-            context.print("FilterProjection:");
-            context.indent();
-
-            context.print("having clause:");
-            symbolPrinter.process(projection.query(), context);
-
-            context.print("outputs:");
-            context.indent();
-            for (Symbol output : projection.outputs()) {
-                symbolPrinter.process(output, context);
-            }
-            context.dedent();
-
-            context.dedent();
-            return null;
-        }
-    }
-
-    static class SymbolPrinter extends SymbolVisitor<PrintContext, Void> {
-
-        @Override
-        protected Void visitSymbol(Symbol symbol, PrintContext context) {
-            context.print("Symbol: %s", symbol);
-            return null;
-        }
-
-
-        @Override
-        public Void visitAggregation(Aggregation symbol, PrintContext context) {
-            context.print(Objects.toStringHelper(symbol)
-                    .add("functionIdent", symbol.functionIdent())
-                    .add("inputs", symbol.inputs())
-                    .add("fromStep", symbol.fromStep())
-                    .add("toStep", symbol.toStep())
-                    .toString());
-            return null;
-        }
-    }
-
-
-    class PlanNodePrinter extends PlanNodeVisitor<PlanPrinter.PrintContext, Void> {
-
-        @Override
-        public Void visitMergeNode(MergeNode node, PrintContext context) {
-            context.print("Merge");
-            context.indent();
-            context.print("executionNodes: %s", node.executionNodes());
-            processProjections(node, context);
-            context.dedent();
-            return null;
+        public ImmutableMap.Builder<String, Object> visitQueryThenFetch(QueryThenFetch plan, Void context) {
+            return visitPlan(plan, context)
+                .put("subPlan", toMap(plan.subPlan()))
+                .put("fetchPhase", phaseMap(plan.fetchPhase()));
         }
 
         @Override
-        public Void visitESGetNode(ESGetNode node, PrintContext context) {
-            context.print(node.toString());
-            context.indent();
-            context.print("outputs:");
-            for (Symbol symbol : node.outputs()) {
-                symbolPrinter.process(symbol, context);
+        public ImmutableMap.Builder<String, Object> visitMultiPhasePlan(MultiPhasePlan multiPhasePlan, Void context) {
+            List<Map<String, Object>> dependencies = new ArrayList<>(multiPhasePlan.dependencies().size());
+            for (Plan dependency : multiPhasePlan.dependencies().keySet()) {
+                dependencies.add(toMap(dependency));
             }
-            context.dedent();
-            return null;
+            return visitPlan(multiPhasePlan, context)
+                .put("rootPlan", toMap(multiPhasePlan.rootPlan()))
+                .put("dependencies", dependencies);
         }
 
         @Override
-        public Void visitCollectNode(CollectNode node, PrintContext context) {
-            context.print("Collect");
-            context.indent();
-            context.print("routing: %s", node.routing());
-            context.print("toCollect:");
-            for (Symbol symbol : node.toCollect()) {
-                symbolPrinter.process(symbol, context);
-            }
-            context.print("whereClause %s", node.whereClause().toString());
-
-            processProjections(node, context);
-            context.dedent();
-
-            return null;
+        public ImmutableMap.Builder<String, Object> visitMerge(Merge merge, Void context) {
+            return visitPlan(merge, context)
+                .put("subPlan", toMap(merge.subPlan()))
+                .put("mergePhase", phaseMap(merge.mergePhase()));
         }
-
-        @Override
-        public Void visitSymbolBasedUpsertByIdNode(SymbolBasedUpsertByIdNode node, PrintContext context) {
-            context.print(node.getClass().getSimpleName());
-            context.indent();
-            if (node.insertColumns() != null) {
-                context.print("insertColumns: %s", Joiner.on(", ").join(Iterables.transform(Arrays.asList(node.insertColumns()), SymbolFormatter.SYMBOL_FORMAT_FUNCTION)));
-            }
-            if (node.updateColumns() != null) {
-                context.print("updateColumns: %s", Joiner.on(", ").join(node.updateColumns()));
-            }
-            context.print("items: ");
-            context.indent();
-            for (SymbolBasedUpsertByIdNode.Item item : node.items()) {
-                context.print(printItem(item));
-            }
-            context.dedent();
-            context.print("bulk: %s", node.isBulkRequest());
-            context.print("partitioned: %s", node.isPartitionedTable());
-            context.dedent();
-            return null;
-        }
-
-        private String printItem(SymbolBasedUpsertByIdNode.Item item) {
-            MoreObjects.ToStringHelper helper = MoreObjects.toStringHelper(item)
-                    .add("index", item.index())
-                    .add("id", item.id())
-                    .add("routing", item.routing())
-                    .add("version", item.version());
-            if (item.insertValues() != null) {
-                helper.add("insertValues", Arrays.toString(item.insertValues()));
-            }
-            if (item.updateAssignments() != null) {
-                helper.add("updateAssignments", Joiner.on(", ").join(Lists.transform(Arrays.asList(item.updateAssignments()), SymbolFormatter.SYMBOL_FORMAT_FUNCTION)));
-            }
-            return helper.toString();
-        }
-
-        @Override
-        protected Void visitPlanNode(PlanNode node, PrintContext context) {
-            context.print(node.getClass().getSimpleName());
-            return null;
-        }
-    }
-
-    private ProjectionPrinter projectionPrinter;
-    private SymbolPrinter symbolPrinter;
-    private final PlanNodePrinter planNodePrinter;
-
-
-
-    public PlanPrinter() {
-        projectionPrinter = new ProjectionPrinter();
-        symbolPrinter = new SymbolPrinter();
-        planNodePrinter = new PlanNodePrinter();
-    }
-
-    public String print(Plan plan) {
-        StringBuilder output = new StringBuilder();
-        PrintContext context = new PrintContext(output);
-        process(plan, context);
-        return output.toString();
-    }
-
-
-    private void processProjections(DQLPlanNode node, PrintContext context) {
-        if (node.hasProjections()) {
-            context.print(node.toString());
-            context.indent();
-            context.print("projections: ");
-            for (Projection projection : node.projections()) {
-                projectionPrinter.process(projection, context);
-            }
-            context.dedent();
-        }
-    }
-
-    @Override
-    protected Void visitPlan(Plan plan, PrintContext context) {
-        context.print("Plan: " + plan.getClass().getCanonicalName());
-        return null;
-    }
-
-    @Override
-    public Void visitUpsert(Upsert node, PrintContext context) {
-        context.print("Upsert: ");
-        context.indent();
-        for (List<DQLPlanNode> nodes : node.nodes()) {
-            for (DQLPlanNode planNode : nodes) {
-                planNodePrinter.process(planNode, context);
-            }
-        }
-        context.dedent();
-        return null;
-    }
-
-    @Override
-    public Void visitNonDistributedGroupBy(NonDistributedGroupBy node, PrintContext context) {
-        context.print(node.getClass().getSimpleName() + ": ");
-        context.indent();
-        planNodePrinter.process(node.collectNode(), context);
-        if (node.localMergeNode() != null) {
-            planNodePrinter.process(node.localMergeNode(), context);
-        }
-        context.print("distributed: %s", node.resultIsDistributed());
-        context.dedent();
-        return null;
-    }
-
-    @Override
-    public Void visitIterablePlan(IterablePlan plan, PrintContext context) {
-        visitPlan(plan, context);
-        context.indent();
-        for (PlanNode node : plan) {
-            planNodePrinter.process(node, context);
-        }
-        context.dedent();
-        return null;
     }
 }

@@ -21,214 +21,164 @@
 
 package io.crate.operation.collect;
 
-import com.google.common.base.Function;
-import io.crate.action.sql.query.CrateSearchContext;
-import org.elasticsearch.common.lease.Releasable;
-import org.elasticsearch.common.logging.ESLogger;
+import com.carrotsearch.hppc.IntObjectHashMap;
+import com.carrotsearch.hppc.cursors.ObjectCursor;
+import com.google.common.annotations.VisibleForTesting;
+import io.crate.action.job.SharedShardContexts;
+import io.crate.breaker.RamAccountingContext;
+import io.crate.data.BatchConsumer;
+import io.crate.data.ListenableBatchConsumer;
+import io.crate.jobs.AbstractExecutionSubContext;
+import io.crate.metadata.RowGranularity;
+import io.crate.planner.node.dql.CollectPhase;
+import io.crate.planner.node.dql.RoutedCollectPhase;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.common.StopWatch;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.index.engine.Engine;
-import org.elasticsearch.index.shard.ShardId;
-import org.elasticsearch.index.shard.service.IndexShard;
-import org.elasticsearch.search.internal.SearchContext;
+import org.elasticsearch.threadpool.ThreadPool;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Arrays;
+import java.util.Locale;
 
-public class JobCollectContext implements Releasable {
+public class JobCollectContext extends AbstractExecutionSubContext {
 
-    private final UUID id;
-    private final Map<Integer, LuceneDocCollector> activeCollectors = new HashMap<>();
-    private final ConcurrentMap<ShardId, List<Integer>> shardsMap = new ConcurrentHashMap<>();
-    private final ConcurrentMap<Integer, ShardId> jobContextIdMap = new ConcurrentHashMap<>();
-    private final ConcurrentMap<ShardId, Integer> engineSearchersRefCount = new ConcurrentHashMap<>();
-    private final Object lock = new Object();
-    private final AtomicBoolean closed = new AtomicBoolean(false);
+    private static final Logger LOGGER = Loggers.getLogger(JobCollectContext.class);
 
-    private static final ESLogger LOGGER = Loggers.getLogger(JobCollectContext.class);
+    private final CollectPhase collectPhase;
+    private final MapSideDataCollectOperation collectOperation;
+    private final RamAccountingContext queryPhaseRamAccountingContext;
+    private final ListenableBatchConsumer consumer;
+    private final SharedShardContexts sharedShardContexts;
 
-    private volatile long lastAccessTime = -1;
-    private volatile long keepAlive;
+    private final IntObjectHashMap<Engine.Searcher> searchers = new IntObjectHashMap<>();
+    private final Object subContextLock = new Object();
+    private final String threadPoolName;
 
-    public JobCollectContext(UUID id) {
-        this.id = id;
+    private CrateCollector collector = null;
+
+    public JobCollectContext(final CollectPhase collectPhase,
+                             MapSideDataCollectOperation collectOperation,
+                             RamAccountingContext queryPhaseRamAccountingContext,
+                             BatchConsumer consumer,
+                             SharedShardContexts sharedShardContexts) {
+        super(collectPhase.phaseId(), LOGGER);
+        this.collectPhase = collectPhase;
+        this.collectOperation = collectOperation;
+        this.queryPhaseRamAccountingContext = queryPhaseRamAccountingContext;
+        this.sharedShardContexts = sharedShardContexts;
+        this.consumer = new ListenableBatchConsumer(consumer);
+        this.consumer.completionFuture().whenComplete((result, ex) -> close(ex));
+        this.threadPoolName = threadPoolName(collectPhase);
     }
 
-    public UUID id() {
-        return id;
-    }
+    public void addSearcher(int searcherId, Engine.Searcher searcher) {
+        if (isClosed()) {
+            // if this is closed and addContext is called this means the context got killed.
+            searcher.close();
+            return;
+        }
 
-    public void registerJobContextId(ShardId shardId, int jobContextId) {
-        if (jobContextIdMap.putIfAbsent(jobContextId, shardId) == null) {
-            List<Integer> oldShardContextIds;
-            List<Integer> shardContextIds = new ArrayList<>();
-            shardContextIds.add(jobContextId);
-            for (;;) {
-                oldShardContextIds = shardsMap.putIfAbsent(shardId, shardContextIds);
-                if (oldShardContextIds == null) {
-                    return;
-                }
-                shardContextIds = new ArrayList<>();
-                shardContextIds.addAll(oldShardContextIds);
-                shardContextIds.add(jobContextId);
-                if (shardsMap.replace(shardId, oldShardContextIds, shardContextIds)) {
-                    return;
-                }
+        synchronized (subContextLock) {
+            Engine.Searcher replacedSearcher = searchers.put(searcherId, searcher);
+            if (replacedSearcher != null) {
+                replacedSearcher.close();
+                searcher.close();
+                throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+                    "ShardCollectContext for %d already added", searcherId));
             }
         }
-    }
-
-    public LuceneDocCollector createCollectorAndContext(IndexShard indexShard,
-                                            int jobSearchContextId,
-                                            Function<Engine.Searcher, LuceneDocCollector> createCollectorFunction) throws Exception {
-        assert shardsMap.containsKey(indexShard.shardId()) : "all jobSearchContextId's must be registered first using registerJobContextId(..)";
-        LuceneDocCollector docCollector;
-        synchronized (lock) {
-            docCollector = activeCollectors.get(jobSearchContextId);
-            if (docCollector == null) {
-                boolean sharedEngineSearcher = true;
-                Engine.Searcher engineSearcher = acquireSearcher(indexShard);
-                if (engineSearcher == null) {
-                    sharedEngineSearcher = false;
-                    engineSearcher = acquireNewSearcher(indexShard);
-                    engineSearchersRefCount.put(indexShard.shardId(), 1);
-                }
-                docCollector = createCollectorFunction.apply(engineSearcher);
-                assert docCollector != null; // should be never null, but interface marks it as nullable
-                docCollector.searchContext().sharedEngineSearcher(sharedEngineSearcher);
-                activeCollectors.put(jobSearchContextId, docCollector);
-                if (LOGGER.isTraceEnabled()) {
-                    LOGGER.trace("Created doc collector with context {} on shard {} for job {}",
-                            jobSearchContextId, indexShard.shardId(), id);
-                }
-            }
-        }
-        return docCollector;
-    }
-
-    @Nullable
-    public LuceneDocCollector findCollector(int jobSearchContextId) {
-        return activeCollectors.get(jobSearchContextId);
-    }
-    public void closeContext(int jobSearchContextId) {
-        closeContext(jobSearchContextId, true);
-    }
-
-    public void closeContext(int jobSearchContextId, boolean removeFromActive) {
-        if (LOGGER.isTraceEnabled()) {
-            LOGGER.trace("Closing context {} on shard {} for job {}",
-                    jobSearchContextId, jobContextIdMap.get(jobSearchContextId), id);
-        }
-        synchronized (lock) {
-            LuceneDocCollector docCollector = activeCollectors.get(jobSearchContextId);
-            if (docCollector != null) {
-                if (docCollector.searchContext().isEngineSearcherShared()) {
-                    ShardId shardId = jobContextIdMap.get(jobSearchContextId);
-                    Integer refCount = engineSearchersRefCount.get(shardId);
-                    assert refCount != null : "refCount should be initialized while creating context";
-                    if (LOGGER.isTraceEnabled()) {
-                        LOGGER.trace("[closeContext] Current engine searcher refCount {} for context {} of shard {}",
-                                refCount, jobSearchContextId, shardId);
-                    }
-                    while (!engineSearchersRefCount.replace(shardId, refCount, refCount - 1)) {
-                        refCount = engineSearchersRefCount.get(shardId);
-                    }
-                    if (engineSearchersRefCount.get(shardId) == 0) {
-                        docCollector.searchContext().sharedEngineSearcher(false);
-                    }
-                }
-                if (removeFromActive) {
-                    activeCollectors.remove(jobSearchContextId);
-                }
-                docCollector.searchContext().close();
-            }
-        }
-    }
-
-    /**
-     * Try to find a {@link CrateSearchContext} for the same shard.
-     * If one is found return its {@link Engine.Searcher}, otherwise return null.
-     */
-    protected Engine.Searcher acquireSearcher(IndexShard indexShard) {
-        List<Integer> jobSearchContextIds = shardsMap.get(indexShard.shardId());
-        if (jobSearchContextIds != null && jobSearchContextIds.size() > 0) {
-            CrateSearchContext searchContext = null;
-            Integer jobSearchContextId = null;
-            synchronized (lock) {
-                Iterator<Integer> it = jobSearchContextIds.iterator();
-                while (searchContext == null && it.hasNext()) {
-                    jobSearchContextId = it.next();
-                    LuceneDocCollector docCollector = activeCollectors.get(jobSearchContextId);
-                    if (docCollector != null) {
-                        searchContext = docCollector.searchContext();
-                    }
-                }
-            }
-            if (searchContext != null) {
-                LOGGER.trace("Reusing engine searcher of shard {}", indexShard.shardId());
-                Integer refCount = engineSearchersRefCount.get(indexShard.shardId());
-                assert refCount != null : "refCount should be initialized while creating context";
-                while (!engineSearchersRefCount.replace(indexShard.shardId(), refCount, refCount+1)) {
-                    refCount = engineSearchersRefCount.get(indexShard.shardId());
-                }
-                if (LOGGER.isTraceEnabled()) {
-                    LOGGER.trace("[acquireSearcher] Current engine searcher refCount {}:{} for context {} of shard {}",
-                            refCount, engineSearchersRefCount.get(indexShard.shardId()), jobSearchContextId, indexShard.shardId());
-                }
-                searchContext.sharedEngineSearcher(true);
-                return searchContext.engineSearcher();
-            }
-        }
-        return null;
-    }
-
-    public void acquireContext(SearchContext context) {
-        SearchContext.setCurrent(context);
-    }
-
-    public void releaseContext(SearchContext context) {
-        assert context == SearchContext.current();
-        context.clearReleasables(SearchContext.Lifetime.PHASE);
-        SearchContext.removeCurrent();
     }
 
     @Override
-    public void close() {
-        if (closed.compareAndSet(false, true)) { // prevent double release
-            synchronized (lock) {
-                Iterator<Integer> it = activeCollectors.keySet().iterator();
-                while (it.hasNext()) {
-                    Integer jobSearchContextId = it.next();
-                    closeContext(jobSearchContextId, false);
-                    it.remove();
-                }
+    public void cleanup() {
+        closeSearchContexts();
+        queryPhaseRamAccountingContext.close();
+    }
+
+    @Override
+    protected void innerClose(@Nullable Throwable throwable) {
+        setBytesUsed(queryPhaseRamAccountingContext.totalBytes());
+    }
+
+    private void closeSearchContexts() {
+        synchronized (subContextLock) {
+            for (ObjectCursor<Engine.Searcher> cursor : searchers.values()) {
+                cursor.value.close();
             }
+            searchers.clear();
         }
     }
 
-    public void accessed(long accessTime) {
-        this.lastAccessTime = accessTime;
+    @Override
+    public void innerKill(@Nonnull Throwable throwable) {
+        if (collector != null) {
+            collector.kill(throwable);
+        }
+        setBytesUsed(queryPhaseRamAccountingContext.totalBytes());
     }
 
-    public long lastAccessTime() {
-        return this.lastAccessTime;
+    @Override
+    public String name() {
+        return collectPhase.name();
     }
 
-    public long keepAlive() {
-        return this.keepAlive;
+
+    @Override
+    public String toString() {
+        return "JobCollectContext{" +
+               "id=" + id +
+               ", sharedContexts=" + sharedShardContexts +
+               ", consumer=" + consumer +
+               ", searchContexts=" + Arrays.toString(searchers.keys) +
+               ", closed=" + isClosed() +
+               '}';
     }
 
-    public void keepAlive(long keepAlive) {
-        this.keepAlive = keepAlive;
+    @Override
+    public void innerPrepare() throws Exception {
+        collector = collectOperation.createCollector(collectPhase, consumer, this);
     }
 
-    /**
-     * Acquire a new searcher, wrapper method needed for simplified testing
-     */
-    protected Engine.Searcher acquireNewSearcher(IndexShard indexShard) {
-        return EngineSearcher.getSearcherWithRetry(indexShard, null);
+    @Override
+    protected void innerStart() {
+        if (logger.isTraceEnabled()) {
+            measureCollectTime();
+        }
+        collectOperation.launchCollector(collector, threadPoolName);
     }
 
+    private void measureCollectTime() {
+        final StopWatch stopWatch = new StopWatch(collectPhase.phaseId() + ": " + collectPhase.name());
+        stopWatch.start("starting collectors");
+        consumer.completionFuture().whenComplete((result, ex) -> {
+            stopWatch.stop();
+            logger.trace("Collectors finished: {}", stopWatch.shortSummary());
+        });
+    }
+
+    public RamAccountingContext queryPhaseRamAccountingContext() {
+        return queryPhaseRamAccountingContext;
+    }
+
+    public SharedShardContexts sharedShardContexts() {
+        return sharedShardContexts;
+    }
+
+    @VisibleForTesting
+    static String threadPoolName(CollectPhase phase) {
+        if (phase instanceof RoutedCollectPhase) {
+            RoutedCollectPhase collectPhase = (RoutedCollectPhase) phase;
+            if (collectPhase.maxRowGranularity() == RowGranularity.NODE
+                       || collectPhase.maxRowGranularity() == RowGranularity.SHARD) {
+                // Node or Shard system table collector
+                return ThreadPool.Names.MANAGEMENT;
+            }
+        }
+
+        // Anything else like doc tables, INFORMATION_SCHEMA tables or sys.cluster table collector, partition collector
+        return ThreadPool.Names.SEARCH;
+    }
 }

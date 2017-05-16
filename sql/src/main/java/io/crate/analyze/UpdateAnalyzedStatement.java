@@ -21,26 +21,19 @@
 
 package io.crate.analyze;
 
-import com.google.common.collect.ImmutableList;
 import io.crate.analyze.relations.AnalyzedRelation;
-import io.crate.analyze.relations.AnalyzedRelationVisitor;
-import io.crate.exceptions.ColumnUnknownException;
-import io.crate.metadata.Path;
-import io.crate.planner.symbol.Field;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.metadata.Reference;
 
-import javax.annotation.Nullable;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-public class UpdateAnalyzedStatement implements AnalyzedRelation, AnalyzedStatement {
+public class UpdateAnalyzedStatement implements AnalyzedStatement {
 
     private final List<NestedAnalyzedStatement> nestedStatements;
     private final AnalyzedRelation sourceRelation;
-
 
     public UpdateAnalyzedStatement(AnalyzedRelation sourceRelation, List<NestedAnalyzedStatement> nestedStatements) {
         this.sourceRelation = sourceRelation;
@@ -79,30 +72,14 @@ public class UpdateAnalyzedStatement implements AnalyzedRelation, AnalyzedStatem
 
         public void addAssignment(Reference reference, Symbol value) {
             if (assignments.containsKey(reference)) {
-                throw new IllegalArgumentException(String.format(Locale.ENGLISH, "reference repeated %s", reference.info().ident().columnIdent().sqlFqn()));
+                throw new IllegalArgumentException(String.format(Locale.ENGLISH, "reference repeated %s", reference.ident().columnIdent().sqlFqn()));
             }
             assignments.put(reference, value);
         }
     }
 
     @Override
-    public <C, R> R accept(AnalyzedRelationVisitor<C, R> visitor, C context) {
-        return visitor.visitUpdateAnalyzedStatement(this, context);
-    }
-
-    @Nullable
-    @Override
-    public Field getField(Path path) {
-        throw new UnsupportedOperationException("getField on UpdateAnalyzedStatement is not implemented");
-    }
-
-    @Override
-    public Field getWritableField(Path path) throws UnsupportedOperationException, ColumnUnknownException {
-        throw new UnsupportedOperationException("UpdateAnalyzedStatement is not writable");
-    }
-
-    @Override
-    public List<Field> fields() {
-        return ImmutableList.of();
+    public boolean isWriteOperation() {
+        return true;
     }
 }

@@ -21,120 +21,80 @@
 
 package io.crate.operation.collect;
 
-import com.google.common.collect.ImmutableMap;
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.TreeMapBuilder;
-import io.crate.executor.transport.TransportActionProvider;
-import io.crate.metadata.*;
-import io.crate.planner.PlanNodeBuilder;
-import io.crate.planner.node.PlanNodeStreamerVisitor;
-import io.crate.planner.node.dql.FileUriCollectNode;
-import io.crate.planner.projection.Projection;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.Literal;
+import io.crate.data.CollectionBucket;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.Functions;
+import io.crate.operation.collect.sources.CollectSourceResolver;
+import io.crate.operation.collect.sources.FileCollectSource;
+import io.crate.planner.node.dql.FileUriCollectPhase;
+import io.crate.planner.node.dql.RoutedCollectPhase;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import io.crate.testing.TestingBatchConsumer;
 import io.crate.types.DataTypes;
-import org.elasticsearch.action.bulk.BulkRetryCoordinatorPool;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.cluster.ClusterState;
-import org.elasticsearch.cluster.node.DiscoveryNode;
-import org.elasticsearch.cluster.node.DiscoveryNodes;
-import org.elasticsearch.common.settings.ImmutableSettings;
-import org.elasticsearch.discovery.DiscoveryService;
-import org.elasticsearch.indices.IndicesService;
-import org.elasticsearch.node.settings.NodeSettingsService;
-import org.elasticsearch.threadpool.ThreadPool;
+import org.junit.Rule;
 import org.junit.Test;
-import org.mockito.Answers;
+import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
-import java.io.FileWriter;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
-import java.util.*;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.UUID;
 
-import static io.crate.testing.TestingHelpers.createReference;
-import static io.crate.testing.TestingHelpers.isRow;
+import static io.crate.testing.TestingHelpers.*;
 import static org.hamcrest.Matchers.contains;
-import static org.junit.Assert.assertThat;
+import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class MapSideDataCollectOperationTest {
+public class MapSideDataCollectOperationTest extends CrateDummyClusterServiceUnitTest {
+
+    @Rule
+    public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     @Test
     public void testFileUriCollect() throws Exception {
-        ClusterService clusterService = mock(ClusterService.class);
-        DiscoveryNode discoveryNode = mock(DiscoveryNode.class);
-        when(discoveryNode.id()).thenReturn("dummyNodeId");
-        DiscoveryNodes discoveryNodes = mock(DiscoveryNodes.class);
-        when(discoveryNodes.localNodeId()).thenReturn("dummyNodeId");
-        ClusterState clusterState = mock(ClusterState.class);
-        when(clusterState.nodes()).thenReturn(discoveryNodes);
-        when(clusterService.state()).thenReturn(clusterState);
-        DiscoveryService discoveryService = mock(DiscoveryService.class);
-        when(discoveryService.localNode()).thenReturn(discoveryNode);
-        IndicesService indicesService = mock(IndicesService.class);
-        Functions functions = new Functions(
-                ImmutableMap.<FunctionIdent, FunctionImplementation>of(),
-                ImmutableMap.<String, DynamicFunctionResolver>of());
-        ReferenceResolver referenceResolver = new ReferenceResolver() {
-            @Override
-            public ReferenceImplementation getImplementation(ReferenceIdent ident) {
-                return null;
-            }
-        };
-
-        NodeSettingsService nodeSettingsService = mock(NodeSettingsService.class);
-
-        CollectContextService collectContextService = mock(CollectContextService.class);
-        LocalCollectOperation collectOperation = new LocalCollectOperation(
-                clusterService,
-                ImmutableSettings.EMPTY,
-                mock(TransportActionProvider.class, Answers.RETURNS_DEEP_STUBS.get()),
-                mock(BulkRetryCoordinatorPool.class),
-                functions,
-                referenceResolver,
-                indicesService,
-                new ThreadPool(ImmutableSettings.builder().put("name", getClass().getName()).build(), null),
-                new CollectServiceResolver(discoveryService,
-                        new SystemCollectService(
-                                discoveryService,
-                                functions,
-                                new StatsTables(ImmutableSettings.EMPTY, nodeSettingsService)
-                        )
-                ),
-                new PlanNodeStreamerVisitor(functions),
-                collectContextService
+        Functions functions = getFunctions();
+        CollectSourceResolver collectSourceResolver = mock(CollectSourceResolver.class);
+        when(collectSourceResolver.getService(any(RoutedCollectPhase.class)))
+            .thenReturn(new FileCollectSource(functions, clusterService, Collections.emptyMap()));
+        MapSideDataCollectOperation collectOperation = new MapSideDataCollectOperation(
+            collectSourceResolver,
+            THREAD_POOL
         );
-
-        File tmpFile = File.createTempFile("fileUriCollectOperation", ".json");
-        try (FileWriter writer = new FileWriter(tmpFile)) {
+        File tmpFile = temporaryFolder.newFile("fileUriCollectOperation.json");
+        try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(tmpFile), StandardCharsets.UTF_8)) {
             writer.write("{\"name\": \"Arthur\", \"id\": 4, \"details\": {\"age\": 38}}\n");
             writer.write("{\"id\": 5, \"name\": \"Trillian\", \"details\": {\"age\": 33}}\n");
         }
 
-        Routing routing = new Routing(
-                TreeMapBuilder.<String, Map<String, List<Integer>>>newMapBuilder()
-                .put("dummyNodeId", new TreeMap<String, List<Integer>>())
-                .map()
+        FileUriCollectPhase collectNode = new FileUriCollectPhase(
+            UUID.randomUUID(),
+            0,
+            "test",
+            Collections.singletonList("noop_id"),
+            Literal.of(Paths.get(tmpFile.toURI()).toUri().toString()),
+            Arrays.asList(
+                createReference("name", DataTypes.STRING),
+                createReference(new ColumnIdent("details", "age"), DataTypes.INTEGER)
+            ),
+            Collections.emptyList(),
+            null,
+            false
         );
-        FileUriCollectNode collectNode = new FileUriCollectNode(
-                "test",
-                routing,
-                Literal.newLiteral(Paths.get(tmpFile.toURI()).toUri().toString()),
-                Arrays.<Symbol>asList(
-                        createReference("name", DataTypes.STRING),
-                        createReference(new ColumnIdent("details", "age"), DataTypes.INTEGER)
-                ),
-                Arrays.<Projection>asList(),
-                null,
-                false
-        );
-        collectNode.jobId(UUID.randomUUID());
-        PlanNodeBuilder.setOutputTypes(collectNode);
-        Bucket objects = collectOperation.collect(collectNode, null).get();
-        assertThat(objects, contains(
-                isRow("Arthur", 38),
-                isRow("Trillian", 33)
+        String threadPoolName = JobCollectContext.threadPoolName(collectNode);
+
+        TestingBatchConsumer consumer = new TestingBatchConsumer();
+        JobCollectContext jobCollectContext = mock(JobCollectContext.class);
+        CrateCollector collectors = collectOperation.createCollector(collectNode, consumer, jobCollectContext);
+        collectOperation.launchCollector(collectors, threadPoolName);
+        assertThat(new CollectionBucket(consumer.getResult()), contains(
+            isRow("Arthur", 38),
+            isRow("Trillian", 33)
         ));
     }
 }

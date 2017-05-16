@@ -20,37 +20,41 @@
  */
 package io.crate.analyze;
 
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
-import io.crate.planner.symbol.SymbolFormatter;
-import io.crate.planner.symbol.SymbolVisitor;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolVisitor;
+import io.crate.analyze.symbol.format.SymbolFormatter;
+import io.crate.operation.scalar.arithmetic.NegateFunction;
 import io.crate.types.*;
 
-public class NegativeLiteralVisitor extends SymbolVisitor<Void, Literal> {
+public class NegativeLiteralVisitor extends SymbolVisitor<Void, Symbol> {
 
     @Override
     public Literal visitLiteral(Literal symbol, Void context) {
-        if (symbol.value() == null) {
+        Object value = symbol.value();
+        if (value == null) {
             return symbol;
         }
-        switch (symbol.valueType().id()) {
+        DataType valueType = symbol.valueType();
+        switch (valueType.id()) {
             case DoubleType.ID:
-                return Literal.newLiteral(symbol.valueType(), (Double)symbol.value() * -1);
+                return Literal.of(valueType, (Double) value * -1);
             case FloatType.ID:
-                return Literal.newLiteral(symbol.valueType(), (Double)symbol.value() * -1);
+                return Literal.of(valueType, (Double) value * -1);
             case ShortType.ID:
-                return Literal.newLiteral(symbol.valueType(), (Short)symbol.value() * -1);
+                return Literal.of(valueType, (Short) value * -1);
             case IntegerType.ID:
-                return Literal.newLiteral(symbol.valueType(), (Integer)symbol.value() * -1);
+                return Literal.of(valueType, (Integer) value * -1);
             case LongType.ID:
-                return Literal.newLiteral(symbol.valueType(), (Long)symbol.value() * -1);
+                return Literal.of(valueType, (Long) value * -1);
             default:
-                return symbol;
+                throw new UnsupportedOperationException(SymbolFormatter.format(
+                    "Cannot negate %s. You may need to add explicit type casts", symbol));
         }
     }
 
     @Override
-    protected Literal visitSymbol(Symbol symbol, Void context) {
-        throw new UnsupportedOperationException(SymbolFormatter.format("Cannot negate symbol %s", symbol));
+    protected Symbol visitSymbol(Symbol symbol, Void context) {
+        return NegateFunction.createFunction(symbol);
     }
 }

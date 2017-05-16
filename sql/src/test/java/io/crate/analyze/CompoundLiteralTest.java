@@ -22,204 +22,132 @@
 package io.crate.analyze;
 
 import com.google.common.collect.ImmutableMap;
-import io.crate.analyze.expressions.ExpressionAnalysisContext;
-import io.crate.analyze.expressions.ExpressionAnalyzer;
-import io.crate.analyze.relations.AnalyzedRelation;
-import io.crate.analyze.relations.AnalyzedRelationVisitor;
-import io.crate.analyze.relations.FullQualifedNameFieldProvider;
-import io.crate.metadata.*;
-import io.crate.metadata.table.SchemaInfo;
-import io.crate.planner.symbol.Field;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
-import io.crate.planner.symbol.SymbolType;
-import io.crate.sql.parser.ParsingException;
-import io.crate.sql.parser.SqlParser;
-import io.crate.sql.tree.QualifiedName;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolType;
 import io.crate.test.integration.CrateUnitTest;
+import io.crate.testing.SqlExpressions;
+import io.crate.testing.T3;
 import io.crate.types.*;
-import org.elasticsearch.action.admin.indices.template.put.TransportPutIndexTemplateAction;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.cluster.ClusterState;
-import org.elasticsearch.cluster.metadata.IndexTemplateMetaData;
-import org.elasticsearch.cluster.metadata.MetaData;
-import org.elasticsearch.common.collect.ImmutableOpenMap;
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.hamcrest.Matchers;
 import org.junit.Before;
 import org.junit.Test;
 
-import javax.annotation.Nullable;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
+import static io.crate.testing.SymbolMatchers.isFunction;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.Matchers.is;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 public class CompoundLiteralTest extends CrateUnitTest {
 
-    private AnalysisMetaData analysisMetaData;
+    private SqlExpressions expressions;
 
     @Before
     public void prepare() {
-        ClusterService clusterService = mock(ClusterService.class);
-        ClusterState state = mock(ClusterState.class);
-        MetaData metaData = mock(MetaData.class);
-        when(metaData.concreteAllOpenIndices()).thenReturn(new String[0]);
-        when(metaData.getTemplates()).thenReturn(ImmutableOpenMap.<String, IndexTemplateMetaData>of());
-        when(metaData.templates()).thenReturn(ImmutableOpenMap.<String, IndexTemplateMetaData>of());
-        when(state.metaData()).thenReturn(metaData);
-        when(clusterService.state()).thenReturn(state);
-        TransportPutIndexTemplateAction transportPutIndexTemplateAction = mock(TransportPutIndexTemplateAction.class);
-        analysisMetaData = new AnalysisMetaData(
-                new Functions(
-                        Collections.<FunctionIdent, FunctionImplementation>emptyMap(),
-                        Collections.<String, DynamicFunctionResolver>emptyMap()),
-                new ReferenceInfos(Collections.<String, SchemaInfo>emptyMap(),
-                                   clusterService,
-                                   transportPutIndexTemplateAction),
-                new GlobalReferenceResolver(Collections.<ReferenceIdent, ReferenceImplementation>emptyMap())
-        );
+        expressions = new SqlExpressions(T3.SOURCES);
+    }
+
+    @SuppressWarnings("ConstantConditions")
+    @Test
+    public void testObjectConstruction() throws Exception {
+        Symbol s = expressions.asSymbol("{}");
+        assertThat(s, instanceOf(Literal.class));
+        Literal l = (Literal) s;
+        assertThat(l.value(), is((Object) new HashMap<String, Object>()));
+
+        Literal objectLiteral = (Literal) expressions.normalize(expressions.asSymbol("{ident='value'}"));
+        assertThat(objectLiteral.symbolType(), is(SymbolType.LITERAL));
+        assertThat(objectLiteral.valueType(), is((DataType) ObjectType.INSTANCE));
+        assertThat(objectLiteral.value(), is((Object) new MapBuilder<String, Object>().put("ident", new BytesRef("value")).map()));
+
+        Literal multipleObjectLiteral = (Literal) expressions.normalize(expressions.asSymbol("{\"Ident\"=123.4, a={}, ident='string'}"));
+        Map<String, Object> values = (Map<String, Object>) multipleObjectLiteral.value();
+        assertThat(values, is(new MapBuilder<String, Object>()
+            .put("Ident", 123.4d)
+            .put("a", new HashMap<String, Object>())
+            .put("ident", new BytesRef("string"))
+            .map()));
+    }
+
+    @Test
+    public void testObjectConstructionWithExpressionsAsValues() throws Exception {
+        Literal objectLiteral = (Literal) expressions.normalize(expressions.asSymbol("{name = 1 + 2}"));
+        assertThat(objectLiteral.symbolType(), is(SymbolType.LITERAL));
+        assertThat(objectLiteral.value(), is(new MapBuilder<String, Object>().put("name", 3L).map()));
+
+        Literal nestedObjectLiteral = (Literal) expressions.normalize(expressions.asSymbol("{a = {name = concat('foo', 'bar')}}"));
+        @SuppressWarnings("unchecked") Map<String, Object> values = (Map<String, Object>) nestedObjectLiteral.value();
+        assertThat(values, is(new MapBuilder<String, Object>()
+            .put("a", new HashMap<String, Object>() {{
+                put("name", new BytesRef("foobar"));
+            }})
+            .map()));
     }
 
     private Symbol analyzeExpression(String expression) {
-        return analyzeExpression(expression, new Object[0]);
-    }
-
-    private static class DummyRelation implements AnalyzedRelation {
-
-        @Override
-        public <C, R> R accept(AnalyzedRelationVisitor<C, R> visitor, C context) {
-            return null;
-        }
-
-        @Nullable
-        @Override
-        public Field getField(Path path) {
-            return null;
-        }
-
-        @Override
-        public Field getWritableField(Path path) throws UnsupportedOperationException {
-            return null;
-        }
-
-        @Override
-        public List<Field> fields() {
-            return null;
-        }
-    }
-
-    private Symbol analyzeExpression(String expression, Object[] params) {
-        ExpressionAnalyzer expressionAnalyzer = new ExpressionAnalyzer(
-                analysisMetaData,
-                new ParameterContext(params, new Object[0][], null),
-                new FullQualifedNameFieldProvider(
-                        ImmutableMap.<QualifiedName, AnalyzedRelation>of(
-                            new QualifiedName("dummy"), new DummyRelation()
-                ))
-        );
-        return expressionAnalyzer.convert(SqlParser.createExpression(expression), new ExpressionAnalysisContext());
+        return expressions.normalize(expressions.asSymbol(expression));
     }
 
     @Test
-    public void testObjectLiteral() throws Exception {
-        Symbol s = analyzeExpression("{}");
-        assertThat(s, instanceOf(Literal.class));
-        Literal l = (Literal)s;
-        assertThat(l.value(), is((Object)new HashMap<String, Object>()));
-
-        Literal objectLiteral = (Literal)analyzeExpression("{ident='value'}");
-        assertThat(objectLiteral.symbolType(), is(SymbolType.LITERAL));
-        assertThat(objectLiteral.valueType(), is((DataType)ObjectType.INSTANCE));
-        assertThat(objectLiteral.value(), is((Object) new MapBuilder<String, Object>().put("ident", "value").map()));
-
-        Literal multipleObjectLiteral = (Literal)analyzeExpression("{\"Ident\"=123.4, a={}, ident='string'}");
-        Map<String, Object> values = (Map<String, Object>)multipleObjectLiteral.value();
-        assertThat(values, is(new MapBuilder<String, Object>()
-                .put("Ident", 123.4d)
-                .put("a", new HashMap<String, Object>())
-                .put("ident", "string")
-                .map()));
+    public void testObjectConstructionWithParameterExpression() throws Exception {
+        assertThat(expressions.asSymbol("{ident=?}"), isFunction("_map"));
     }
 
     @Test
-    public void testObjectliteralWithParameter() throws Exception {
-        Literal objectLiteral = (Literal) analyzeExpression("{ident=?}", new Object[]{1});
-        assertThat(objectLiteral.valueType(), is((DataType) ObjectType.INSTANCE));
-        assertThat(objectLiteral.value(), is((Object) new MapBuilder<String, Object>().put("ident", 1).map()));
-    }
-
-    @Test
-    public void testObjectLiteralWithFunction() throws Exception {
-        expectedException.expect(ParsingException.class);
-        expectedException.expectMessage("line 1:4: no viable alternative at input 'format'");
-        analyzeExpression("{a=format('%s.', 'dot')}");
-    }
-
-    @Test
-    public void testObjectLiteralKeyTwice() throws Exception {
+    public void testObjectConstructionFailsOnDuplicateKeys() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("key 'a' listed twice in object literal");
+        expectedException.expectMessage("object contains duplicate keys");
         analyzeExpression("{a=1, a=2}");
     }
 
     @Test
-    public void testArrayLiteral() throws Exception {
+    public void testArrayConstructionWithOnlyLiterals() throws Exception {
         Literal emptyArray = (Literal) analyzeExpression("[]");
-        assertThat((Object[])emptyArray.value(), is(new Object[0]));
-        assertThat(emptyArray.valueType(), is((DataType)new ArrayType(UndefinedType.INSTANCE)));
+        assertThat((Object[]) emptyArray.value(), is(new Object[0]));
+        assertThat(emptyArray.valueType(), is((DataType) new ArrayType(UndefinedType.INSTANCE)));
 
         Literal singleArray = (Literal) analyzeExpression("[1]");
-        assertThat(singleArray.valueType(), is((DataType)new ArrayType(LongType.INSTANCE)));
-        assertThat(((Object[])singleArray.value()).length, is(1));
-        assertThat(((Object[])singleArray.value())[0], is((Object)1L));
+        assertThat(singleArray.valueType(), is((DataType) new ArrayType(LongType.INSTANCE)));
+        assertThat(((Object[]) singleArray.value()).length, is(1));
+        assertThat(((Object[]) singleArray.value())[0], is((Object) 1L));
 
         Literal multiArray = (Literal) analyzeExpression("[1, 2, 3]");
-        assertThat(multiArray.valueType(), is((DataType)new ArrayType(LongType.INSTANCE)));
-        assertThat(((Object[])multiArray.value()).length, is(3));
-        assertThat((Object[])multiArray.value(), is(new Object[]{1L,2L,3L}));
+        assertThat(multiArray.valueType(), is((DataType) new ArrayType(LongType.INSTANCE)));
+        assertThat(((Object[]) multiArray.value()).length, is(3));
+        assertThat((Object[]) multiArray.value(), is(new Object[]{1L, 2L, 3L}));
     }
 
     @Test
-    public void testArrayLiteralWithParameter() throws Exception {
-        Literal array = (Literal) analyzeExpression("[1, ?]", new Object[]{4L});
-        assertThat(array.valueType(), is((DataType) new ArrayType(LongType.INSTANCE)));
-        assertThat(((Object[]) array.value()).length, is(2));
-        assertThat((Object[]) array.value(), is(new Object[]{1L, 4L}));
+    public void testArrayConstructionWithParameterExpression() throws Exception {
+        Symbol array = expressions.asSymbol("[1, ?]");
+        assertThat(array, isFunction("_array"));
+        assertThat(((io.crate.analyze.symbol.Function) array).arguments().size(), is(2));
     }
 
     @Test
     public void testArrayDifferentTypes() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("array element 'string' not of array item type long");
+        expectedException.expect(UnsupportedOperationException.class);
+        expectedException.expectMessage("unknown function: _array(long, string)");
         analyzeExpression("[1, 'string']");
-    }
-
-    @Test
-    public void testArrayDifferentTypesString() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("array element 1 not of array item type string");
-        analyzeExpression("['string', 1]");
     }
 
     @Test
     public void testNestedArrayLiteral() throws Exception {
         Map<String, DataType> expected = ImmutableMap.<String, DataType>builder()
-                .put("'string'", DataTypes.STRING)
-                .put("0", DataTypes.LONG)
-                .put("1.8", DataTypes.DOUBLE)
-                .put("TRUE", DataTypes.BOOLEAN)
-                .build();
+            .put("'string'", DataTypes.STRING)
+            .put("0", DataTypes.LONG)
+            .put("1.8", DataTypes.DOUBLE)
+            .put("TRUE", DataTypes.BOOLEAN)
+            .build();
         for (Map.Entry<String, DataType> entry : expected.entrySet()) {
             Symbol nestedArraySymbol = analyzeExpression("[[" + entry.getKey() + "]]");
             assertThat(nestedArraySymbol, Matchers.instanceOf(Literal.class));
-            Literal nestedArray = (Literal)nestedArraySymbol;
-            assertThat(nestedArray.valueType(), is((DataType)new ArrayType(new ArrayType(entry.getValue()))));
+            Literal nestedArray = (Literal) nestedArraySymbol;
+            assertThat(nestedArray.valueType(), is((DataType) new ArrayType(new ArrayType(entry.getValue()))));
         }
     }
 }

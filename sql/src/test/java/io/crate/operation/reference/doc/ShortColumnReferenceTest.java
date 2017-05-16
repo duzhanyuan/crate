@@ -24,44 +24,34 @@ package io.crate.operation.reference.doc;
 import io.crate.operation.reference.doc.lucene.ShortColumnReference;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
-import org.apache.lucene.document.IntField;
+import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
-import org.elasticsearch.index.fielddata.FieldDataType;
-import org.elasticsearch.index.mapper.FieldMapper;
 import org.junit.Test;
 
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 
 public class ShortColumnReferenceTest extends DocLevelExpressionsTest {
+
+    private String column = "s";
+
     @Override
     protected void insertValues(IndexWriter writer) throws Exception {
-        for (short i = -10; i<10; i++) {
+        for (short i = -10; i < 10; i++) {
             Document doc = new Document();
             doc.add(new StringField("_id", Short.toString(i), Field.Store.NO));
-            doc.add(new IntField(fieldName().name(), i, Field.Store.NO));
+            doc.add(new SortedNumericDocValuesField(column, i));
             writer.addDocument(doc);
         }
     }
 
-    @Override
-    protected FieldMapper.Names fieldName() {
-        return new FieldMapper.Names("s");
-    }
-
-    @Override
-    protected FieldDataType fieldType() {
-        return new FieldDataType("short");
-    }
-
     @Test
-    public void testFieldCacheExpression() throws Exception {
-        ShortColumnReference shortColumn = new ShortColumnReference(fieldName().name());
+    public void testShortExpression() throws Exception {
+        ShortColumnReference shortColumn = new ShortColumnReference(column);
         shortColumn.startCollect(ctx);
         shortColumn.setNextReader(readerContext);
         IndexSearcher searcher = new IndexSearcher(readerContext.reader());

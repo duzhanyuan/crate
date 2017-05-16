@@ -23,92 +23,106 @@ package io.crate.metadata;
 
 import com.google.common.collect.ImmutableList;
 import io.crate.Constants;
-import io.crate.test.integration.CrateUnitTest;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.Version;
 import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.ClusterStateUpdateTask;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.MetaData;
-import org.elasticsearch.common.collect.ImmutableOpenMap;
+import org.elasticsearch.common.settings.Settings;
 import org.junit.Test;
 
-import java.util.HashMap;
 import java.util.Iterator;
-import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.Matchers.hasEntry;
 import static org.hamcrest.Matchers.is;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
-public class PartitionInfosTest  extends CrateUnitTest {
+public class PartitionInfosTest extends CrateDummyClusterServiceUnitTest {
 
-    private ClusterService mockService(Map<String, IndexMetaData> indices) {
-        ClusterService clusterService = mock(ClusterService.class);
-        ClusterState clusterState = mock(ClusterState.class);
-        MetaData metaData = mock(MetaData.class);
-        when(clusterService.state()).thenReturn(clusterState);
-        when(clusterState.metaData()).thenReturn(metaData);
+    private static Settings defaultSettings() {
+        return Settings.builder().put("index.version.created", Version.CURRENT).build();
+    }
 
-        when(metaData.indices()).thenReturn(ImmutableOpenMap.<String, IndexMetaData>builder().putAll(indices).build());
-        return clusterService;
+    private void addIndexMetaDataToClusterState(IndexMetaData.Builder imdBuilder) throws Exception {
+        CompletableFuture<Boolean> processed = new CompletableFuture<>();
+        clusterService.submitStateUpdateTask("test", new ClusterStateUpdateTask() {
+            @Override
+            public ClusterState execute(ClusterState currentState) throws Exception {
+                return ClusterState.builder(currentState)
+                    .metaData(MetaData.builder(currentState.metaData()).put(imdBuilder)).build();
+            }
+
+            @Override
+            public void onFailure(String source, Exception e) {
+                processed.completeExceptionally(e);
+            }
+
+            @Override
+            public void clusterStateProcessed(String source, ClusterState oldState, ClusterState newState) {
+                processed.complete(true);
+            }
+        });
+        processed.get(10, TimeUnit.SECONDS);
     }
 
     @Test
     public void testIgnoreNoPartitions() throws Exception {
-        Map<String, IndexMetaData> indices = new HashMap<>();
-        indices.put("test1", IndexMetaData.builder("test1").numberOfShards(10).numberOfReplicas(4).build());
-        Iterable<PartitionInfo> partitioninfos = new PartitionInfos(mockService(indices));
+        addIndexMetaDataToClusterState(
+            IndexMetaData.builder("test1").settings(defaultSettings()).numberOfShards(10).numberOfReplicas(4));
+        Iterable<PartitionInfo> partitioninfos = new PartitionInfos(clusterService);
         assertThat(partitioninfos.iterator().hasNext(), is(false));
     }
 
     @Test
     public void testPartitionWithoutMapping() throws Exception {
-        Map<String, IndexMetaData> indices = new HashMap<>();
         PartitionName partitionName = new PartitionName("test1", ImmutableList.of(new BytesRef("foo")));
-        indices.put(partitionName.stringValue(), IndexMetaData.builder(partitionName.stringValue()).numberOfShards(10).numberOfReplicas(4).build());
-        Iterable<PartitionInfo> partitioninfos = new PartitionInfos(mockService(indices));
+        addIndexMetaDataToClusterState(IndexMetaData.builder(partitionName.asIndexName())
+            .settings(defaultSettings()).numberOfShards(10).numberOfReplicas(4));
+        Iterable<PartitionInfo> partitioninfos = new PartitionInfos(clusterService);
         assertThat(partitioninfos.iterator().hasNext(), is(false));
     }
 
     @Test
     public void testPartitionWithMeta() throws Exception {
-        Map<String, IndexMetaData> indices = new HashMap<>();
         PartitionName partitionName = new PartitionName("test1", ImmutableList.of(new BytesRef("foo")));
-        IndexMetaData indexMetaData = IndexMetaData
-                .builder(partitionName.stringValue())
-                .putMapping(Constants.DEFAULT_MAPPING_TYPE, "{\"_meta\":{\"partitioned_by\":[[\"col\", \"string\"]]}}")
-                .numberOfShards(10)
-                .numberOfReplicas(4).build();
-        indices.put(partitionName.stringValue(), indexMetaData);
-        Iterable<PartitionInfo> partitioninfos = new PartitionInfos(mockService(indices));
+        IndexMetaData.Builder indexMetaData = IndexMetaData
+            .builder(partitionName.asIndexName())
+            .settings(defaultSettings())
+            .putMapping(Constants.DEFAULT_MAPPING_TYPE, "{\"_meta\":{\"partitioned_by\":[[\"col\", \"string\"]]}}")
+            .numberOfShards(10)
+            .numberOfReplicas(4);
+        addIndexMetaDataToClusterState(indexMetaData);
+        Iterable<PartitionInfo> partitioninfos = new PartitionInfos(clusterService);
         Iterator<PartitionInfo> iter = partitioninfos.iterator();
         PartitionInfo partitioninfo = iter.next();
-        assertThat(partitioninfo.name().stringValue(), is(partitionName.stringValue()));
+        assertThat(partitioninfo.name().asIndexName(), is(partitionName.asIndexName()));
         assertThat(partitioninfo.numberOfShards(), is(10));
         assertThat(partitioninfo.numberOfReplicas().utf8ToString(), is("4"));
-        assertThat(partitioninfo.values(), hasEntry("col", (Object)"foo"));
+        assertThat(partitioninfo.values(), hasEntry("col", "foo"));
         assertThat(iter.hasNext(), is(false));
     }
 
     @Test
     public void testPartitionWithMetaMultiCol() throws Exception {
-        Map<String, IndexMetaData> indices = new HashMap<>();
         PartitionName partitionName = new PartitionName("test1", ImmutableList.of(new BytesRef("foo"), new BytesRef("1")));
-        IndexMetaData indexMetaData = IndexMetaData
-                .builder(partitionName.stringValue())
-                .putMapping(Constants.DEFAULT_MAPPING_TYPE, "{\"_meta\":{\"partitioned_by\":[[\"col\", \"string\"], [\"col2\", \"integer\"]]}}")
-                .numberOfShards(10)
-                .numberOfReplicas(4).build();
-        indices.put(partitionName.stringValue(), indexMetaData);
-        Iterable<PartitionInfo> partitioninfos = new PartitionInfos(mockService(indices));
+        IndexMetaData.Builder indexMetaData = IndexMetaData
+            .builder(partitionName.asIndexName())
+            .settings(defaultSettings())
+            .putMapping(Constants.DEFAULT_MAPPING_TYPE, "{\"_meta\":{\"partitioned_by\":[[\"col\", \"string\"], [\"col2\", \"integer\"]]}}")
+            .numberOfShards(10)
+            .numberOfReplicas(4);
+        addIndexMetaDataToClusterState(indexMetaData);
+        Iterable<PartitionInfo> partitioninfos = new PartitionInfos(clusterService);
         Iterator<PartitionInfo> iter = partitioninfos.iterator();
         PartitionInfo partitioninfo = iter.next();
-        assertThat(partitioninfo.name().stringValue(), is(partitionName.stringValue()));
+        assertThat(partitioninfo.name().asIndexName(), is(partitionName.asIndexName()));
         assertThat(partitioninfo.numberOfShards(), is(10));
         assertThat(partitioninfo.numberOfReplicas().utf8ToString(), is("4"));
-        assertThat(partitioninfo.values(), hasEntry("col", (Object)"foo"));
-        assertThat(partitioninfo.values(), hasEntry("col2", (Object)1));
+        assertThat(partitioninfo.values(), hasEntry("col", "foo"));
+        assertThat(partitioninfo.values(), hasEntry("col2", 1));
         assertThat(iter.hasNext(), is(false));
     }
 }

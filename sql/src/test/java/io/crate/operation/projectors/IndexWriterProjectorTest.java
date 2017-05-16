@@ -21,38 +21,36 @@
 
 package io.crate.operation.projectors;
 
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.RowN;
+import io.crate.analyze.symbol.InputColumn;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.data.*;
+import io.crate.executor.transport.TransportShardUpsertAction;
 import io.crate.integrationtests.SQLTransportIntegrationTest;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.ReferenceIdent;
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.*;
 import io.crate.metadata.doc.DocSysColumns;
-import io.crate.operation.Input;
 import io.crate.operation.collect.CollectExpression;
 import io.crate.operation.collect.InputCollectExpression;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.InputColumn;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
-import io.crate.test.integration.CrateIntegrationTest;
+import io.crate.testing.TestingBatchConsumer;
 import io.crate.types.DataTypes;
-import io.crate.types.StringType;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.action.admin.indices.create.TransportCreateIndexAction;
+import org.elasticsearch.action.admin.indices.create.TransportBulkCreateIndicesAction;
 import org.elasticsearch.action.bulk.BulkRetryCoordinatorPool;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.common.settings.Settings;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static io.crate.testing.TestingHelpers.isRow;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.core.Is.is;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
 public class IndexWriterProjectorTest extends SQLTransportIntegrationTest {
 
     private static final ColumnIdent ID_IDENT = new ColumnIdent("id");
@@ -64,66 +62,46 @@ public class IndexWriterProjectorTest extends SQLTransportIntegrationTest {
         execute("create table bulk_import (id int primary key, name string) with (number_of_replicas=0)");
         ensureGreen();
 
-        CollectingProjector collectingProjector = new CollectingProjector();
-        InputCollectExpression<Object> sourceInput = new InputCollectExpression<>(1);
-        InputColumn sourceInputColumn = new InputColumn(1, StringType.INSTANCE);
-        CollectExpression[] collectExpressions = new CollectExpression[]{sourceInput};
+        InputCollectExpression sourceInput = new InputCollectExpression(1);
+        List<CollectExpression<Row, ?>> collectExpressions = Collections.<CollectExpression<Row, ?>>singletonList(sourceInput);
 
-        final IndexWriterProjector indexWriter = new IndexWriterProjector(
-                cluster().getInstance(ClusterService.class),
-                ImmutableSettings.EMPTY,
-                cluster().getInstance(TransportCreateIndexAction.class),
-                cluster().getInstance(BulkRetryCoordinatorPool.class),
-                new TableIdent(null, "bulk_import"),
-                null,
-                new Reference(new ReferenceInfo(new ReferenceIdent(bulkImportIdent, DocSysColumns.RAW), RowGranularity.DOC, DataTypes.STRING)),
-                Arrays.asList(ID_IDENT),
-                Arrays.<Symbol>asList(new InputColumn(0)),
-                Arrays.<Input<?>>asList(),
-                null,
-                sourceInput,
-                sourceInputColumn,
-                collectExpressions,
-                20,
-                null, null,
-                false,
-                false
+        IndexWriterProjector writerProjector = new IndexWriterProjector(
+            internalCluster().getInstance(ClusterService.class),
+            internalCluster().getInstance(Functions.class),
+            new IndexNameExpressionResolver(Settings.EMPTY),
+            Settings.EMPTY,
+            internalCluster().getInstance(TransportBulkCreateIndicesAction.class),
+            internalCluster().getInstance(TransportShardUpsertAction.class)::execute,
+            IndexNameResolver.forTable(new TableIdent(null, "bulk_import")),
+            internalCluster().getInstance(BulkRetryCoordinatorPool.class),
+            new Reference(new ReferenceIdent(bulkImportIdent, DocSysColumns.RAW), RowGranularity.DOC, DataTypes.STRING),
+            Arrays.asList(ID_IDENT),
+            Arrays.<Symbol>asList(new InputColumn(0)),
+            null,
+            null,
+            sourceInput,
+            collectExpressions,
+            20,
+            null,
+            null,
+            false,
+            false,
+            UUID.randomUUID()
         );
-        indexWriter.registerUpstream(null);
-        indexWriter.startProjection();
-        indexWriter.downstream(collectingProjector);
 
-        Thread t1 = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                for (int i = 0; i < 100; i++) {
-                    indexWriter.setNextRow(
-                            new RowN(new Object[]{i, new BytesRef("{\"id\": " + i + ", \"name\": \"Arthur\"}")}));
-                }
-            }
-        });
-        Thread t2 = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                for (int i = 100; i < 200; i++) {
-                    indexWriter.setNextRow(
-                            new RowN(new Object[]{i, new BytesRef("{\"id\": " + i + ", \"name\": \"Trillian\"}")}));
-                }
-            }
-        });
-        t1.start();
-        t2.start();
+        BatchIterator rowsIterator = RowsBatchIterator.newInstance(IntStream.range(0, 100)
+            .mapToObj(i -> new RowN(new Object[]{i, new BytesRef("{\"id\": " + i + ", \"name\": \"Arthur\"}")}))
+            .collect(Collectors.toList()), 2);
 
-        t1.join();
-        t2.join();
-        indexWriter.finish();
-        Bucket objects = collectingProjector.result().get();
+        TestingBatchConsumer consumer = new TestingBatchConsumer();
+        consumer.accept(writerProjector.apply(rowsIterator), null);
+        Bucket objects = consumer.getBucket();
 
-        assertThat(objects, contains(isRow(200L)));
+        assertThat(objects, contains(isRow(100L)));
 
         execute("refresh table bulk_import");
         execute("select count(*) from bulk_import");
         assertThat(response.rowCount(), is(1L));
-        assertThat((Long) response.rows()[0][0], is(200L));
+        assertThat(response.rows()[0][0], is(100L));
     }
 }

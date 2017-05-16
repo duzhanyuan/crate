@@ -1,0 +1,34 @@
+=========
+Crate SQL
+=========
+
+Crate uses SQL to query documents. For concise reference documentation
+see :doc:`sql`. For general information about SQL please refer to
+`Wikipedia SQL`_.
+
+.. _`Wikipedia SQL`: http://en.wikipedia.org/wiki/Sql
+
+.. toctree::
+   :maxdepth: 2
+
+   ddl/index
+   dml
+   dql
+   administration/index
+   joins
+   data_types
+   aggregation
+   scalar
+   table_functions
+   arithmetic
+   occ
+   partitioned_tables
+   analyzer
+   information_schema
+   system
+   kill
+   snapshot_restore
+   optimize
+   sql
+   features
+   crate-standard-sql

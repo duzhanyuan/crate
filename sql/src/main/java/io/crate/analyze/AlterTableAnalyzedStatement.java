@@ -21,38 +21,43 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Optional;
 import io.crate.metadata.PartitionName;
-import io.crate.metadata.ReferenceInfos;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.table.TableInfo;
+import io.crate.metadata.doc.DocTableInfo;
 
-import javax.annotation.Nullable;
+import java.util.Optional;
 
-public class AlterTableAnalyzedStatement extends AbstractDDLAnalyzedStatement {
+public class AlterTableAnalyzedStatement implements DDLStatement {
 
-    private final ReferenceInfos referenceInfos;
-    private TableInfo tableInfo;
-    private Optional<PartitionName> partitionName = Optional.absent();
 
-    public AlterTableAnalyzedStatement(ReferenceInfos referenceInfos) {
-        this.referenceInfos = referenceInfos;
+    private final DocTableInfo tableInfo;
+    private final PartitionName partitionName;
+    private final TableParameter tableParameter;
+    private final boolean excludePartitions;
+
+    public AlterTableAnalyzedStatement(DocTableInfo tableInfo,
+                                       PartitionName partitionName,
+                                       TableParameter tableParameter,
+                                       boolean excludePartitions) {
+        this.tableInfo = tableInfo;
+        this.partitionName = partitionName;
+        this.tableParameter = tableParameter;
+        this.excludePartitions = excludePartitions;
     }
 
-    public void table(TableIdent tableIdent) {
-        tableInfo = referenceInfos.getWritableTable(tableIdent);
-    }
-
-    public TableInfo table() {
+    public DocTableInfo table() {
         return tableInfo;
     }
 
-    public void partitionName(@Nullable PartitionName partitionName) {
-        this.partitionName = Optional.fromNullable(partitionName);
+    public Optional<PartitionName> partitionName() {
+        return Optional.ofNullable(partitionName);
     }
 
-    public Optional<PartitionName> partitionName() {
-        return partitionName;
+    public boolean excludePartitions() {
+        return excludePartitions;
+    }
+
+    public TableParameter tableParameter() {
+        return tableParameter;
     }
 
     @Override

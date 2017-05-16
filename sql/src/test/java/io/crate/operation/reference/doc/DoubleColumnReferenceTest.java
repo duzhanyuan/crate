@@ -23,46 +23,37 @@ package io.crate.operation.reference.doc;
 
 import io.crate.operation.reference.doc.lucene.DoubleColumnReference;
 import org.apache.lucene.document.Document;
-import org.apache.lucene.document.DoubleField;
-import org.apache.lucene.document.Field;
-import org.apache.lucene.document.StringField;
+import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
-import org.elasticsearch.index.fielddata.FieldDataType;
-import org.elasticsearch.index.mapper.FieldMapper;
+import org.apache.lucene.util.NumericUtils;
+import org.elasticsearch.index.mapper.MappedFieldType;
+import org.elasticsearch.index.mapper.NumberFieldMapper;
 import org.junit.Test;
 
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 
 public class DoubleColumnReferenceTest extends DocLevelExpressionsTest {
 
+    private String column = "d";
+
     @Override
     protected void insertValues(IndexWriter writer) throws Exception {
-        for (double d = 0.5; d<10.0d; d++) {
+        for (double d = 0.5; d < 10.0d; d++) {
             Document doc = new Document();
-            doc.add(new StringField("_id", Double.toString(d), Field.Store.NO));
-            doc.add(new DoubleField(fieldName().name(), d, Field.Store.NO));
+            doc.add(new SortedNumericDocValuesField(column, NumericUtils.doubleToSortableLong(d)));
             writer.addDocument(doc);
         }
     }
 
-    @Override
-    protected FieldMapper.Names fieldName() {
-        return new FieldMapper.Names("d");
-    }
-
-    @Override
-    protected FieldDataType fieldType() {
-        return new FieldDataType("double");
-    }
-
     @Test
     public void testFieldCacheExpression() throws Exception {
-        DoubleColumnReference doubleColumn = new DoubleColumnReference(fieldName().name());
+        MappedFieldType fieldType = new NumberFieldMapper.NumberFieldType(NumberFieldMapper.NumberType.DOUBLE);
+        fieldType.setName(column);
+        DoubleColumnReference doubleColumn = new DoubleColumnReference(column, fieldType);
         doubleColumn.startCollect(ctx);
         doubleColumn.setNextReader(readerContext);
         IndexSearcher searcher = new IndexSearcher(readerContext.reader());

@@ -2,61 +2,128 @@ buildscript {
     repositories {
         mavenCentral()
     }
-
     dependencies {
-        classpath 'org.kt3k.gradle.plugin:coveralls-gradle-plugin:2.3.1'
+        classpath 'de.thetaphi:forbiddenapis:2.2'
     }
 }
 
 plugins {
-    id "com.github.kt3k.coveralls" version "2.3.1"
+    id 'com.github.johnrengelman.shadow' version '1.2.4'
+    id 'me.champeau.gradle.jmh' version '0.3.1'
+}
+
+
+def download(File downloadDir, String url, String name) {
+    downloadDir.mkdirs()
+    def dest = new File(downloadDir, name)
+    ant.get(
+            src: url,
+            verbose: true,
+            usetimestamp: true,
+            skipexisting: true,
+            dest: dest
+    )
+    return dest
+}
+
+apply from: 'gradle/dependencies.gradle'
+
+repositories {
+    mavenCentral()
 }
 
 allprojects {
-    apply plugin: 'idea'
     apply plugin: 'findbugs'
     apply plugin: 'jacoco'
 
     tasks.withType(JavaCompile) {
-        sourceCompatibility = "1.7"
-        targetCompatibility = "1.7"
+        sourceCompatibility = "1.8"
+        targetCompatibility = "1.8"
+        options.encoding = 'UTF-8'
     }
 
     tasks.withType(Test) {
+        // force run, see: http://gradle.1045684.n5.nabble.com/how-does-gradle-decide-when-to-run-tests-td3314172.html
+        outputs.upToDateWhen { false }
+
         // allow to set the number of test forks from the CLI
         if (project.hasProperty('testForks')) {
             maxParallelForks = project.testForks as int
         }
+        if (project.hasProperty('disableAssertions')) {
+            enableAssertions = false
+            // LuceneTestCase defaults this value to 'true' if not set which results in an exception if '-ea' is skipped
+            systemProperty "tests.asserts", "false"
+        }
+
+        // tell ES to add required permissions for gradle
+        systemProperty "tests.gradle", "true"
     }
 
     jacoco {
-        toolVersion = "0.7.1.201405082137"
+        toolVersion = "0.7.9"
     }
 
     group = 'io.crate'
-    repositories {
-        mavenCentral()
-    }
 
     findbugs {
         ignoreFailures = true
     }
 
-    // if environment variable JAVA7_HOME is set, add it to bootClasspath
-    // for compiling for java 7 compatibility using javac from jdk8
-    tasks.withType(JavaCompile) {
+    tasks.withType(Javadoc) {
+        failOnError = false
+    }
+
+    tasks.withType(Test) {
         doFirst {
-            if (sourceCompatibility == '1.7' && System.env.JAVA7_HOME != null) {
-                options.fork = true
-                options.bootClasspath = "$System.env.JAVA7_HOME/jre/lib/rt.jar"
+            // move lucene-test-framework to the beginning of the classpath
+            // for cli ./gradlew use
+            def cp = project.sourceSets.test.runtimeClasspath
+            def testFrameworkEntry = cp.find({ it.name.contains("lucene-test-framework") })
+            if (testFrameworkEntry != null) {
+                project.sourceSets.test.runtimeClasspath = files(testFrameworkEntry) + cp.filter({
+                    !it.name.contains("lucene-test-framework")
+                })
+            }
+        }
+    }
+
+}
+
+// intellij configuration
+allprojects {
+    apply plugin: 'idea'
+
+    project.ext {
+        isIdea = (System.getProperty("idea.active") != null
+                || gradle.startParameter.taskNames.contains('idea')
+                || gradle.startParameter.taskNames.contains('cleanIdea')
+                || gradle.startParameter.taskNames.contains('cleanIdeaBuild'))
+    }
+
+    if (isIdea) {
+        project.buildDir = file('build-idea')
+    }
+
+    idea {
+        module {
+            inheritOutputDirs = false
+            outputDir = file('build-idea/classes/main')
+            testOutputDir = file('build-idea/classes/test')
+            excludeDirs += file('build')
+        }
+    }
+
+    if (it.name != 'es') {
+        task cleanIdeaBuild {
+            doLast {
+                tasks.clean.execute()
             }
         }
     }
 }
 
-
-
-final testOutputs = [:].withDefault {[]}
+final testOutputs = [:].withDefault { [] }
 
 
 project.gradle.addListener(new TestOutputListener() {
@@ -88,6 +155,9 @@ project.gradle.addListener(new TestListener() {
             testOutputs[test].each { e ->
                 print e
             }
+            result.getExceptions().each { e ->
+                e.printStackTrace()
+            }
         }
         testOutputs.remove(test)
     }
@@ -96,20 +166,16 @@ project.gradle.addListener(new TestListener() {
 
 def jacocoProjects() {
     subprojects.findAll {
-        it.name != 'es' && it.name != 'testing'
+        !['es-core',
+          'es-client',
+          'es-transport',
+          'es-testing',
+          'es-discovery-ec2',
+          'es-repository-s3',
+          'es-repository-hdfs',
+          'integration-testing',
+          'testing'].contains(it.name)
     }
-}
-
-coveralls {
-    def tmpSources = []
-    jacocoProjects().each {
-        evaluationDependsOn(it.name)
-        if (it.plugins.withType(JavaPlugin) && it.tasks.withType(Test)) {
-            tmpSources << it.sourceSets.main.allSource.srcDirs.flatten()
-        }
-    }
-    sourceDirs = files(tmpSources).files.absolutePath
-    jacocoReportPath = "${buildDir}/reports/jacoco/test/jacocoTestReport.xml"
 }
 
 
@@ -126,12 +192,12 @@ task jacocoReport(type: JacocoReport) {
     }
 
     reports {
-        xml{
+        xml {
             enabled true
             destination "${buildDir}/reports/jacoco/test/jacocoTestReport.xml"
         }
         csv.enabled false
-        html{
+        html {
             enabled true
             destination "${buildDir}/reports/jacoco/jacocoHtml"
         }
@@ -146,15 +212,18 @@ subprojects {
                 // when calling tests from intellij
                 withXml {
                     def node = it.asNode()
-                    def testingNode = node.component.orderEntry.find {
-                        it.@'module-name' == 'testing'
-                    }
 
-                    if (testingNode != null) {
-                        def parent = testingNode.parent()
-                        def newNode = new Node(parent, testingNode.name(), testingNode.attributes())
-                        parent.remove(testingNode)
-                        parent.children().add(4, newNode)
+                    def testFramework = node.component.orderEntry.find {
+                        it.@'type' == 'module-library' && it.library.CLASSES.root.find {
+                            it.@'url'.contains('lucene-test-framework')
+                        }
+                    }
+                    if (testFramework != null) {
+                        println "moving test framework"
+                        def parent = testFramework.parent()
+                        def newNode = new Node(parent, testFramework.name(), testFramework.attributes(), testFramework.value())
+                        parent.remove(testFramework)
+                        parent.children().add(5, newNode)
                     }
                 }
             }
@@ -162,18 +231,43 @@ subprojects {
     }
 }
 
+
+
+def jvmTestFlags = ['-ea', "-Dproject_build_dir=$project.buildDir", '-Dproject_root=$PROJECT_DIR$']
+
 idea {
+    workspace {
+        iws.withXml { xmlFile ->
+            def runManager = xmlFile.asNode().component.find { it.@name == 'RunManager' }
+
+            // enable assertions for junit tests
+            def junitDefaults = runManager.configuration.find { it.@default == 'true' && it.@type == 'JUnit' }
+            junitDefaults.option.find { it.@name == 'VM_PARAMETERS' }.replaceNode {
+                option(name: 'VM_PARAMETERS', value: jvmTestFlags.join(' '))
+            }
+
+            // add Crate application configuration
+            def crateApp = runManager.configuration.find { it.@name == 'Crate' && it.@type == 'Application' }
+            if (crateApp == null) {
+                runManager.append(new XmlParser().parse(file("idea/crateApp.xml")))
+            }
+        }
+    }
+
     project {
-        languageLevel = 'JDK_1_7'
+        vcs = 'Git'
 
         ipr {
             withXml { provider ->
                 def node = provider.asNode()
+                node.append(new XmlParser().parse(file("idea/codeStyle.xml")))
                 def copyrightManager = node.component.find { it.'@name' == 'CopyrightManager' }
                 copyrightManager.@default = "CrateASL2"
-                def aslCopyright = copyrightManager.copyright.find { it.option.find { it.@name == "myName" }?.@value == "CrateASL2" }
+                def aslCopyright = copyrightManager.copyright.find {
+                    it.option.find { it.@name == "myName" }?.@value == "CrateASL2"
+                }
                 if (aslCopyright == null) {
-                    copyrightManager.append(new XmlParser().parse(file("copyright.xml")))
+                    copyrightManager.append(new XmlParser().parse(file("idea/copyright.xml")))
                 }
             }
         }
@@ -181,5 +275,5 @@ idea {
 }
 
 task wrapper(type: Wrapper) {
-    gradleVersion = '2.3'
+    gradleVersion = '3.5'
 }

@@ -24,17 +24,16 @@ package io.crate.operation.operator.any;
 import io.crate.metadata.FunctionImplementation;
 import io.crate.metadata.FunctionInfo;
 import io.crate.operation.operator.OperatorModule;
-import io.crate.planner.symbol.Function;
 import io.crate.sql.tree.ComparisonExpression;
 
-public class AnyNeqOperator extends AnyOperator<AnyNeqOperator> {
+public class AnyNeqOperator extends AnyOperator {
 
     public static final String NAME = OPERATOR_PREFIX + ComparisonExpression.Type.NOT_EQUAL.getValue();
 
     static class AnyNeqResolver extends AnyResolver {
 
         @Override
-        public FunctionImplementation<Function> newInstance(FunctionInfo info) {
+        public FunctionImplementation newInstance(FunctionInfo info) {
             return new AnyNeqOperator(info);
         }
 
@@ -48,7 +47,7 @@ public class AnyNeqOperator extends AnyOperator<AnyNeqOperator> {
         module.registerDynamicOperatorFunction(NAME, new AnyNeqResolver());
     }
 
-    protected AnyNeqOperator(FunctionInfo info) {
+    AnyNeqOperator(FunctionInfo info) {
         super(info);
     }
 

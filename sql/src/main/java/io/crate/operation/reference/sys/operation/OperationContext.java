@@ -21,20 +21,35 @@
 
 package io.crate.operation.reference.sys.operation;
 
+import java.util.Objects;
 import java.util.UUID;
 
 public class OperationContext {
 
-    public UUID id;
-    public UUID jobId;
-    public String name;
-    public long started;
+    public final int id;
+    public final UUID jobId;
+    public final String name;
+    public final long started;
     public long usedBytes;
 
-    public OperationContext(UUID id, UUID jobId, String name, long started) {
+    public OperationContext(int id, UUID jobId, String name, long started) {
         this.id = id;
         this.jobId = jobId;
         this.name = name;
         this.started = started;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        OperationContext that = (OperationContext) o;
+        if (id != that.id) return false;
+        return jobId.equals(that.jobId);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(id, jobId);
     }
 }

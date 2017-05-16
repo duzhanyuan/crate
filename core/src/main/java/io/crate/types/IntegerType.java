@@ -33,7 +33,8 @@ public class IntegerType extends DataType<Integer> implements Streamer<Integer>,
     public static final IntegerType INSTANCE = new IntegerType();
     public static final int ID = 9;
 
-    private IntegerType() {}
+    private IntegerType() {
+    }
 
     @Override
     public int id() {
@@ -59,24 +60,23 @@ public class IntegerType extends DataType<Integer> implements Streamer<Integer>,
             return (Integer) value;
         }
         if (value instanceof String) {
-            return Integer.parseInt((String)value);
+            return Integer.parseInt((String) value);
         }
         if (value instanceof BytesRef) {
-            return Integer.parseInt(((BytesRef)value).utf8ToString());
+            return Integer.parseInt(((BytesRef) value).utf8ToString());
         }
 
-        long longVal = ((Number)value).longValue();
+        long longVal = ((Number) value).longValue();
         if (longVal < Integer.MIN_VALUE || Integer.MAX_VALUE < longVal) {
             throw new IllegalArgumentException("integer value out of range: " + longVal);
         }
-        return ((Number)value).intValue();
+        return ((Number) value).intValue();
     }
 
     @Override
     public int compareValueTo(Integer val1, Integer val2) {
-        return Integer.compare(val1, val2);
+        return nullSafeCompareValueTo(val1, val2, Integer::compare);
     }
-
 
     @Override
     public Integer readValueFrom(StreamInput in) throws IOException {

@@ -21,27 +21,24 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.ReferenceInfos;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.blob.BlobSchemaInfo;
-import io.crate.metadata.table.TableInfo;
+import io.crate.metadata.blob.BlobTableInfo;
 
-public class AlterBlobTableAnalyzedStatement extends AbstractDDLAnalyzedStatement {
+public class AlterBlobTableAnalyzedStatement implements DDLStatement {
 
-    private final ReferenceInfos referenceInfos;
-    private TableInfo tableInfo;
+    private final BlobTableInfo tableInfo;
+    private final TableParameter tableParameter;
 
-    public AlterBlobTableAnalyzedStatement(ReferenceInfos referenceInfos) {
-        this.referenceInfos = referenceInfos;
+    public AlterBlobTableAnalyzedStatement(BlobTableInfo tableInfo, TableParameter tableParameter) {
+        this.tableInfo = tableInfo;
+        this.tableParameter = tableParameter;
     }
 
-    public void table(TableIdent tableIdent) {
-        assert BlobSchemaInfo.NAME.equals(tableIdent.schema());
-        tableInfo = referenceInfos.getTableInfo(tableIdent);
-    }
-
-    public TableInfo table() {
+    public BlobTableInfo table() {
         return tableInfo;
+    }
+
+    public TableParameter tableParameter() {
+        return tableParameter;
     }
 
     @Override

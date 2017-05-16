@@ -23,5 +23,12 @@ package io.crate.types;
 
 public interface CollectionType {
 
-    public DataType<?> innerType();
+    DataType<?> innerType();
+
+    static DataType unnest(DataType dataType) {
+        while (DataTypes.isCollectionType(dataType)) {
+            dataType = ((CollectionType) dataType).innerType();
+        }
+        return dataType;
+    }
 }

@@ -22,16 +22,18 @@
 package io.crate.operation.reference.doc.lucene;
 
 import io.crate.metadata.doc.DocSysColumns;
-import io.crate.operation.collect.LuceneDocCollector;
-import io.crate.operation.reference.doc.ColumnReferenceExpression;
+import io.crate.operation.collect.collectors.CollectorFieldsVisitor;
 import org.apache.lucene.util.BytesRef;
 
-public class IdCollectorExpression extends
-        LuceneCollectorExpression<BytesRef> implements ColumnReferenceExpression {
+public class IdCollectorExpression extends LuceneCollectorExpression<BytesRef> {
 
     public static final String COLUMN_NAME = DocSysColumns.ID.name();
 
-    private LuceneDocCollector.CollectorFieldsVisitor visitor;
+    private CollectorFieldsVisitor visitor;
+
+    public IdCollectorExpression() {
+        super(COLUMN_NAME);
+    }
 
     @Override
     public void startCollect(CollectorContext context) {

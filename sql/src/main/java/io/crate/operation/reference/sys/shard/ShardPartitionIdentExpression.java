@@ -21,30 +21,26 @@
 package io.crate.operation.reference.sys.shard;
 
 import io.crate.metadata.PartitionName;
+import io.crate.metadata.ReferenceImplementation;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.index.shard.ShardId;
 
-public class ShardPartitionIdentExpression extends SysShardExpression<BytesRef> {
+public class ShardPartitionIdentExpression implements ReferenceImplementation<BytesRef> {
 
-    public static final String NAME = "partition_ident";
+    private static final BytesRef EMPTY = new BytesRef("");
     private final BytesRef value;
 
-    @Inject
     public ShardPartitionIdentExpression(ShardId shardId) {
-        super(NAME);
-        String ident = "";
-        try {
-            ident = PartitionName.ident(shardId.getIndex());
-        } catch (IllegalArgumentException e) {
-            // no partition
+        String indexName = shardId.getIndexName();
+        if (PartitionName.isPartition(indexName)) {
+            value = new BytesRef(PartitionName.fromIndexOrTemplate(indexName).ident());
+        } else {
+            value = EMPTY;
         }
-        value = new BytesRef(ident);
     }
 
     @Override
     public BytesRef value() {
         return value;
     }
-
 }

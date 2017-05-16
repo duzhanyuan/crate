@@ -22,31 +22,25 @@
 package io.crate.planner.node.dql;
 
 import io.crate.analyze.WhereClause;
-import io.crate.analyze.relations.TableRelation;
+import io.crate.analyze.symbol.DefaultTraversalSymbolVisitor;
+import io.crate.analyze.symbol.Field;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.format.SymbolFormatter;
 import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.Routing;
-import io.crate.metadata.table.TableInfo;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.*;
+import io.crate.metadata.Reference;
+import io.crate.metadata.doc.DocTableInfo;
 
 import java.util.List;
-import java.util.Map;
 
 public class GroupByConsumer {
 
     private static final GroupByValidator GROUP_BY_VALIDATOR = new GroupByValidator();
 
-    public static boolean requiresDistribution(TableInfo tableInfo, Routing routing) {
-        if (tableInfo.rowGranularity().ordinal() < RowGranularity.DOC.ordinal()) return false;
-        if (!routing.hasLocations()) return false;
-        Map<String, Map<String, List<Integer>>> locations = routing.locations();
-        return (locations != null && locations.size() > 1);
-    }
-
-    public static boolean groupedByClusteredColumnOrPrimaryKeys(TableRelation tableRelation, WhereClause whereClause, List<Symbol> groupBySymbols) {
+    public static boolean groupedByClusteredColumnOrPrimaryKeys(DocTableInfo tableInfo,
+                                                                WhereClause whereClause,
+                                                                List<Symbol> groupBySymbols) {
         if (groupBySymbols.size() > 1) {
-            return groupedByPrimaryKeys(tableRelation, groupBySymbols);
+            return groupedByPrimaryKeys(tableInfo.primaryKey(), groupBySymbols);
         }
 
         /**
@@ -54,7 +48,7 @@ public class GroupByConsumer {
          * so one shard doesn't contain all "clustered by" values
          * -> need to use a distributed group by.
          */
-        if (tableRelation.tableInfo().isPartitioned() && whereClause.partitions().size() != 1) {
+        if (tableInfo.isPartitioned() && whereClause.partitions().size() != 1) {
             return false;
         }
 
@@ -62,19 +56,18 @@ public class GroupByConsumer {
         // as clustered by column == pk column  in that case
         Symbol groupByKey = groupBySymbols.get(0);
         return (groupByKey instanceof Reference
-                && ((Reference) groupByKey).info().ident().columnIdent()
-                    .equals(tableRelation.tableInfo().clusteredBy()));
+                && ((Reference) groupByKey).ident().columnIdent()
+                    .equals(tableInfo.clusteredBy()));
     }
 
-    private static boolean groupedByPrimaryKeys(TableRelation tableRelation, List<Symbol> groupBy) {
-        List<ColumnIdent> primaryKeys = tableRelation.tableInfo().primaryKey();
+    private static boolean groupedByPrimaryKeys(List<ColumnIdent> primaryKeys, List<Symbol> groupBy) {
         if (groupBy.size() != primaryKeys.size()) {
             return false;
         }
         for (int i = 0, groupBySize = groupBy.size(); i < groupBySize; i++) {
             Symbol groupBySymbol = groupBy.get(i);
             if (groupBySymbol instanceof Reference) {
-                ColumnIdent columnIdent = ((Reference) groupBySymbol).info().ident().columnIdent();
+                ColumnIdent columnIdent = ((Reference) groupBySymbol).ident().columnIdent();
                 ColumnIdent pkIdent = primaryKeys.get(i);
                 if (!pkIdent.equals(columnIdent)) {
                     return false;
@@ -86,39 +79,29 @@ public class GroupByConsumer {
         return true;
     }
 
-    public static void validateGroupBySymbols(TableRelation tableRelation, List<Symbol> groupBySymbols) {
+    public static void validateGroupBySymbols(List<Symbol> groupBySymbols) {
         for (Symbol symbol : groupBySymbols) {
-            GROUP_BY_VALIDATOR.process(symbol, tableRelation);
+            GROUP_BY_VALIDATOR.process(symbol, null);
         }
     }
 
-    private static class GroupByValidator extends SymbolVisitor<TableRelation, Void> {
+    private static class GroupByValidator extends DefaultTraversalSymbolVisitor<Void, Void> {
 
         @Override
-        public Void visitFunction(Function symbol, TableRelation context) {
-            for (Symbol arg : symbol.arguments()) {
-                process(arg, context);
+        public Void visitReference(Reference symbol, Void context) {
+            if (symbol.indexType() == Reference.IndexType.ANALYZED) {
+                throw new IllegalArgumentException(
+                    SymbolFormatter.format("Cannot GROUP BY '%s': grouping on analyzed/fulltext columns is not possible", symbol));
+            } else if (symbol.indexType() == Reference.IndexType.NO) {
+                throw new IllegalArgumentException(
+                    SymbolFormatter.format("Cannot GROUP BY '%s': grouping on non-indexed columns is not possible", symbol));
             }
             return null;
         }
 
         @Override
-        public Void visitReference(Reference symbol, TableRelation context) {
-            if (symbol.info().indexType() == ReferenceInfo.IndexType.ANALYZED) {
-                throw new IllegalArgumentException(
-                        String.format("Cannot GROUP BY '%s': grouping on analyzed/fulltext columns is not possible",
-                                SymbolFormatter.format(symbol)));
-            } else if (symbol.info().indexType() == ReferenceInfo.IndexType.NO) {
-                throw new IllegalArgumentException(
-                        String.format("Cannot GROUP BY '%s': grouping on non-indexed columns is not possible",
-                                SymbolFormatter.format(symbol)));
-            }
-            return null;
-        }
-
-        @Override
-        public Void visitField(Field field, TableRelation context) {
-            return process(context.resolveField(field), context);
+        public Void visitField(Field field, Void context) {
+            throw new UnsupportedOperationException("Field must have been resolved to Reference already");
         }
     }
 }

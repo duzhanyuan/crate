@@ -21,8 +21,12 @@
 
 package io.crate.analyze.validator;
 
+import io.crate.analyze.symbol.Field;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolVisitor;
+import io.crate.analyze.symbol.format.SymbolFormatter;
 import io.crate.metadata.FunctionInfo;
-import io.crate.planner.symbol.*;
 
 import javax.annotation.Nullable;
 import java.util.List;
@@ -43,8 +47,12 @@ public class HavingSymbolValidator {
 
         private boolean insideAggregation = false;
 
-        public HavingContext(@Nullable List<Symbol> groupBySymbols) {
+        HavingContext(@Nullable List<Symbol> groupBySymbols) {
             this.groupBySymbols = groupBySymbols;
+        }
+
+        boolean groupByContains(Symbol symbol) {
+            return groupBySymbols != null && groupBySymbols.contains(symbol);
         }
     }
 
@@ -52,23 +60,31 @@ public class HavingSymbolValidator {
 
         @Override
         public Void visitField(Field field, HavingContext context) {
-            if (!context.insideAggregation && (context.groupBySymbols == null || !context.groupBySymbols.contains(field))) {
+            if (!context.insideAggregation && !context.groupByContains(field)) {
                 throw new IllegalArgumentException(
-                        SymbolFormatter.format("Cannot use column %s outside of an Aggregation in HAVING clause. " +
-                                "Only GROUP BY keys allowed here.", field));
+                    SymbolFormatter.format("Cannot use column %s outside of an Aggregation in HAVING clause. " +
+                                           "Only GROUP BY keys allowed here.", field));
             }
             return null;
         }
 
         @Override
         public Void visitFunction(Function symbol, HavingContext context) {
-            if (symbol.info().type().equals(FunctionInfo.Type.AGGREGATE)) {
+            if (symbol.info().type() == FunctionInfo.Type.AGGREGATE) {
                 context.insideAggregation = true;
+            } else {
+                // allow function if it is part of the grouping symbols
+                if (context.groupByContains(symbol)) {
+                    return null;
+                }
             }
+
             for (Symbol argument : symbol.arguments()) {
                 process(argument, context);
             }
-            context.insideAggregation = false;
+            if (symbol.info().type() == FunctionInfo.Type.AGGREGATE) {
+                context.insideAggregation = false;
+            }
             return null;
         }
 

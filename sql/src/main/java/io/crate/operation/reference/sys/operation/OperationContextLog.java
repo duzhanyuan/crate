@@ -21,10 +21,13 @@
 
 package io.crate.operation.reference.sys.operation;
 
+import io.crate.operation.reference.sys.job.ContextLog;
+
 import javax.annotation.Nullable;
+import java.util.Objects;
 import java.util.UUID;
 
-public class OperationContextLog {
+public class OperationContextLog implements ContextLog {
 
     private final OperationContext operationContext;
     @Nullable
@@ -37,7 +40,7 @@ public class OperationContextLog {
         this.ended = System.currentTimeMillis();
     }
 
-    public UUID id() {
+    public int id() {
         return operationContext.id;
     }
 
@@ -53,16 +56,31 @@ public class OperationContextLog {
         return operationContext.started;
     }
 
+    @Override
     public long ended() {
         return ended;
     }
 
     public long usedBytes() {
-        return  operationContext.usedBytes;
+        return operationContext.usedBytes;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        OperationContextLog that = (OperationContextLog) o;
+        return operationContext.equals(that.operationContext);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(operationContext);
     }
 
     @Nullable
     public String errorMessage() {
         return errorMessage;
     }
+
 }

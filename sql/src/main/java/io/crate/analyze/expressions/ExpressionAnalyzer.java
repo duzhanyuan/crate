@@ -1,41 +1,45 @@
 /*
- * Licensed to CRATE Technology GmbH ("Crate") under one or more contributor
- * license agreements.  See the NOTICE file distributed with this work for
- * additional information regarding copyright ownership.  Crate licenses
- * this file to you under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.  You may
+ * Licensed to Crate under one or more contributor license agreements.
+ * See the NOTICE file distributed with this work for additional
+ * information regarding copyright ownership.  Crate licenses this file
+ * to you under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.  You may
  * obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
- * License for the specific language governing permissions and limitations
- * under the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
  *
  * However, if you have executed another commercial license agreement
  * with Crate these terms will supersede the license and you may use the
- * software solely pursuant to the terms of the relevant commercial agreement.
+ * software solely pursuant to the terms of the relevant commercial
+ * agreement.
  */
 
 package io.crate.analyze.expressions;
 
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Lists;
-import io.crate.analyze.*;
+import com.google.common.collect.*;
+import io.crate.action.sql.Option;
+import io.crate.action.sql.SessionContext;
+import io.crate.analyze.DataTypeAnalyzer;
+import io.crate.analyze.NegativeLiteralVisitor;
+import io.crate.analyze.SubscriptContext;
+import io.crate.analyze.SubscriptValidator;
+import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.analyze.relations.FieldProvider;
-import io.crate.analyze.relations.TableRelation;
+import io.crate.analyze.symbol.*;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.format.SymbolFormatter;
 import io.crate.exceptions.ColumnUnknownException;
-import io.crate.exceptions.ColumnValidationException;
+import io.crate.exceptions.ConversionException;
 import io.crate.exceptions.UnsupportedFeatureException;
 import io.crate.metadata.*;
-import io.crate.metadata.table.ColumnPolicy;
-import io.crate.metadata.table.TableInfo;
+import io.crate.metadata.table.Operation;
 import io.crate.operation.aggregation.impl.CollectSetAggregation;
 import io.crate.operation.operator.*;
 import io.crate.operation.operator.any.AnyEqOperator;
@@ -45,26 +49,27 @@ import io.crate.operation.operator.any.AnyOperator;
 import io.crate.operation.predicate.NotPredicate;
 import io.crate.operation.scalar.ExtractFunctions;
 import io.crate.operation.scalar.SubscriptFunction;
+import io.crate.operation.scalar.SubscriptObjectFunction;
+import io.crate.operation.scalar.arithmetic.ArrayFunction;
+import io.crate.operation.scalar.arithmetic.MapFunction;
 import io.crate.operation.scalar.cast.CastFunctionResolver;
+import io.crate.operation.scalar.conditional.IfFunction;
 import io.crate.operation.scalar.timestamp.CurrentTimestampFunction;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.*;
-import io.crate.planner.symbol.Literal;
 import io.crate.sql.ExpressionFormatter;
+import io.crate.sql.parser.SqlParser;
 import io.crate.sql.tree.*;
 import io.crate.sql.tree.MatchPredicate;
 import io.crate.types.*;
-import org.elasticsearch.ElasticsearchParseException;
-import org.elasticsearch.index.query.MultiMatchQueryBuilder;
 
 import javax.annotation.Nullable;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import static io.crate.planner.symbol.Literal.newLiteral;
 
 /**
  * <p>This Analyzer can be used to convert Expression from the SQL AST into symbols.</p>
- *
+ * <p>
  * <p>
  * In order to resolve QualifiedName or SubscriptExpressions it will use the fieldResolver given in the constructor and
  * generate a relationOutput for the matching Relation.
@@ -73,60 +78,47 @@ import static io.crate.planner.symbol.Literal.newLiteral;
 public class ExpressionAnalyzer {
 
     private final static Map<ComparisonExpression.Type, ComparisonExpression.Type> SWAP_OPERATOR_TABLE =
-            ImmutableMap.<ComparisonExpression.Type, ComparisonExpression.Type>builder()
-                    .put(ComparisonExpression.Type.GREATER_THAN, ComparisonExpression.Type.LESS_THAN)
-                    .put(ComparisonExpression.Type.LESS_THAN, ComparisonExpression.Type.GREATER_THAN)
-                    .put(ComparisonExpression.Type.GREATER_THAN_OR_EQUAL, ComparisonExpression.Type.LESS_THAN_OR_EQUAL)
-                    .put(ComparisonExpression.Type.LESS_THAN_OR_EQUAL, ComparisonExpression.Type.GREATER_THAN_OR_EQUAL)
-                    .build();
+        ImmutableMap.<ComparisonExpression.Type, ComparisonExpression.Type>builder()
+            .put(ComparisonExpression.Type.GREATER_THAN, ComparisonExpression.Type.LESS_THAN)
+            .put(ComparisonExpression.Type.LESS_THAN, ComparisonExpression.Type.GREATER_THAN)
+            .put(ComparisonExpression.Type.GREATER_THAN_OR_EQUAL, ComparisonExpression.Type.LESS_THAN_OR_EQUAL)
+            .put(ComparisonExpression.Type.LESS_THAN_OR_EQUAL, ComparisonExpression.Type.GREATER_THAN_OR_EQUAL)
+            .build();
 
-    private final static DataTypeAnalyzer DATA_TYPE_ANALYZER = new DataTypeAnalyzer();
     private final static NegativeLiteralVisitor NEGATIVE_LITERAL_VISITOR = new NegativeLiteralVisitor();
-    private final static SubscriptVisitor SUBSCRIPT_VISITOR = new SubscriptVisitor();
-    private final InnerExpressionAnalyzer innerAnalyzer;
-    private final EvaluatingNormalizer normalizer;
-    private final FieldProvider fieldProvider;
-    private final Functions functions;
-    private final ReferenceInfos referenceInfos;
-    private final ParameterContext parameterContext;
-    private boolean forWrite = false;
-
-    public ExpressionAnalyzer(AnalysisMetaData analysisMetaData,
-                              ParameterContext parameterContext,
-                              FieldProvider fieldProvider) {
-        functions = analysisMetaData.functions();
-        referenceInfos = analysisMetaData.referenceInfos();
-        this.parameterContext = parameterContext;
-        this.fieldProvider = fieldProvider;
-        this.innerAnalyzer = new InnerExpressionAnalyzer();
-        this.normalizer = new EvaluatingNormalizer(
-                analysisMetaData.functions(), RowGranularity.CLUSTER, analysisMetaData.referenceResolver());
-    }
+    private final SessionContext sessionContext;
+    private final java.util.function.Function<ParameterExpression, Symbol> convertParamFunction;
+    private final FieldProvider<?> fieldProvider;
 
     @Nullable
-    public Integer integerFromExpression(Optional<Expression> expression) {
-        if (expression.isPresent()) {
-            return DataTypes.INTEGER.value(
-                    ExpressionToNumberVisitor.convert(expression.get(), parameterContext.parameters()));
-        }
-        return null;
+    private final SubqueryAnalyzer subQueryAnalyzer;
+    private final Functions functions;
+    private final InnerExpressionAnalyzer innerAnalyzer;
+    private Operation operation = Operation.READ;
+
+    private static final Pattern SUBSCRIPT_SPLIT_PATTERN = Pattern.compile("^([^\\.\\[]+)(\\.*)([^\\[]*)(\\['.*'\\])");
+
+    public ExpressionAnalyzer(Functions functions,
+                              SessionContext sessionContext,
+                              java.util.function.Function<ParameterExpression, Symbol> convertParamFunction,
+                              FieldProvider fieldProvider,
+                              @Nullable SubqueryAnalyzer subQueryAnalyzer) {
+        this.functions = functions;
+        this.sessionContext = sessionContext;
+        this.convertParamFunction = convertParamFunction;
+        this.fieldProvider = fieldProvider;
+        this.subQueryAnalyzer = subQueryAnalyzer;
+        this.innerAnalyzer = new InnerExpressionAnalyzer();
     }
 
     /**
-     * Use to normalize a symbol. (For example to normalize a function that contains only literals to a literal)
-     */
-    public Symbol normalize(Symbol symbol) {
-        return normalizer.normalize(symbol);
-    }
-
-    /**
-     * <h2>Converts a expression into a symbol.</h2>
-     *
+     * <h2>Converts an expression into a symbol.</h2>
+     * <p>
      * <p>
      * Expressions like QualifiedName that reference a column are resolved using the fieldResolver that were passed
      * to the constructor.
      * </p>
-     *
+     * <p>
      * <p>
      * Some information (like resolved function symbols) are written onto the given expressionAnalysisContext
      * </p>
@@ -135,188 +127,33 @@ public class ExpressionAnalyzer {
         return innerAnalyzer.process(expression, expressionAnalysisContext);
     }
 
-    public WhereClause generateWhereClause(Optional<Expression> whereExpression, ExpressionAnalysisContext context,
-                                           TableRelation tableRelation) {
+    public Symbol generateQuerySymbol(Optional<Expression> whereExpression, ExpressionAnalysisContext context) {
         if (whereExpression.isPresent()) {
-            WhereClause whereClause = new WhereClause(normalize(convert(whereExpression.get(), context)), null, null);
-            whereClause = tableRelation.resolve(whereClause);
-            return whereClause;
+            return convert(whereExpression.get(), context);
         } else {
-            return WhereClause.MATCH_ALL;
+            return Literal.BOOLEAN_TRUE;
         }
     }
 
-    private FunctionInfo getFunctionInfo(FunctionIdent ident) {
-        return functions.getSafe(ident).info();
+    private FunctionInfo getBuiltinFunctionInfo(String name, List<DataType> argumentTypes) {
+        FunctionImplementation impl = functions.getBuiltin(name, argumentTypes);
+        if (impl == null) {
+            throw Functions.createUnknownFunctionException(name, argumentTypes);
+        }
+        return impl.info();
     }
 
-    /**
-     * normalize and validate given value according to the corresponding {@link io.crate.planner.symbol.Reference}
-     *
-     * @param valueSymbol the value to normalize, might be anything from {@link io.crate.metadata.Scalar} to {@link io.crate.planner.symbol.Literal}
-     * @param reference   the reference to which the value has to comply in terms of type-compatibility
-     * @return the normalized Symbol, should be a literal
-     * @throws io.crate.exceptions.ColumnValidationException
-     */
-    public Symbol normalizeInputForReference(
-            Symbol valueSymbol, Reference reference, ExpressionAnalysisContext context) {
-
-        Literal literal;
-        try {
-            valueSymbol = normalizer.normalize(valueSymbol);
-            if (valueSymbol.symbolType() != SymbolType.LITERAL) {
-                DataType targetType = reference.valueType();
-                if (reference instanceof DynamicReference) {
-                    targetType = valueSymbol.valueType();
-                }
-                return castIfNeededOrFail(valueSymbol, targetType, context);
+    private FunctionInfo getBuiltinOrUdfFunctionInfo(@Nullable String schema, String name, List<DataType> argumentTypes) {
+        FunctionImplementation impl;
+        if (schema == null) {
+            impl = functions.getBuiltin(name, argumentTypes);
+            if (impl == null) {
+                impl = functions.getUserDefined(sessionContext.defaultSchema(), name, argumentTypes);
             }
-            literal = (Literal) valueSymbol;
-
-            if (reference instanceof DynamicReference) {
-                if (reference.info().columnPolicy() != ColumnPolicy.IGNORED) {
-                    // re-guess without strict to recognize timestamps
-                    DataType<?> dataType = DataTypes.guessType(literal.value(), false);
-                    validateInputType(dataType, reference.info().ident().columnIdent());
-                    ((DynamicReference) reference).valueType(dataType);
-                    literal = Literal.convert(literal, dataType); // need to update literal if the type changed
-                } else {
-                    ((DynamicReference) reference).valueType(literal.valueType());
-                }
-            } else {
-                validateInputType(literal.valueType(), reference.info().ident().columnIdent());
-                literal = Literal.convert(literal, reference.valueType());
-            }
-        } catch (ClassCastException e) {
-            throw new ColumnValidationException(
-                    reference.info().ident().columnIdent().name(),
-                    String.format("Invalid value of type '%s'", valueSymbol.symbolType().name()));
+        } else {
+            impl = functions.getUserDefined(schema, name, argumentTypes);
         }
-
-        try {
-            // 3. if reference is of type object - do special validation
-            if (reference.info().type() == DataTypes.OBJECT) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> value = (Map<String, Object>) literal.value();
-                if (value == null) {
-                    return Literal.NULL;
-                }
-                literal = Literal.newLiteral(normalizeObjectValue(value, reference.info(), true));
-            } else if (isObjectArray(reference.info().type())) {
-                Object[] value = (Object[]) literal.value();
-                if (value == null) {
-                    return Literal.NULL;
-                }
-                literal = Literal.newLiteral(
-                        reference.info().type(),
-                        normalizeObjectArrayValue(value, reference.info(), true)
-                );
-            }
-        } catch (ClassCastException | NumberFormatException e) {
-            throw new ColumnValidationException(
-                    reference.info().ident().columnIdent().name(),
-                    SymbolFormatter.format(
-                            "\"%s\" has a type that can't be implicitly cast to that of \"%s\" (" + reference.valueType().getName() + ")",
-                            literal,
-                            reference
-                    ));
-        }
-        return literal;
-    }
-
-    /**
-     * validate input types to not be nested arrays/collection types
-     *
-     * @throws ColumnValidationException if input type is a nested array type
-     */
-    private void validateInputType(DataType dataType, ColumnIdent columnIdent) throws ColumnValidationException {
-        if (dataType != null
-                && DataTypes.isCollectionType(dataType)
-                && DataTypes.isCollectionType(((CollectionType) dataType).innerType())) {
-            throw new ColumnValidationException(columnIdent.sqlFqn(),
-                    String.format(Locale.ENGLISH, "Invalid datatype '%s'", dataType));
-        }
-    }
-
-
-    /**
-     * normalize and validate the given value according to the given {@link io.crate.types.DataType}
-     *
-     * @param inputValue any {@link io.crate.planner.symbol.Symbol} that evaluates to a Literal or Parameter
-     * @param dataType   the type to convert this input to
-     * @return a {@link io.crate.planner.symbol.Literal} of type <code>dataType</code>
-     */
-    public Literal normalizeInputForType(Symbol inputValue, DataType dataType) {
-        try {
-            return Literal.convert(normalizer.normalize(inputValue), dataType);
-        } catch (ClassCastException | NumberFormatException e) {
-            throw new IllegalArgumentException(
-                    String.format(Locale.ENGLISH, "Invalid value of type '%s'", inputValue.symbolType().name()));
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> normalizeObjectValue(Map<String, Object> value, ReferenceInfo info, boolean forWrite) {
-        for (Map.Entry<String, Object> entry : value.entrySet()) {
-            ColumnIdent nestedIdent = ColumnIdent.getChild(info.ident().columnIdent(), entry.getKey());
-            TableInfo tableInfo = referenceInfos.getTableInfo(info.ident().tableIdent());
-            ReferenceInfo nestedInfo = tableInfo.getReferenceInfo(nestedIdent);
-            if (nestedInfo == null) {
-                if (info.columnPolicy() == ColumnPolicy.IGNORED) {
-                    continue;
-                }
-                DynamicReference dynamicReference = tableInfo.getDynamic(nestedIdent, forWrite);
-                if (dynamicReference == null) {
-                    throw new ColumnUnknownException(nestedIdent.sqlFqn());
-                }
-                DataType type = DataTypes.guessType(entry.getValue(), false);
-                if (type == null) {
-                    throw new ColumnValidationException(info.ident().columnIdent().sqlFqn(), "Invalid value");
-                }
-                dynamicReference.valueType(type);
-                nestedInfo = dynamicReference.info();
-            } else {
-                if (entry.getValue() == null) {
-                    continue;
-                }
-            }
-            if (nestedInfo.type() == DataTypes.OBJECT && entry.getValue() instanceof Map) {
-                value.put(entry.getKey(), normalizeObjectValue((Map<String, Object>) entry.getValue(), nestedInfo, forWrite));
-            } else if (isObjectArray(nestedInfo.type()) && entry.getValue() instanceof Object[]) {
-                value.put(entry.getKey(), normalizeObjectArrayValue((Object[]) entry.getValue(), nestedInfo, forWrite));
-            } else {
-                value.put(entry.getKey(), normalizePrimitiveValue(entry.getValue(), nestedInfo));
-            }
-        }
-        return value;
-    }
-
-    private boolean isObjectArray(DataType type) {
-        return type.id() == ArrayType.ID && ((ArrayType) type).innerType().id() == ObjectType.ID;
-    }
-
-    private Object[] normalizeObjectArrayValue(Object[] value, ReferenceInfo arrayInfo, boolean forWrite) {
-        for (Object arrayItem : value) {
-            Preconditions.checkArgument(arrayItem instanceof Map, "invalid value for object array type");
-            // return value not used and replaced in value as arrayItem is a map that is mutated
-            normalizeObjectValue((Map<String, Object>) arrayItem, arrayInfo, forWrite);
-        }
-        return value;
-    }
-
-    private Object normalizePrimitiveValue(Object primitiveValue, ReferenceInfo info) {
-        try {
-            if (info.type().equals(DataTypes.STRING) && primitiveValue instanceof String) {
-                return primitiveValue;
-            }
-            return info.type().value(primitiveValue);
-        } catch (Exception e) {
-            throw new ColumnValidationException(info.ident().columnIdent().sqlFqn(),
-                    String.format("Invalid %s",
-                            info.type().getName()
-                    )
-            );
-        }
+        return impl.info();
     }
 
     protected Symbol convertFunctionCall(FunctionCall node, ExpressionAnalysisContext context) {
@@ -329,39 +166,50 @@ public class ExpressionAnalyzer {
             arguments.add(argSymbol);
         }
 
+        List<String> parts = node.getName().getParts();
+        String schema = null;
+        String name;
+        if (parts.size() == 1) {
+            name = parts.get(0);
+        } else {
+            schema = parts.get(0);
+            name = parts.get(1);
+        }
+
         FunctionInfo functionInfo;
         if (node.isDistinct()) {
             if (argumentTypes.size() > 1) {
-                throw new UnsupportedOperationException("Function(DISTINCT x) does not accept more than one argument");
+                throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
+                    "%s(DISTINCT x) does not accept more than one argument", node.getName()));
             }
             // define the inner function. use the arguments/argumentTypes from above
-            FunctionIdent innerIdent = new FunctionIdent(CollectSetAggregation.NAME, argumentTypes);
-            FunctionInfo innerInfo = getFunctionInfo(innerIdent);
-            Symbol innerFunction = context.allocateFunction(innerInfo, arguments);
+            Symbol innerFunction = context.allocateFunction(
+                getBuiltinOrUdfFunctionInfo(schema, CollectSetAggregation.NAME, argumentTypes),
+                arguments
+            );
 
             // define the outer function which contains the inner function as argument.
-            String nodeName = "collection_" + node.getName().toString();
-            List<Symbol> outerArguments = Arrays.<Symbol>asList(innerFunction);
-            ImmutableList<DataType> outerArgumentTypes =
-                    ImmutableList.<DataType>of(new SetType(argumentTypes.get(0)));
-
-            FunctionIdent ident = new FunctionIdent(nodeName, outerArgumentTypes);
-            functionInfo = getFunctionInfo(ident);
+            String nodeName = "collection_" + name;
+            List<Symbol> outerArguments =  Arrays.asList(innerFunction); // needs to be mutable
+            List<DataType> outerArgumentTypes = ImmutableList.of(new SetType(argumentTypes.get(0))); // can be immutable
+            try {
+                functionInfo = getBuiltinFunctionInfo(nodeName, outerArgumentTypes);
+            } catch (UnsupportedOperationException ex) {
+                throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
+                    "unknown function %s(DISTINCT %s)", name, argumentTypes.get(0)), ex);
+            }
             arguments = outerArguments;
         } else {
-            FunctionIdent ident = new FunctionIdent(node.getName().toString(), argumentTypes);
-            functionInfo = getFunctionInfo(ident);
+            functionInfo = getBuiltinOrUdfFunctionInfo(schema, name, argumentTypes);
         }
         return context.allocateFunction(functionInfo, arguments);
     }
 
-
-    public void resolveWritableFields(boolean value) {
-        forWrite = value;
+    public void setResolveFieldsOperation(Operation operation) {
+        this.operation = operation;
     }
 
-
-    private static Symbol castIfNeededOrFail(Symbol symbolToCast, DataType targetType, ExpressionAnalysisContext context) {
+    public static Symbol castIfNeededOrFail(Symbol symbolToCast, DataType targetType) {
         DataType sourceType = symbolToCast.valueType();
         if (sourceType.equals(targetType)) {
             return symbolToCast;
@@ -369,32 +217,56 @@ public class ExpressionAnalyzer {
         if (sourceType.isConvertableTo(targetType)) {
             // cast further below doesn't always fail because it might be lazy as it wraps functions/references inside a cast function.
             // -> Need to check isConvertableTo to fail eagerly if the cast won't work.
-            try {
-                return cast(symbolToCast, targetType, context);
-            } catch (ClassCastException | NumberFormatException e) {
-                // exception is just thrown for literals, rest is evaluated lazy
-                throw new IllegalArgumentException(String.format("%s cannot be cast to type %s",
-                        SymbolFormatter.format(symbolToCast), targetType.getName()), e);
-            }
+            return cast(symbolToCast, targetType, false);
         }
-        throw new IllegalArgumentException(String.format("%s cannot be cast to type %s",
-                SymbolFormatter.format(symbolToCast), targetType.getName()));
+        throw new ConversionException(symbolToCast, targetType);
     }
 
-    private static Symbol cast(Symbol sourceSymbol, DataType targetType, ExpressionAnalysisContext context) {
+    private static Symbol cast(Symbol sourceSymbol, DataType targetType, boolean tryCast) {
         if (sourceSymbol.symbolType().isValueSymbol()) {
             return Literal.convert(sourceSymbol, targetType);
         }
-        FunctionInfo functionInfo = CastFunctionResolver.functionInfo(sourceSymbol.valueType(), targetType);
-        return context.allocateFunction(functionInfo, Arrays.asList(sourceSymbol));
+        return CastFunctionResolver.generateCastFunction(sourceSymbol, targetType, tryCast);
     }
 
-    class InnerExpressionAnalyzer extends AstVisitor<Symbol, ExpressionAnalysisContext> {
+    @Nullable
+    protected static String getQuotedSubscriptLiteral(String nodeName) {
+        Matcher matcher = SUBSCRIPT_SPLIT_PATTERN.matcher(nodeName);
+        if (matcher.matches()) {
+            StringBuilder quoted = new StringBuilder();
+            String group1 = matcher.group(1);
+            if (!group1.isEmpty()) {
+                quoted.append("\"").append(group1).append("\"");
+            } else {
+                quoted.append(group1);
+            }
+            String group2 = matcher.group(2);
+            String group3 = matcher.group(3);
+            if (!group2.isEmpty() && !group3.isEmpty()) {
+                quoted.append(matcher.group(2));
+                quoted.append("\"").append(group3).append("\"");
+            } else if (!group2.isEmpty() && group3.isEmpty()) {
+                return null;
+            }
+            quoted.append(matcher.group(4));
+            return quoted.toString();
+        } else {
+            return null;
+        }
+    }
+
+    private class InnerExpressionAnalyzer extends AstVisitor<Symbol, ExpressionAnalysisContext> {
+
+        @Override
+        protected Symbol visitNode(Node node, ExpressionAnalysisContext context) {
+            throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
+                "Unsupported node %s", node));
+        }
 
         @Override
         protected Symbol visitExpression(Expression node, ExpressionAnalysisContext context) {
-            throw new UnsupportedOperationException(String.format(
-                    "Unsupported expression %s", ExpressionFormatter.formatExpression(node)));
+            throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
+                "Unsupported expression %s", ExpressionFormatter.formatExpression(node)));
         }
 
         @Override
@@ -402,150 +274,214 @@ public class ExpressionAnalyzer {
             if (!node.getType().equals(CurrentTime.Type.TIMESTAMP)) {
                 visitExpression(node, context);
             }
-            List<Symbol> args = Lists.<Symbol>newArrayList(
-                    Literal.newLiteral(node.getPrecision().or(CurrentTimestampFunction.DEFAULT_PRECISION))
+            List<Symbol> args = Lists.newArrayList(
+                Literal.of(node.getPrecision().orElse(CurrentTimestampFunction.DEFAULT_PRECISION))
             );
-            return context.allocateCurrentTime(node, args, normalizer);
+            return context.allocateFunction(CurrentTimestampFunction.INFO, args);
+        }
+
+        @Override
+        protected Symbol visitIfExpression(IfExpression node, ExpressionAnalysisContext context) {
+            // check for global operand
+            Optional<Expression> defaultExpression = node.getFalseValue();
+            List<Symbol> arguments = new ArrayList<>(defaultExpression.isPresent() ? 3 : 2);
+
+            arguments.add(node.getCondition().accept(innerAnalyzer, context));
+            arguments.add(node.getTrueValue().accept(innerAnalyzer, context));
+            if (defaultExpression.isPresent()) {
+                arguments.add(defaultExpression.get().accept(innerAnalyzer, context));
+            }
+            return IfFunction.createFunction(arguments);
         }
 
         @Override
         protected Symbol visitFunctionCall(FunctionCall node, ExpressionAnalysisContext context) {
+            // If it's subscript function then use the special handling
+            // and validation that is used for the subscript operator `[]`
+            if (node.getName().toString().equalsIgnoreCase(SubscriptFunction.NAME)) {
+                assert node.getArguments().size() == 2 : "Number of arguments for subscript function must be 2";
+                return visitSubscriptExpression(
+                    new SubscriptExpression(node.getArguments().get(0), node.getArguments().get(1)), context);
+            }
             return convertFunctionCall(node, context);
         }
 
         @Override
+        protected Symbol visitSimpleCaseExpression(SimpleCaseExpression node, ExpressionAnalysisContext context) {
+            return convertCaseExpressionToIfFunctions(node.getWhenClauses(), node.getOperand(),
+                node.getDefaultValue(), context);
+        }
+
+        @Override
+        protected Symbol visitSearchedCaseExpression(SearchedCaseExpression node, ExpressionAnalysisContext context) {
+            return convertCaseExpressionToIfFunctions(node.getWhenClauses(), null, node.getDefaultValue(), context);
+        }
+
+        private Symbol convertCaseExpressionToIfFunctions(List<WhenClause> whenClauseExpressions,
+                                                          @Nullable Expression operandExpression,
+                                                          @Nullable Expression defaultValue,
+                                                          ExpressionAnalysisContext context) {
+            List<Symbol> operands = new ArrayList<>(whenClauseExpressions.size());
+            List<Symbol> results = new ArrayList<>(whenClauseExpressions.size());
+            Set<DataType> resultsTypes = new HashSet<>(whenClauseExpressions.size());
+
+            // check for global operand
+            Symbol operandLeftSymbol = null;
+            if (operandExpression != null) {
+                operandLeftSymbol = operandExpression.accept(innerAnalyzer, context);
+            }
+
+            for (WhenClause whenClause : whenClauseExpressions) {
+                Symbol operandRightSymbol = whenClause.getOperand().accept(innerAnalyzer, context);
+                Symbol operandSymbol = operandRightSymbol;
+
+                if (operandLeftSymbol != null) {
+                    operandSymbol = EqOperator.createFunction(
+                        operandLeftSymbol, castIfNeededOrFail(operandRightSymbol, operandLeftSymbol.valueType()));
+                }
+
+                operands.add(operandSymbol);
+
+                Symbol resultSymbol = whenClause.getResult().accept(innerAnalyzer, context);
+                results.add(resultSymbol);
+                resultsTypes.add(resultSymbol.valueType());
+            }
+
+            if (resultsTypes.size() == 2 && !resultsTypes.contains(DataTypes.UNDEFINED)
+                || resultsTypes.size() > 2) {
+                throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
+                    "Data types of all result expressions of a CASE statement must be equal, found: %s",
+                    resultsTypes));
+            }
+
+            Symbol defaultValueSymbol = null;
+            if (defaultValue != null) {
+                defaultValueSymbol = defaultValue.accept(innerAnalyzer, context);
+            }
+
+            return IfFunction.createChain(operands, results, defaultValueSymbol);
+        }
+
+        @Override
         protected Symbol visitCast(Cast node, ExpressionAnalysisContext context) {
-            DataType returnType = DATA_TYPE_ANALYZER.process(node.getType(), null);
-            return cast(process(node.getExpression(), context), returnType, context);
+            DataType returnType = DataTypeAnalyzer.convert(node.getType());
+            return cast(process(node.getExpression(), context), returnType, false);
+        }
+
+        @Override
+        protected Symbol visitTryCast(TryCast node, ExpressionAnalysisContext context) {
+            DataType returnType = DataTypeAnalyzer.convert(node.getType());
+
+            if (CastFunctionResolver.supportsExplicitConversion(returnType)) {
+                try {
+                    return cast(process(node.getExpression(), context), returnType, true);
+                } catch (ConversionException e) {
+                    return Literal.NULL;
+                }
+            }
+            throw new IllegalArgumentException(
+                String.format(Locale.ENGLISH, "No cast function found for return type %s", returnType.getName()));
         }
 
         @Override
         protected Symbol visitExtract(Extract node, ExpressionAnalysisContext context) {
             Symbol expression = process(node.getExpression(), context);
-            expression = castIfNeededOrFail(expression, DataTypes.TIMESTAMP, context);
-            return context.allocateFunction(ExtractFunctions.functionInfo(node.getField()), Arrays.asList(expression));
+            expression = castIfNeededOrFail(expression, DataTypes.TIMESTAMP);
+            Symbol field = castIfNeededOrFail(process(node.getField(), context), DataTypes.STRING);
+            return context.allocateFunction(
+                ExtractFunctions.GENERIC_INFO, Arrays.asList(field, expression));
         }
-
 
         @Override
         protected Symbol visitInPredicate(InPredicate node, ExpressionAnalysisContext context) {
-
+            /*
+             * convert where x IN (values)
+             *
+             * where values = a list of expressions
+             *
+             * into
+             *
+             *      x = ANY(array(1, 2, 3, ...))
+             */
             Symbol left = process(node.getValue(), context);
+            DataType targetType = left.valueType();
 
-            DataType leftType = left.valueType();
-            if (leftType.equals(DataTypes.UNDEFINED)) {
-                // dynamic or null values cannot be queried, in scalar use-cases (system tables)
-                // we currently have no dynamics
-                return Literal.NULL;
+            Expression valueList = node.getValueList();
+            if (!(valueList instanceof InListExpression)) {
+                throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
+                    "Expression %s is not supported in IN", ExpressionFormatter.formatExpression(valueList)));
             }
+            List<Expression> expressions = ((InListExpression) valueList).getValues();
+            List<Symbol> symbols = new ArrayList<>(expressions.size());
 
-            List<Expression> expressions = ((InListExpression) node.getValueList()).getValues();
-
-            boolean useAny = true;
-            Set<Literal> literals = new HashSet<>(expressions.size());
             for (Expression expression : expressions) {
-                Symbol arrayElement = process(expression, context);
-                Literal literal;
-                if (arrayElement instanceof Literal) {
-                    literal = (Literal) arrayElement;
+                Symbol symbol = process(expression, context);
+                if (targetType == DataTypes.UNDEFINED) {
+                    targetType = symbol.valueType();
+                    left = castIfNeededOrFail(left, targetType);
+
+                    symbols.add(symbol);
                 } else {
-                    Symbol normalized = normalize(arrayElement);
-                    if (normalized instanceof Literal) {
-                        literal = (Literal)normalized;
-                    } else {
-                        useAny = false;
-                        break;
-                    }
-                }
-                try {
-                    literals.add(Literal.convert(literal, leftType));
-                } catch (Throwable e) {
-                    throw new IllegalArgumentException(
-                            String.format(Locale.ENGLISH, "invalid IN LIST value %s. expected type '%s'",
-                                    SymbolFormatter.format(literal),
-                                    leftType.getName()));
+                    symbols.add(castIfNeededOrFail(symbol, targetType));
                 }
             }
-            if (useAny){
-                return context.allocateFunction(
-                        new FunctionInfo(
-                                new FunctionIdent(AnyEqOperator.NAME, Arrays.asList(leftType, new SetType(leftType))),
-                                DataTypes.BOOLEAN
-                        ),
-                        Arrays.asList(left, Literal.implodeCollection(leftType, literals))
-                );
-            }
-
-            Set<Function> comparisons = new HashSet<>(expressions.size());
-            FunctionInfo eqInfo = new FunctionInfo(
-                    new FunctionIdent(EqOperator.NAME, Arrays.asList(leftType, leftType)),
-                    DataTypes.BOOLEAN);
-            for (Expression expression : ((InListExpression) node.getValueList()).getValues()) {
-                Symbol right = expression.accept(this, context);
-                if (!right.valueType().equals(leftType)) {
-                    if (right.valueType().isConvertableTo(leftType)) {
-                        right = context.allocateFunction(CastFunctionResolver.functionInfo(right.valueType(), leftType),
-                                Arrays.asList(right));
-                    } else {
-                        throw new IllegalArgumentException(
-                                String.format(Locale.ENGLISH, "invalid IN LIST value %s. expected type '%s'",
-                                        SymbolFormatter.format(right),
-                                        leftType.getName()));
-                    }
-                }
-                comparisons.add(context.allocateFunction(eqInfo, Arrays.asList(left, right)));
-            }
-
-            if (comparisons.size() == 1) {
-                return comparisons.iterator().next();
-            } else {
-                Iterator<Function> iter = comparisons.iterator();
-                Symbol result = iter.next();
-                while (iter.hasNext()) {
-                    result = context.allocateFunction(OrOperator.INFO, Arrays.asList(result, iter.next()));
-                }
-                return result;
-            }
+            return context.allocateFunction(
+                AnyEqOperator.createInfo(targetType),
+                Arrays.asList(
+                    left, context.allocateFunction(ArrayFunction.createInfo(Symbols.extractTypes(symbols)), symbols))
+            );
         }
 
         @Override
         protected Symbol visitIsNotNullPredicate(IsNotNullPredicate node, ExpressionAnalysisContext context) {
             Symbol argument = process(node.getValue(), context);
-
-            FunctionIdent isNullIdent =
-                    new FunctionIdent(io.crate.operation.predicate.IsNullPredicate.NAME, ImmutableList.of(argument.valueType()));
-            FunctionInfo isNullInfo = getFunctionInfo(isNullIdent);
-
+            FunctionInfo isNullInfo =
+                getBuiltinFunctionInfo(io.crate.operation.predicate.IsNullPredicate.NAME, ImmutableList.of(argument.valueType()));
             return context.allocateFunction(
-                    NotPredicate.INFO,
-                    Arrays.<Symbol>asList(context.allocateFunction(isNullInfo, Arrays.asList(argument))));
+                NotPredicate.INFO,
+                Arrays.asList(context.allocateFunction(isNullInfo, Arrays.asList(argument))));
         }
 
         @Override
         protected Symbol visitSubscriptExpression(SubscriptExpression node, ExpressionAnalysisContext context) {
-            SubscriptContext subscriptContext = new SubscriptContext(parameterContext);
-            SUBSCRIPT_VISITOR.process(node, subscriptContext);
+            SubscriptContext subscriptContext = new SubscriptContext();
+            SubscriptValidator.validate(node, subscriptContext);
             return resolveSubscriptSymbol(subscriptContext, context);
         }
 
-        protected Symbol resolveSubscriptSymbol(SubscriptContext subscriptContext, ExpressionAnalysisContext context) {
+        Symbol resolveSubscriptSymbol(SubscriptContext subscriptContext, ExpressionAnalysisContext context) {
             // TODO: support nested subscripts as soon as DataTypes.OBJECT elements can be typed
             Symbol subscriptSymbol;
             Expression subscriptExpression = subscriptContext.expression();
             if (subscriptContext.qName() != null && subscriptExpression == null) {
-                subscriptSymbol = fieldProvider.resolveField(subscriptContext.qName(), subscriptContext.parts(), forWrite);
+                subscriptSymbol = fieldProvider.resolveField(subscriptContext.qName(), subscriptContext.parts(), operation);
             } else if (subscriptExpression != null) {
                 subscriptSymbol = subscriptExpression.accept(this, context);
             } else {
                 throw new UnsupportedOperationException("Only references, function calls or array literals " +
-                        "are valid subscript symbols");
+                                                        "are valid subscript symbols");
             }
-            if (subscriptContext.index() != null) {
+            assert subscriptSymbol != null : "subscriptSymbol must not be null";
+            Expression index = subscriptContext.index();
+            List<String> parts = subscriptContext.parts();
+            if (index != null) {
+                Symbol indexSymbol = index.accept(this, context);
                 // rewrite array access to subscript scalar
-                FunctionIdent functionIdent = new FunctionIdent(SubscriptFunction.NAME,
-                        ImmutableList.of(subscriptSymbol.valueType(), DataTypes.INTEGER));
-                return context.allocateFunction(getFunctionInfo(functionIdent),
-                        Arrays.asList(subscriptSymbol, newLiteral(subscriptContext.index())));
+                return context.allocateFunction(
+                    getBuiltinFunctionInfo(
+                        SubscriptFunction.NAME,
+                        ImmutableList.of(subscriptSymbol.valueType(), indexSymbol.valueType())),
+                    Arrays.asList(subscriptSymbol, indexSymbol)
+                );
+            } else if (parts != null && subscriptExpression != null) {
+                FunctionInfo info = getBuiltinFunctionInfo( SubscriptObjectFunction.NAME,
+                    ImmutableList.of(subscriptSymbol.valueType(), DataTypes.STRING));
+
+                Symbol function = context.allocateFunction(info, Arrays.asList(subscriptSymbol, Literal.of(parts.get(0))));
+                for (int i = 1; i < parts.size(); i++) {
+                    function = context.allocateFunction(info, Arrays.asList(function, Literal.of(parts.get(i))));
+                }
+                return function;
             }
             return subscriptSymbol;
         }
@@ -561,7 +497,8 @@ public class ExpressionAnalyzer {
                     functionInfo = OrOperator.INFO;
                     break;
                 default:
-                    throw new UnsupportedOperationException("Unsupported logical binary expression " + node.getType().name());
+                    throw new UnsupportedOperationException(
+                        "Unsupported logical binary expression " + node.getType().name());
             }
             List<Symbol> arguments = new ArrayList<>(2);
             arguments.add(process(node.getLeft(), context));
@@ -572,16 +509,8 @@ public class ExpressionAnalyzer {
         @Override
         protected Symbol visitNotExpression(NotExpression node, ExpressionAnalysisContext context) {
             Symbol argument = process(node.getValue(), context);
-
-            DataType dataType = argument.valueType();
-            if (!dataType.equals(DataTypes.BOOLEAN) && !dataType.equals(DataTypes.UNDEFINED)) {
-                throw new IllegalArgumentException(String.format(
-                        "Invalid argument of type \"%s\" passed to %s predicate. Argument must resolve to boolean or null",
-                        dataType,
-                        node
-                ));
-            }
-            return new Function(NotPredicate.INFO, Arrays.asList(argument));
+            return context.allocateFunction(
+                getBuiltinFunctionInfo(NotPredicate.NAME, Arrays.asList(argument.valueType())), Arrays.asList(argument));
         }
 
         @Override
@@ -589,13 +518,10 @@ public class ExpressionAnalyzer {
             Symbol left = process(node.getLeft(), context);
             Symbol right = process(node.getRight(), context);
 
-            if (left.valueType().equals(DataTypes.UNDEFINED) || right.valueType().equals(DataTypes.UNDEFINED)) {
-                return Literal.NULL;
-            }
-            Comparison comparison = new Comparison(context, node.getType(), left, right);
+            Comparison comparison = new Comparison(node.getType(), left, right);
             comparison.normalize(context);
-            FunctionInfo info = getFunctionInfo(comparison.toFunctionIdent());
-            return context.allocateFunction(info, comparison.arguments());
+            FunctionIdent ident = comparison.toFunctionIdent();
+            return context.allocateFunction(getBuiltinFunctionInfo(ident.name(), ident.argumentTypes()), comparison.arguments());
         }
 
         @Override
@@ -604,40 +530,37 @@ public class ExpressionAnalyzer {
                 throw new UnsupportedFeatureException("ALL is not supported");
             }
 
-            Symbol rightSymbol = process(node.getRight(), context);
+            Symbol arraySymbol = process(node.getRight(), context);
             Symbol leftSymbol = process(node.getLeft(), context);
-            DataType rightType = rightSymbol.valueType();
+            DataType rightType = arraySymbol.valueType();
 
             if (!DataTypes.isCollectionType(rightType)) {
                 throw new IllegalArgumentException(
-                        SymbolFormatter.format("invalid array expression: '%s'", rightSymbol));
+                    SymbolFormatter.format("invalid array expression: '%s'", arraySymbol));
             }
             DataType rightInnerType = ((CollectionType) rightType).innerType();
             if (rightInnerType.equals(DataTypes.OBJECT)) {
                 throw new IllegalArgumentException("ANY on object arrays is not supported");
             }
 
-            // always try to convert literal to reference type
-            if (!rightInnerType.equals(leftSymbol.valueType())) {
-                if (rightInnerType.isConvertableTo(leftSymbol.valueType())) {
-                    if (rightSymbol.symbolType().isValueSymbol()) {
-                        rightSymbol = Literal.convert(rightSymbol, new ArrayType(leftSymbol.valueType()));
-                    } else {
-                        leftSymbol = normalizeInputForType(leftSymbol, rightInnerType);
-                    }
-                } else {
-                    throw new IllegalArgumentException(
-                            String.format(Locale.ENGLISH,
-                                    "array expression of invalid type array(%s)", rightInnerType));
-                }
+            // There is no proper type-precedence logic in place yet,
+            // but in this case the side which has a column instead of functions/literals should dictate the type.
+
+            // x = ANY([null])              -> must not result in to-null casts
+            // int_col = ANY([1, 2, 3])     -> must cast to int instead of long (otherwise lucene query would be slow)
+            // null = ANY([1, 2])           -> must not cast to null
+            if (SymbolVisitors.any(symbol -> symbol instanceof Field, leftSymbol) || rightInnerType == DataTypes.UNDEFINED) {
+                arraySymbol = castIfNeededOrFail(arraySymbol, new ArrayType(leftSymbol.valueType()));
+            } else {
+                leftSymbol = castIfNeededOrFail(leftSymbol, rightInnerType);
             }
 
             ComparisonExpression.Type operationType = node.getType();
             String operatorName;
             operatorName = AnyOperator.OPERATOR_PREFIX + operationType.getValue();
-            FunctionIdent functionIdent = new FunctionIdent(operatorName, Arrays.asList(leftSymbol.valueType(), rightSymbol.valueType()));
-            FunctionInfo functionInfo = getFunctionInfo(functionIdent);
-            return context.allocateFunction(functionInfo, Arrays.asList(leftSymbol, rightSymbol));
+            return context.allocateFunction(
+                getBuiltinFunctionInfo(operatorName, Arrays.asList(leftSymbol.valueType(), arraySymbol.valueType())),
+                Arrays.asList(leftSymbol, arraySymbol));
         }
 
         @Override
@@ -651,30 +574,14 @@ public class ExpressionAnalyzer {
 
             if (!DataTypes.isCollectionType(rightType)) {
                 throw new IllegalArgumentException(
-                        SymbolFormatter.format("invalid array expression: '%s'", rightSymbol));
+                    SymbolFormatter.format("invalid array expression: '%s'", rightSymbol));
             }
-            DataType rightInnerType = ((CollectionType) rightType).innerType();
-
-            // always try to convert literal to reference type
-            if (rightInnerType.id() != StringType.ID) {
-                if (rightInnerType.isConvertableTo(DataTypes.STRING)) {
-                    if (rightSymbol.symbolType().isValueSymbol()) {
-                        rightSymbol = Literal.convert(rightSymbol, new ArrayType(DataTypes.STRING));
-                    } else {
-                        leftSymbol = normalizeInputForType(leftSymbol, DataTypes.STRING);
-                    }
-                } else {
-                    throw new IllegalArgumentException(
-                            String.format(Locale.ENGLISH,
-                                    "array expression of invalid type array(%s)", rightInnerType));
-                }
-            }
-
+            rightSymbol = castIfNeededOrFail(rightSymbol, new ArrayType(DataTypes.STRING));
             String operatorName = node.inverse() ? AnyNotLikeOperator.NAME : AnyLikeOperator.NAME;
 
-            FunctionIdent functionIdent = new FunctionIdent(operatorName, Arrays.asList(leftSymbol.valueType(), rightSymbol.valueType()));
-            FunctionInfo functionInfo = getFunctionInfo(functionIdent);
-            return context.allocateFunction(functionInfo, Arrays.asList(leftSymbol, rightSymbol));
+            return context.allocateFunction(
+                getBuiltinFunctionInfo(operatorName, Arrays.asList(leftSymbol.valueType(), rightSymbol.valueType())),
+                Arrays.asList(leftSymbol, rightSymbol));
         }
 
         @Override
@@ -683,39 +590,27 @@ public class ExpressionAnalyzer {
                 throw new UnsupportedOperationException("ESCAPE is not supported.");
             }
             Symbol expression = process(node.getValue(), context);
-            // catch null types, might be null or dynamic reference, which are both not supported
-            if (expression.valueType().equals(DataTypes.UNDEFINED)) {
-                return Literal.NULL;
-            }
-            expression = castIfNeededOrFail(expression, DataTypes.STRING, context);
-            Symbol pattern = normalize(castIfNeededOrFail(process(node.getPattern(), context), DataTypes.STRING, context));
-            if (!pattern.symbolType().isValueSymbol()) {
-                throw new UnsupportedOperationException("<expression> LIKE <pattern>: pattern must not be a reference.");
-            }
-            FunctionIdent functionIdent = FunctionIdent.of(LikeOperator.NAME, expression.valueType(), pattern.valueType());
-            return context.allocateFunction(getFunctionInfo(functionIdent), Arrays.asList(expression, pattern));
+            expression = castIfNeededOrFail(expression, DataTypes.STRING);
+            Symbol pattern = castIfNeededOrFail(process(node.getPattern(), context), DataTypes.STRING);
+            return context.allocateFunction(
+                getBuiltinFunctionInfo(LikeOperator.NAME, Arrays.asList(expression.valueType(), pattern.valueType())),
+                Arrays.asList(expression, pattern));
         }
 
         @Override
         protected Symbol visitIsNullPredicate(IsNullPredicate node, ExpressionAnalysisContext context) {
             Symbol value = process(node.getValue(), context);
 
-            // currently there will be no result for dynamic references, so return here
-            if (!value.symbolType().isValueSymbol() && value.valueType().equals(DataTypes.UNDEFINED)) {
-                return Literal.NULL;
-            }
-
-            FunctionIdent functionIdent =
-                    new FunctionIdent(io.crate.operation.predicate.IsNullPredicate.NAME, ImmutableList.of(value.valueType()));
-            FunctionInfo functionInfo = getFunctionInfo(functionIdent);
-            return context.allocateFunction(functionInfo, Arrays.asList(value));
+            return context.allocateFunction(
+                getBuiltinFunctionInfo(io.crate.operation.predicate.IsNullPredicate.NAME, ImmutableList.of(value.valueType())),
+                Arrays.asList(value));
         }
 
         @Override
         protected Symbol visitNegativeExpression(NegativeExpression node, ExpressionAnalysisContext context) {
             // in statements like "where x = -1" the  positive (expression)IntegerLiteral (1)
             // is just wrapped inside a negativeExpression
-            // the visitor here swaps it to get -1 in a (symbol)LiteralInteger
+            // the visitor here swaps it to getBuiltin -1 in a (symbol)LiteralInteger
             return NEGATIVE_LITERAL_VISITOR.process(process(node.getValue(), context), null);
         }
 
@@ -724,138 +619,188 @@ public class ExpressionAnalyzer {
             Symbol left = process(node.getLeft(), context);
             Symbol right = process(node.getRight(), context);
 
-            FunctionIdent functionIdent = new FunctionIdent(
+            return context.allocateFunction(
+                getBuiltinFunctionInfo(
                     node.getType().name().toLowerCase(Locale.ENGLISH),
-                    Arrays.asList(left.valueType(), right.valueType())
-            );
-            return context.allocateFunction(getFunctionInfo(functionIdent), Arrays.asList(left, right));
+                    Arrays.asList(left.valueType(), right.valueType())),
+                Arrays.asList(left, right));
         }
 
         @Override
         protected Symbol visitQualifiedNameReference(QualifiedNameReference node, ExpressionAnalysisContext context) {
-            return fieldProvider.resolveField(node.getName(), forWrite);
+            try {
+                return fieldProvider.resolveField(node.getName(), null, operation);
+            } catch (ColumnUnknownException exception) {
+                if (sessionContext.options().contains(Option.ALLOW_QUOTED_SUBSCRIPT)) {
+                    String quotedSubscriptLiteral = getQuotedSubscriptLiteral(node.getName().toString());
+                    if (quotedSubscriptLiteral != null) {
+                        return process(SqlParser.createExpression(quotedSubscriptLiteral), context);
+                    } else {
+                        throw exception;
+                    }
+                } else {
+                    throw exception;
+                }
+            }
         }
 
         @Override
         protected Symbol visitBooleanLiteral(BooleanLiteral node, ExpressionAnalysisContext context) {
-            return newLiteral(node.getValue());
+            return Literal.of(node.getValue());
         }
 
         @Override
         protected Symbol visitStringLiteral(StringLiteral node, ExpressionAnalysisContext context) {
-            return newLiteral(node.getValue());
+            return Literal.of(node.getValue());
         }
 
         @Override
         protected Symbol visitDoubleLiteral(DoubleLiteral node, ExpressionAnalysisContext context) {
-            return newLiteral(node.getValue());
+            return Literal.of(node.getValue());
         }
 
         @Override
         protected Symbol visitLongLiteral(LongLiteral node, ExpressionAnalysisContext context) {
-            return newLiteral(node.getValue());
+            return Literal.of(node.getValue());
         }
 
         @Override
         protected Symbol visitNullLiteral(NullLiteral node, ExpressionAnalysisContext context) {
-            return newLiteral(UndefinedType.INSTANCE, null);
+            return Literal.of(UndefinedType.INSTANCE, null);
         }
 
         @Override
         public Symbol visitArrayLiteral(ArrayLiteral node, ExpressionAnalysisContext context) {
-            // TODO: support everything that is immediately evaluable as values
-            return toArrayLiteral(node.values(), context);
-        }
-
-        private Literal toArrayLiteral(List<Expression> values, ExpressionAnalysisContext context) {
+            List<Expression> values = node.values();
             if (values.isEmpty()) {
-                return newLiteral(new ArrayType(UndefinedType.INSTANCE), new Object[0]);
+                return Literal.of(new ArrayType(UndefinedType.INSTANCE), new Object[0]);
             } else {
-                DataType innerType = null;
-                List<Literal> literals = new ArrayList<>(values.size());
-                for (Expression e : values) {
-                    Symbol arrayElement = process(e, context);
-                    if (innerType == null || (innerType == DataTypes.UNDEFINED && !arrayElement.valueType().equals(innerType))) {
-                        innerType = arrayElement.valueType();
-                    } else if (!arrayElement.valueType().equals(innerType)) {
-                        throw new IllegalArgumentException(String.format(
-                                Locale.ENGLISH, "array element %s not of array item type %s", e, innerType));
-                    }
-                    literals.add(Literal.convert(arrayElement, innerType));
+                List<Symbol> arguments = new ArrayList<>(values.size());
+                for (Expression value : values) {
+                    arguments.add(process(value, context));
                 }
-                return Literal.implodeCollection(innerType, literals);
+                return context
+                    .allocateFunction(getBuiltinFunctionInfo(ArrayFunction.NAME, Symbols.extractTypes(arguments)), arguments);
             }
         }
 
         @Override
         public Symbol visitObjectLiteral(ObjectLiteral node, ExpressionAnalysisContext context) {
-            // TODO: support everything that is immediately evaluable as values
-            Map<String, Object> values = new HashMap<>(node.values().size());
-            for (Map.Entry<String, Expression> entry : node.values().entries()) {
-                Object value;
-                try {
-                    value = ExpressionToObjectVisitor.convert(entry.getValue(), parameterContext.parameters());
-                } catch (UnsupportedOperationException e) {
-                    throw new IllegalArgumentException(
-                            String.format(Locale.ENGLISH,
-                                    "invalid object literal value '%s'",
-                                    entry.getValue())
-                    );
-                }
-
-                if (values.put(entry.getKey(), value) != null) {
-                    throw new IllegalArgumentException(
-                            String.format(Locale.ENGLISH,
-                                    "key '%s' listed twice in object literal",
-                                    entry.getKey()));
-                }
+            Multimap<String, Expression> values = node.values();
+            if (values.isEmpty()) {
+                return Literal.EMPTY_OBJECT;
             }
-            return newLiteral(values);
+            List<Symbol> arguments = new ArrayList<>(values.size() * 2);
+            for (Map.Entry<String, Expression> entry : values.entries()) {
+                arguments.add(Literal.of(entry.getKey()));
+                arguments.add(process(entry.getValue(), context));
+            }
+            return context
+                .allocateFunction(getBuiltinFunctionInfo(MapFunction.NAME, Symbols.extractTypes(arguments)), arguments);
         }
 
         @Override
         public Symbol visitParameterExpression(ParameterExpression node, ExpressionAnalysisContext context) {
-            return parameterContext.getAsSymbol(node.index());
+            return convertParamFunction.apply(node);
+        }
+
+        @Override
+        protected Symbol visitBetweenPredicate(BetweenPredicate node, ExpressionAnalysisContext context) {
+            // <value> between <min> and <max>
+            // -> <value> >= <min> and <value> <= max
+            Symbol value = process(node.getValue(), context);
+            Symbol min = process(node.getMin(), context);
+            Symbol max = process(node.getMax(), context);
+
+            Comparison gte = new Comparison(ComparisonExpression.Type.GREATER_THAN_OR_EQUAL, value, min);
+            FunctionIdent gteIdent = gte.normalize(context).toFunctionIdent();
+            Function gteFunc = context.allocateFunction(
+                getBuiltinFunctionInfo(gteIdent.name(), gteIdent.argumentTypes()), gte.arguments());
+
+            Comparison lte = new Comparison(ComparisonExpression.Type.LESS_THAN_OR_EQUAL, value, max);
+            FunctionIdent lteIdent = lte.normalize(context).toFunctionIdent();
+            Function lteFunc = context.allocateFunction(
+                getBuiltinFunctionInfo(lteIdent.name(), lteIdent.argumentTypes()), lte.arguments());
+
+            return AndOperator.of(gteFunc, lteFunc);
         }
 
         @Override
         public Symbol visitMatchPredicate(MatchPredicate node, ExpressionAnalysisContext context) {
-            Map<Field, Double> identBoostMap = new HashMap<>(node.idents().size());
+            Map<Field, Symbol> identBoostMap = new HashMap<>(node.idents().size());
+            DataType columnType = null;
             for (MatchPredicateColumnIdent ident : node.idents()) {
                 Symbol column = process(ident.columnIdent(), context);
+                if (columnType == null) {
+                    columnType = column.valueType();
+                }
                 Preconditions.checkArgument(
-                        column.valueType().equals(DataTypes.STRING),
-                        String.format("Can only use MATCH on columns of type STRING, not on '%s'", column.valueType())
-                );
-                Preconditions.checkArgument(
-                        column instanceof Field,
-                        SymbolFormatter.format("can only MATCH on columns, not on %s", column)
-                );
-                assert column instanceof Field;
-                Number boost = ExpressionToNumberVisitor.convert(ident.boost(), parameterContext.parameters());
-                identBoostMap.put(((Field) column), boost == null ? null : boost.doubleValue());
+                    column instanceof Field,
+                    SymbolFormatter.format("can only MATCH on columns, not on %s", column));
+                Symbol boost = process(ident.boost(), context);
+                identBoostMap.put(((Field) column), boost);
             }
-            String queryTerm = ExpressionToStringVisitor.convert(node.value(), parameterContext.parameters());
-            String matchType = node.matchType() == null
-                    ? io.crate.operation.predicate.MatchPredicate.DEFAULT_MATCH_TYPE_STRING
-                    : node.matchType();
-            try {
-                MultiMatchQueryBuilder.Type.parse(matchType);
-            } catch (ElasticsearchParseException e) {
-                throw new IllegalArgumentException(String.format(Locale.ENGLISH, "invalid MATCH type '%s'", matchType), e);
+            assert columnType != null : "columnType must not be null";
+            verifyTypesForMatch(identBoostMap.keySet(), columnType);
+
+            Symbol queryTerm = castIfNeededOrFail(process(node.value(), context), columnType);
+            String matchType = io.crate.operation.predicate.MatchPredicate.getMatchType(node.matchType(), columnType);
+
+            List<Symbol> mapArgs = new ArrayList<>(node.properties().size() * 2);
+            for (Map.Entry<String, Expression> e : node.properties().properties().entrySet()) {
+                mapArgs.add(Literal.of(e.getKey()));
+                mapArgs.add(process(e.getValue(), context));
             }
-            Map<String, Object> options = MatchOptionsAnalysis.process(node.properties(), parameterContext.parameters());
-            return new io.crate.planner.symbol.MatchPredicate(identBoostMap, queryTerm, matchType, options);
+            Function options = context.allocateFunction(MapFunction.createInfo(Symbols.extractTypes(mapArgs)), mapArgs);
+            return new io.crate.analyze.symbol.MatchPredicate(identBoostMap, queryTerm, matchType, options);
+        }
+
+        @Override
+        protected Symbol visitSubqueryExpression(SubqueryExpression node, ExpressionAnalysisContext context) {
+            if (subQueryAnalyzer == null) {
+                throw new UnsupportedOperationException("Subquery not supported in this statement");
+            }
+            /* note: This does not support analysis columns in the subquery which belong to the parent relation
+             * this would require {@link StatementAnalysisContext#startRelation} to somehow inherit the parent context
+             */
+            AnalyzedRelation relation = subQueryAnalyzer.analyze(node.getQuery());
+            List<Field> fields = relation.fields();
+            if (fields.size() > 1) {
+                throw new UnsupportedOperationException("Subqueries with more than 1 column are not supported.");
+            }
+            /*
+             * The SelectSymbol should actually have a RowType as it is a row-expression.
+             *
+             * But there are no other row-expressions yet. In addition the cast functions and operators don't work with
+             * row types (yet).
+             *
+             * Since we only support 1 column and only single-row subselects it is okay to use the inner type directly.
+             */
+            return new SelectSymbol(relation, fields.get(0).valueType());
+        }
+
+    }
+
+    private static void verifyTypesForMatch(Iterable<? extends Symbol> columns, DataType columnType) {
+        Preconditions.checkArgument(
+            io.crate.operation.predicate.MatchPredicate.SUPPORTED_TYPES.contains(columnType),
+            String.format(Locale.ENGLISH, "Can only use MATCH on columns of type STRING or GEO_SHAPE, not on '%s'", columnType));
+        for (Symbol column : columns) {
+            if (!column.valueType().equals(columnType)) {
+                throw new IllegalArgumentException(String.format(
+                    Locale.ENGLISH,
+                    "All columns within a match predicate must be of the same type. Found %s and %s",
+                    columnType, column.valueType()));
+            }
         }
     }
 
     private static class Comparison {
 
         private static final Set<ComparisonExpression.Type> NEGATING_TYPES = ImmutableSet.of(
-                ComparisonExpression.Type.REGEX_NO_MATCH,
-                ComparisonExpression.Type.REGEX_NO_MATCH_CI,
-                ComparisonExpression.Type.NOT_EQUAL);
-        private final ExpressionAnalysisContext expressionAnalysisContext;
+            ComparisonExpression.Type.REGEX_NO_MATCH,
+            ComparisonExpression.Type.REGEX_NO_MATCH_CI,
+            ComparisonExpression.Type.NOT_EQUAL);
 
         private ComparisonExpression.Type comparisonExpressionType;
         private Symbol left;
@@ -865,11 +810,9 @@ public class ExpressionAnalyzer {
         private String operatorName;
         private FunctionIdent functionIdent = null;
 
-        private Comparison(ExpressionAnalysisContext expressionAnalysisContext,
-                           ComparisonExpression.Type comparisonExpressionType,
+        private Comparison(ComparisonExpression.Type comparisonExpressionType,
                            Symbol left,
                            Symbol right) {
-            this.expressionAnalysisContext = expressionAnalysisContext;
             this.operatorName = "op_" + comparisonExpressionType.getValue();
             this.comparisonExpressionType = comparisonExpressionType;
             this.left = left;
@@ -878,19 +821,22 @@ public class ExpressionAnalyzer {
             this.rightType = right.valueType();
         }
 
-        void normalize(ExpressionAnalysisContext context) {
+        Comparison normalize(ExpressionAnalysisContext context) {
             swapIfNecessary();
             castTypes();
             rewriteNegatingOperators(context);
+            return this;
         }
 
         /**
-         * swaps the comparison so that references are on the left side.
+         * swaps the comparison so that references and fields are on the left side.
          * e.g.:
          * eq(2, name)  becomes  eq(name, 2)
          */
         private void swapIfNecessary() {
-            if (!(left.symbolType().isValueSymbol() && (right instanceof Reference || right instanceof Field))) {
+            if ((!(right instanceof Reference || right instanceof Field)
+                || left instanceof Reference || left instanceof Field)
+                && leftType.id() != DataTypes.UNDEFINED.id()) {
                 return;
             }
             ComparisonExpression.Type type = SWAP_OPERATOR_TABLE.get(comparisonExpressionType);
@@ -907,7 +853,7 @@ public class ExpressionAnalyzer {
         }
 
         private void castTypes() {
-            right = castIfNeededOrFail(right, leftType, expressionAnalysisContext);
+            right = castIfNeededOrFail(right, leftType);
             rightType = leftType;
         }
 
@@ -940,8 +886,8 @@ public class ExpressionAnalyzer {
 
             FunctionIdent ident = new FunctionIdent(opName, Arrays.asList(leftType, rightType));
             left = context.allocateFunction(
-                    new FunctionInfo(ident, opType),
-                    Arrays.asList(left, right)
+                new FunctionInfo(ident, opType),
+                Arrays.asList(left, right)
             );
             right = null;
             rightType = null;

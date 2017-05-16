@@ -21,89 +21,31 @@
 
 package io.crate.operation.projectors;
 
-import io.crate.core.collections.Row;
-import io.crate.operation.Input;
-import io.crate.operation.RowDownstream;
-import io.crate.operation.RowDownstreamHandle;
-import io.crate.operation.RowUpstream;
-import io.crate.operation.collect.CollectExpression;
+import io.crate.data.*;
 
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
-public class FilterProjector implements Projector, RowDownstreamHandle {
+class FilterProjector implements Projector {
 
-    private final CollectExpression[] collectExpressions;
-    private final Input<Boolean> condition;
+    private final Predicate<Row> rowFilterPredicate;
 
-    private RowDownstreamHandle downstream;
-    private AtomicInteger remainingUpstreams = new AtomicInteger(0);
-    private final AtomicReference<Throwable> upstreamFailure = new AtomicReference<>(null);
-
-    public FilterProjector(CollectExpression[] collectExpressions,
-                           Input<Boolean> condition) {
-        this.collectExpressions = collectExpressions;
-        this.condition = condition;
+    FilterProjector(Predicate<Row> rowFilterPredicate) {
+        this.rowFilterPredicate = rowFilterPredicate;
     }
 
     @Override
-    public void startProjection() {
-        if (remainingUpstreams.get() <= 0) {
-            finish();
-        }
-    }
-
-    @Override
-    public synchronized boolean setNextRow(Row row) {
-        for (CollectExpression<?> collectExpression : collectExpressions) {
-            collectExpression.setNextRow(row);
-        }
-
-        Boolean queryResult = condition.value();
-        if (queryResult == null) {
-            return true;
-        }
-
-        if (downstream != null && queryResult) {
-            return downstream.setNextRow(row);
-        }
-        return true;
-    }
-
-    @Override
-    public RowDownstreamHandle registerUpstream(RowUpstream upstream) {
-        remainingUpstreams.incrementAndGet();
-        return this;
-    }
-
-    @Override
-    public void finish() {
-        if (remainingUpstreams.decrementAndGet() > 0) {
-            return;
-        }
-        if (downstream != null) {
-            Throwable throwable = upstreamFailure.get();
-            if (throwable == null) {
-                downstream.finish();
-            } else {
-                downstream.fail(throwable);
+    public BatchIterator apply(BatchIterator batchIterator) {
+        return new FilteringBatchIterator(
+            batchIterator,
+            inputs -> {
+                final Row row = RowBridging.toRow(inputs);
+                return () -> rowFilterPredicate.test(row);
             }
-        }
+        );
     }
 
     @Override
-    public void fail(Throwable throwable) {
-        upstreamFailure.set(throwable);
-        if (remainingUpstreams.decrementAndGet() > 0) {
-            return;
-        }
-        if (downstream != null) {
-            downstream.fail(throwable);
-        }
-    }
-
-    @Override
-    public void downstream(RowDownstream downstream) {
-        this.downstream = downstream.registerUpstream(this);
+    public boolean providesIndependentScroll() {
+        return false;
     }
 }

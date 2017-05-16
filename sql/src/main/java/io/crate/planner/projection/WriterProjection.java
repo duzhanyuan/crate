@@ -22,23 +22,19 @@
 package io.crate.planner.projection;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import io.crate.analyze.EvaluatingNormalizer;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.FunctionIdent;
-import io.crate.metadata.FunctionInfo;
+import io.crate.analyze.symbol.*;
+import io.crate.collections.Lists2;
+import io.crate.metadata.*;
 import io.crate.metadata.sys.SysShardsTableInfo;
 import io.crate.operation.scalar.FormatFunction;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.*;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
+import io.crate.types.IntegerType;
 import io.crate.types.StringType;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.settings.ImmutableSettings;
-import org.elasticsearch.common.settings.Settings;
 
 import java.io.IOException;
 import java.util.*;
@@ -46,36 +42,81 @@ import java.util.*;
 public class WriterProjection extends Projection {
 
     private static final List<Symbol> OUTPUTS = ImmutableList.<Symbol>of(
-            new Value(DataTypes.LONG) // number of lines written
+        new Value(DataTypes.LONG) // number of lines written
     );
 
-    private final static Reference SHARD_ID_REF = new Reference(SysShardsTableInfo.INFOS.get(new ColumnIdent("id")));
-    private final static Reference TABLE_NAME_REF = new Reference(SysShardsTableInfo.INFOS.get(new ColumnIdent("table_name")));
-    private final static Reference PARTITION_IDENT_REF = new Reference(SysShardsTableInfo.INFOS.get(new ColumnIdent("partition_ident")));
+    private final static Reference SHARD_ID_REF = new Reference(SysShardsTableInfo.ReferenceIdents.ID, RowGranularity.SHARD, IntegerType.INSTANCE);
+    private final static Reference TABLE_NAME_REF = new Reference(SysShardsTableInfo.ReferenceIdents.TABLE_NAME, RowGranularity.SHARD, StringType.INSTANCE);
+    private final static Reference PARTITION_IDENT_REF = new Reference(SysShardsTableInfo.ReferenceIdents.PARTITION_IDENT, RowGranularity.SHARD, StringType.INSTANCE);
+
 
     public static final Symbol DIRECTORY_TO_FILENAME = new Function(new FunctionInfo(
-            new FunctionIdent(FormatFunction.NAME, Arrays.<DataType>asList(StringType.INSTANCE,
-                    StringType.INSTANCE, StringType.INSTANCE, StringType.INSTANCE)),
-            StringType.INSTANCE),
-            Arrays.<Symbol>asList(Literal.newLiteral("%s_%s_%s.json"), TABLE_NAME_REF, SHARD_ID_REF, PARTITION_IDENT_REF)
+        new FunctionIdent(FormatFunction.NAME, Arrays.<DataType>asList(StringType.INSTANCE,
+            StringType.INSTANCE, StringType.INSTANCE, StringType.INSTANCE)),
+        StringType.INSTANCE),
+        Arrays.<Symbol>asList(Literal.of("%s_%s_%s.json"), TABLE_NAME_REF, SHARD_ID_REF, PARTITION_IDENT_REF)
     );
 
     private Symbol uri;
-    private boolean isDirectoryUri = false;
-    private List<Symbol> inputs = ImmutableList.of();
-    private Settings settings = ImmutableSettings.EMPTY;
-
-    private Map<ColumnIdent, Symbol> overwrites = ImmutableMap.of();
+    private List<Symbol> inputs;
 
     @Nullable
     private List<String> outputNames;
 
-    public static final ProjectionFactory<WriterProjection> FACTORY = new ProjectionFactory<WriterProjection>() {
-        @Override
-        public WriterProjection newInstance() {
-            return new WriterProjection();
+    /*
+     * add values that should be added or overwritten
+     * all symbols must normalize to literals on the shard level.
+     */
+    private Map<ColumnIdent, Symbol> overwrites;
+
+    private OutputFormat outputFormat;
+
+    public enum OutputFormat {
+        JSON_OBJECT,
+        JSON_ARRAY
+    }
+
+    private CompressionType compressionType;
+
+    public enum CompressionType {
+        GZIP
+    }
+
+
+
+    public WriterProjection(List<Symbol> inputs,
+                            Symbol uri,
+                            @Nullable CompressionType compressionType,
+                            Map<ColumnIdent, Symbol> overwrites,
+                            @Nullable List<String> outputNames,
+                            OutputFormat outputFormat) {
+        this.inputs = inputs;
+        this.uri = uri;
+        this.overwrites = overwrites;
+        this.outputNames = outputNames;
+        this.outputFormat = outputFormat;
+        this.compressionType = compressionType;
+    }
+
+    public WriterProjection(StreamInput in) throws IOException {
+        uri = Symbols.fromStream(in);
+        int size = in.readVInt();
+        if (size > 0) {
+            outputNames = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                outputNames.add(in.readString());
+            }
         }
-    };
+        inputs = Symbols.listFromStream(in);
+        int numOverwrites = in.readVInt();
+        overwrites = new HashMap<>(numOverwrites);
+        for (int i = 0; i < numOverwrites; i++) {
+            overwrites.put(new ColumnIdent(in), Symbols.fromStream(in));
+        }
+        int compressionTypeOrdinal = in.readInt();
+        compressionType = compressionTypeOrdinal >= 0 ? CompressionType.values()[compressionTypeOrdinal] : null;
+        outputFormat = OutputFormat.values()[in.readInt()];
+    }
 
     @Override
     public RowGranularity requiredGranularity() {
@@ -86,33 +127,9 @@ public class WriterProjection extends Projection {
         return uri;
     }
 
-    public void uri(Symbol uri) {
-        this.uri = uri;
-    }
-
-    public void settings(Settings settings) {
-        this.settings = settings;
-    }
-
-    public Settings settings() {
-        return settings;
-    }
-
-    public void isDirectoryUri(boolean isDirectoryUri) {
-        this.isDirectoryUri = isDirectoryUri;
-    }
-
-    public boolean isDirectoryUri() {
-        return isDirectoryUri;
-    }
-
     @Override
     public List<Symbol> outputs() {
         return OUTPUTS;
-    }
-
-    public void inputs(List<Symbol> symbols) {
-        inputs = symbols;
     }
 
     public List<Symbol> inputs() {
@@ -120,8 +137,32 @@ public class WriterProjection extends Projection {
     }
 
     @Override
+    public void replaceSymbols(java.util.function.Function<Symbol, Symbol> replaceFunction) {
+        Lists2.replaceItems(inputs, replaceFunction);
+        for (Map.Entry<ColumnIdent, Symbol> entry : overwrites.entrySet()) {
+            entry.setValue(replaceFunction.apply(entry.getValue()));
+        }
+    }
+
+    @Override
     public ProjectionType projectionType() {
         return ProjectionType.WRITER;
+    }
+
+    public Map<ColumnIdent, Symbol> overwrites() {
+        return this.overwrites;
+    }
+
+    public List<String> outputNames() {
+        return this.outputNames;
+    }
+
+    public OutputFormat outputFormat() {
+        return outputFormat;
+    }
+
+    public CompressionType compressionType() {
+        return compressionType;
     }
 
     @Override
@@ -129,37 +170,10 @@ public class WriterProjection extends Projection {
         return visitor.visitWriterProjection(this, context);
     }
 
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        isDirectoryUri = in.readBoolean();
-        uri = Symbol.fromStream(in);
-        int size = in.readVInt();
-        if (size > 0) {
-            outputNames = new ArrayList<>(size);
-            for (int i = 0; i < size; i++) {
-                outputNames.add(in.readString());
-            }
-        }
-        int numInputs = in.readVInt();
-        inputs = new ArrayList<>(numInputs);
-        for (int i = 0; i < numInputs; i++) {
-            inputs.add(Symbol.fromStream(in));
-        }
-        settings = ImmutableSettings.readSettingsFromStream(in);
-
-        int numOverwrites = in.readVInt();
-        overwrites = new HashMap<>(numOverwrites);
-        for (int i = 0; i < numOverwrites; i++) {
-            ColumnIdent columnIdent = new ColumnIdent();
-            columnIdent.readFrom(in);
-            overwrites.put(columnIdent, Symbol.fromStream(in));
-        }
-    }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeBoolean(isDirectoryUri);
-        Symbol.toStream(uri, out);
+        Symbols.toStream(uri, out);
         if (outputNames != null) {
             out.writeVInt(outputNames.size());
             for (String name : outputNames) {
@@ -168,17 +182,15 @@ public class WriterProjection extends Projection {
         } else {
             out.writeVInt(0);
         }
-        out.writeVInt(inputs.size());
-        for (Symbol symbol : inputs) {
-            Symbol.toStream(symbol, out);
-        }
-        ImmutableSettings.writeSettingsToStream(settings, out);
+        Symbols.toStream(inputs, out);
 
         out.writeVInt(overwrites.size());
         for (Map.Entry<ColumnIdent, Symbol> entry : overwrites.entrySet()) {
             entry.getKey().writeTo(out);
-            Symbol.toStream(entry.getValue(), out);
+            Symbols.toStream(entry.getValue(), out);
         }
+        out.writeInt(compressionType != null ? compressionType.ordinal() : -1);
+        out.writeInt(outputFormat.ordinal());
     }
 
     @Override
@@ -188,12 +200,13 @@ public class WriterProjection extends Projection {
 
         WriterProjection that = (WriterProjection) o;
 
-        if (isDirectoryUri != that.isDirectoryUri) return false;
         if (outputNames != null ? !outputNames.equals(that.outputNames) : that.outputNames != null)
             return false;
-        if (!settings.equals(that.settings)) return false;
         if (!uri.equals(that.uri)) return false;
         if (!overwrites.equals(that.overwrites)) return false;
+        if (compressionType != null ? !compressionType.equals(that.compressionType) : that.compressionType != null)
+            return false;
+        if (!outputFormat.equals(that.outputFormat)) return false;
 
         return true;
     }
@@ -202,44 +215,35 @@ public class WriterProjection extends Projection {
     public int hashCode() {
         int result = super.hashCode();
         result = 31 * result + uri.hashCode();
-        result = 31 * result + (isDirectoryUri ? 1 : 0);
-        result = 31 * result + settings.hashCode();
         result = 31 * result + (outputNames != null ? outputNames.hashCode() : 0);
         result = 31 * result + overwrites.hashCode();
+        result = 31 * result + (compressionType != null ? compressionType.hashCode() : 0);
+        result = 31 * result + outputFormat.hashCode();
         return result;
     }
 
     @Override
     public String toString() {
         return "WriterProjection{" +
-                "uri=" + uri +
-                ", settings=" + settings +
-                ", outputNames=" + outputNames +
-                ", isDirectory=" + isDirectoryUri +
-                '}';
+               "uri=" + uri +
+               ", outputNames=" + outputNames +
+               ", compressionType=" + compressionType +
+               ", outputFormat=" + outputFormat +
+               '}';
     }
 
-    public WriterProjection normalize(EvaluatingNormalizer normalizer) {
-        Symbol nUri = normalizer.normalize(uri);
-        if (uri != nUri){
-            WriterProjection p = new WriterProjection();
-            p.uri = nUri;
-            p.outputNames = outputNames;
-            p.settings = settings;
-            return p;
+    public WriterProjection normalize(EvaluatingNormalizer normalizer, TransactionContext transactionContext) {
+        Symbol nUri = normalizer.normalize(uri, transactionContext);
+        if (uri != nUri) {
+            return new WriterProjection(
+                inputs,
+                uri,
+                compressionType,
+                overwrites,
+                outputNames,
+                outputFormat
+            );
         }
         return this;
-    }
-
-    /*
-     * add values that should be added or overwritten
-     * all symbols must normalize to literals on the shard level.
-     */
-    public void overwrites(Map<ColumnIdent, Symbol> overwrites) {
-        this.overwrites = overwrites;
-    }
-
-    public Map<ColumnIdent, Symbol> overwrites() {
-        return this.overwrites;
     }
 }

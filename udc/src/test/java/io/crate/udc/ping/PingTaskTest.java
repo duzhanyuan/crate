@@ -21,31 +21,30 @@
 
 package io.crate.udc.ping;
 
-import com.google.common.util.concurrent.SettableFuture;
 import io.crate.ClusterId;
 import io.crate.ClusterIdService;
 import io.crate.http.HttpTestServer;
+import io.crate.monitor.ExtendedNetworkInfo;
+import io.crate.monitor.ExtendedNodeInfo;
+import io.crate.monitor.ExtendedOsInfo;
+import io.crate.settings.SharedSettings;
 import io.crate.test.integration.CrateUnitTest;
 import org.codehaus.jackson.map.ObjectMapper;
 import org.codehaus.jackson.type.TypeReference;
-import org.elasticsearch.action.admin.cluster.node.info.NodeInfo;
-import org.elasticsearch.cluster.ClusterService;
 import org.elasticsearch.cluster.node.DiscoveryNode;
-import org.elasticsearch.common.transport.BoundTransportAddress;
-import org.elasticsearch.common.transport.InetSocketTransportAddress;
-import org.elasticsearch.common.transport.TransportAddress;
-import org.elasticsearch.http.HttpServerTransport;
-import org.elasticsearch.monitor.network.NetworkInfo;
-import org.elasticsearch.node.service.NodeService;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.settings.ClusterSettings;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.set.Sets;
+import org.hamcrest.Matchers;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import java.net.InetAddress;
-import java.net.NetworkInterface;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.notNullValue;
@@ -56,29 +55,27 @@ import static org.mockito.Mockito.when;
 public class PingTaskTest extends CrateUnitTest {
 
     private ClusterService clusterService;
-    private NodeService nodeService;
     private ClusterIdService clusterIdService;
+    private ExtendedNodeInfo extendedNodeInfo;
+    private ClusterSettings clusterSettings = new ClusterSettings(
+        Settings.EMPTY,
+        Sets.newHashSet(SharedSettings.LICENSE_IDENT_SETTING.setting()));
 
     private HttpTestServer testServer;
 
-    private String macAddr() {
-        InetAddress ip;
-        try {
-            ip = InetAddress.getLocalHost();
-            NetworkInterface networkInterface = NetworkInterface.getByInetAddress(ip);
-            if (networkInterface.getName().equals("lo"))
-                return "loopback";
-            byte[] mac = networkInterface.getHardwareAddress();
-            StringBuilder sb = new StringBuilder(18);
-            for (byte b : mac) {
-                if (sb.length() > 0)
-                    sb.append(':');
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return null;
-        }
+    private PingTask createPingTask(String pingUrl, Settings settings) {
+        return new PingTask(
+            clusterService,
+            clusterIdService,
+            extendedNodeInfo,
+            pingUrl,
+            clusterSettings,
+            settings
+        );
+    }
+
+    private PingTask createPingTask() {
+        return createPingTask("http://dummy", Settings.EMPTY);
     }
 
     @After
@@ -92,21 +89,55 @@ public class PingTaskTest extends CrateUnitTest {
     public void prepare() throws Exception {
         clusterService = mock(ClusterService.class);
         clusterIdService = mock(ClusterIdService.class);
-        nodeService = mock(NodeService.class);
         DiscoveryNode discoveryNode = mock(DiscoveryNode.class);
 
-        SettableFuture<ClusterId> clusterIdFuture = SettableFuture.create();
-        clusterIdFuture.set(new ClusterId(UUID.randomUUID()));
+        CompletableFuture<ClusterId> clusterIdFuture = CompletableFuture.completedFuture(new ClusterId());
         when(clusterIdService.clusterId()).thenReturn(clusterIdFuture);
         when(clusterService.localNode()).thenReturn(discoveryNode);
         when(discoveryNode.isMasterNode()).thenReturn(true);
-        NodeInfo nodeInfo = mock(NodeInfo.class);
-        NetworkInfo networkInfo = mock(NetworkInfo.class);
-        NetworkInfo.Interface iface = mock(NetworkInfo.Interface.class);
-        when(iface.getMacAddress()).thenReturn(macAddr());
-        when(networkInfo.getPrimaryInterface()).thenReturn(iface);
-        when(nodeInfo.getNetwork()).thenReturn(networkInfo);
-        when(nodeService.info()).thenReturn(nodeInfo);
+
+        extendedNodeInfo = mock(ExtendedNodeInfo.class);
+        when(extendedNodeInfo.networkInfo()).thenReturn(new ExtendedNetworkInfo(ExtendedNetworkInfo.NA_INTERFACE));
+        when(extendedNodeInfo.osInfo()).thenReturn(new ExtendedOsInfo(Collections.emptyMap()));
+    }
+
+    @Test
+    public void testGetHardwareAddressMacAddrNull() throws Exception {
+        PingTask pingTask = createPingTask();
+        assertThat(pingTask.getHardwareAddress(), Matchers.nullValue());
+    }
+
+    @Test
+    public void testIsEnterpriseField() throws Exception {
+        PingTask pingTask = createPingTask();
+        assertThat(pingTask.isEnterprise(), is(SharedSettings.ENTERPRISE_LICENSE_SETTING.getDefault().toString()));
+
+        pingTask = createPingTask(
+            "http://dummy",
+            Settings.builder().put(SharedSettings.ENTERPRISE_LICENSE_SETTING.getKey(), false).build()
+        );
+        assertThat(pingTask.isEnterprise(), is("false"));
+    }
+
+    @Test
+    public void testLicenseIdent() throws Exception {
+        PingTask pingTask = createPingTask();
+        // If the setting is not set an empty string is sent
+        assertThat(pingTask.getLicenseIdent(), is(""));
+        pingTask = createPingTask(
+            "http://dummy",
+            Settings.builder().put(SharedSettings.LICENSE_IDENT_SETTING.getKey(), "my-license-ident").build()
+        );
+        assertThat(pingTask.getLicenseIdent(), is("my-license-ident"));
+    }
+
+    @Test
+    public void testLicenseIdentUpdate() throws Exception {
+        PingTask pingTask = createPingTask();
+        // change license ident
+        Settings newSettings = Settings.builder().put("license.ident", "new license").build();
+        clusterSettings.applySettings(newSettings);
+        assertThat(pingTask.getLicenseIdent(), is("new license"));
     }
 
     @Test
@@ -114,20 +145,19 @@ public class PingTaskTest extends CrateUnitTest {
         testServer = new HttpTestServer(18080, false);
         testServer.run();
 
-        PingTask task = new PingTask(
-                clusterService, clusterIdService, nodeService, "http://localhost:18080/");
+        PingTask task = createPingTask("http://localhost:18080/", Settings.EMPTY);
         task.run();
         assertThat(testServer.responses.size(), is(1));
         task.run();
         assertThat(testServer.responses.size(), is(2));
-        for (long i=0; i< testServer.responses.size(); i++) {
-            String json = testServer.responses.get((int)i);
-            Map<String,String> map = new HashMap<>();
+        for (long i = 0; i < testServer.responses.size(); i++) {
+            String json = testServer.responses.get((int) i);
+            Map<String, String> map = new HashMap<>();
             ObjectMapper mapper = new ObjectMapper();
             try {
                 //convert JSON string to Map
                 map = mapper.readValue(json,
-                        new TypeReference<HashMap<String,String>>(){});
+                    new TypeReference<HashMap<String, String>>() {});
 
             } catch (Exception e) {
                 e.printStackTrace();
@@ -142,7 +172,7 @@ public class PingTaskTest extends CrateUnitTest {
             assertThat(map, hasKey("ping_count"));
             assertThat(map.get("ping_count"), is(notNullValue()));
             Map<String, Long> pingCountMap;
-            pingCountMap = mapper.readValue(map.get("ping_count"), new TypeReference<Map<String, Long>>(){});
+            pingCountMap = mapper.readValue(map.get("ping_count"), new TypeReference<Map<String, Long>>() {});
 
             assertThat(pingCountMap.get("success"), is(i));
             assertThat(pingCountMap.get("failure"), is(0L));
@@ -154,6 +184,7 @@ public class PingTaskTest extends CrateUnitTest {
             assertThat(map.get("crate_version"), is(notNullValue()));
             assertThat(map, hasKey("java_version"));
             assertThat(map.get("java_version"), is(notNullValue()));
+            assertThat(map.get("license_ident"), is(""));
         }
     }
 
@@ -161,21 +192,20 @@ public class PingTaskTest extends CrateUnitTest {
     public void testUnsuccessfulPingTaskRun() throws Exception {
         testServer = new HttpTestServer(18081, true);
         testServer.run();
-        PingTask task = new PingTask(
-                clusterService, clusterIdService, nodeService, "http://localhost:18081/");
+        PingTask task = createPingTask("http://localhost:18081/", Settings.EMPTY);
         task.run();
         assertThat(testServer.responses.size(), is(1));
         task.run();
         assertThat(testServer.responses.size(), is(2));
 
-        for (long i=0; i< testServer.responses.size(); i++) {
-            String json = testServer.responses.get((int)i);
-            Map<String,String> map = new HashMap<>();
+        for (long i = 0; i < testServer.responses.size(); i++) {
+            String json = testServer.responses.get((int) i);
+            Map<String, String> map = new HashMap<>();
             ObjectMapper mapper = new ObjectMapper();
             try {
                 //convert JSON string to Map
                 map = mapper.readValue(json,
-                        new TypeReference<HashMap<String,String>>(){});
+                    new TypeReference<HashMap<String, String>>() {});
 
             } catch (Exception e) {
                 e.printStackTrace();
@@ -190,7 +220,7 @@ public class PingTaskTest extends CrateUnitTest {
             assertThat(map, hasKey("ping_count"));
             assertThat(map.get("ping_count"), is(notNullValue()));
             Map<String, Long> pingCountMap;
-            pingCountMap = mapper.readValue(map.get("ping_count"), new TypeReference<Map<String, Long>>(){});
+            pingCountMap = mapper.readValue(map.get("ping_count"), new TypeReference<Map<String, Long>>() {});
 
             assertThat(pingCountMap.get("success"), is(0L));
             assertThat(pingCountMap.get("failure"), is(i));

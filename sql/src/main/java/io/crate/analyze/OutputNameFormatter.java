@@ -21,14 +21,14 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Joiner;
 import io.crate.sql.ExpressionFormatter;
+import io.crate.sql.tree.ArrayComparisonExpression;
 import io.crate.sql.tree.Expression;
 import io.crate.sql.tree.QualifiedNameReference;
 import io.crate.sql.tree.SubscriptExpression;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.NoSuchElementException;
 
 public class OutputNameFormatter {
 
@@ -41,17 +41,24 @@ public class OutputNameFormatter {
     private static class InnerOutputNameFormatter extends ExpressionFormatter.Formatter {
         @Override
         protected String visitQualifiedNameReference(QualifiedNameReference node, Void context) {
-
-            List<String> parts = new ArrayList<>();
-            for (String part : node.getName().getParts()) {
-                parts.add(part);
+            List<String> parts = node.getName().getParts();
+            if (parts.isEmpty()) {
+                throw new NoSuchElementException("Parts of QualifiedNameReference are empty: " + node.getName());
             }
-            return Joiner.on('.').join(parts);
+            return parts.get(parts.size() - 1);
         }
 
         @Override
         protected String visitSubscriptExpression(SubscriptExpression node, Void context) {
-            return String.format("%s[%s]", process(node.name(), null), process(node.index(), null));
+            return process(node.name(), null) + '[' + process(node.index(), null) + ']';
+        }
+
+        @Override
+        public String visitArrayComparisonExpression(ArrayComparisonExpression node, Void context) {
+            return process(node.getLeft(), null) + ' ' +
+                   node.getType().getValue() + ' ' +
+                   node.quantifier().name() + '(' +
+                   process(node.getRight(), null) + ')';
         }
     }
 }

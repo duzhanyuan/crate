@@ -21,13 +21,15 @@
 
 package io.crate.executor.transport;
 
-import io.crate.action.sql.query.CrateResultSorter;
-import io.crate.action.sql.query.CrateSearchService;
-import io.crate.action.sql.query.TransportQueryShardAction;
+import io.crate.action.job.ContextPreparer;
+import io.crate.action.job.TransportJobAction;
 import io.crate.executor.Executor;
-import io.crate.executor.transport.merge.TransportMergeNodeAction;
+import io.crate.executor.transport.ddl.TransportRenameTableAction;
+import io.crate.executor.transport.distributed.TransportDistributedResultAction;
+import io.crate.executor.transport.kill.TransportKillAllNodeAction;
+import io.crate.executor.transport.kill.TransportKillJobsNodeAction;
+import io.crate.lucene.LuceneQueryBuilder;
 import org.elasticsearch.common.inject.AbstractModule;
-import org.elasticsearch.search.SearchService;
 
 public class TransportExecutorModule extends AbstractModule {
 
@@ -35,16 +37,17 @@ public class TransportExecutorModule extends AbstractModule {
     protected void configure() {
         bind(TransportActionProvider.class).asEagerSingleton();
         bind(Executor.class).to(TransportExecutor.class).asEagerSingleton();
-        bind(TransportCollectNodeAction.class).asEagerSingleton();
-        bind(TransportMergeNodeAction.class).asEagerSingleton();
-        bind(TransportQueryShardAction.class).asEagerSingleton();
-        bind(SymbolBasedTransportShardUpsertAction.class).asEagerSingleton();
+        bind(ContextPreparer.class).asEagerSingleton();
+        bind(LuceneQueryBuilder.class).asEagerSingleton();
+
+        bind(TransportJobAction.class).asEagerSingleton();
+        bind(TransportDistributedResultAction.class).asEagerSingleton();
         bind(TransportShardUpsertAction.class).asEagerSingleton();
+        bind(TransportShardDeleteAction.class).asEagerSingleton();
         bind(TransportFetchNodeAction.class).asEagerSingleton();
-        bind(TransportCloseContextNodeAction.class).asEagerSingleton();
-
-        bind(CrateResultSorter.class).asEagerSingleton();
-
-        bind(SearchService.class).to(CrateSearchService.class).asEagerSingleton();
+        bind(TransportKillAllNodeAction.class).asEagerSingleton();
+        bind(TransportKillJobsNodeAction.class).asEagerSingleton();
+        bind(TransportNodeStatsAction.class).asEagerSingleton();
+        bind(TransportRenameTableAction.class).asEagerSingleton();
     }
 }

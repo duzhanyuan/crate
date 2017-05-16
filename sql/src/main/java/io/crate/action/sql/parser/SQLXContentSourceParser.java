@@ -30,10 +30,12 @@ import org.elasticsearch.common.xcontent.XContentParser;
 
 /**
  * Parser for SQL statements in JSON and other XContent formats
- * <p/>
+ * <p>
+ * <pre>
  * {
- * "stmt": "select * from...."
+ *  "stmt": "select * from...."
  * }
+ *     </pre>
  */
 public class SQLXContentSourceParser {
 
@@ -46,9 +48,9 @@ public class SQLXContentSourceParser {
     }
 
     private static final ImmutableMap<String, SQLParseElement> elementParsers = ImmutableMap.of(
-            Fields.STMT, (SQLParseElement) new SQLStmtParseElement(),
-            Fields.ARGS, (SQLParseElement) new SQLArgsParseElement(),
-            Fields.BULK_ARGS, (SQLParseElement) new SQLBulkArgsParseElement()
+        Fields.STMT, (SQLParseElement) new SQLStmtParseElement(),
+        Fields.ARGS, (SQLParseElement) new SQLArgsParseElement(),
+        Fields.BULK_ARGS, (SQLParseElement) new SQLBulkArgsParseElement()
     );
 
     public SQLXContentSourceParser(SQLXContentSourceContext context) {
@@ -57,7 +59,7 @@ public class SQLXContentSourceParser {
 
     private void validate() throws SQLParseSourceException {
         if (context.stmt() == null) {
-            throw new SQLParseSourceException(context, "Field [stmt] was not defined");
+            throw new SQLParseSourceException("Field [stmt] was not defined");
         }
     }
 

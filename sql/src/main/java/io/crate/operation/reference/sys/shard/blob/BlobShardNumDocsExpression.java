@@ -22,24 +22,18 @@
 package io.crate.operation.reference.sys.shard.blob;
 
 import io.crate.blob.v2.BlobShard;
-import io.crate.metadata.shard.blob.BlobShardReferenceImplementation;
-import io.crate.operation.reference.sys.shard.SysShardExpression;
-import org.elasticsearch.common.inject.Inject;
+import io.crate.metadata.ReferenceImplementation;
 
-public class BlobShardNumDocsExpression extends SysShardExpression<Long> implements BlobShardReferenceImplementation {
-    public static final String NAME = "num_docs";
+public class BlobShardNumDocsExpression implements ReferenceImplementation<Long> {
 
     private final BlobShard blobShard;
 
-    @Inject
-    protected BlobShardNumDocsExpression(BlobShard blobShard) {
-        super(NAME);
+    public BlobShardNumDocsExpression(BlobShard blobShard) {
         this.blobShard = blobShard;
     }
 
     @Override
     public Long value() {
-        // TODO: cache stats result
-        return blobShard.blobStats().count();
+        return blobShard.getBlobsCount();
     }
 }

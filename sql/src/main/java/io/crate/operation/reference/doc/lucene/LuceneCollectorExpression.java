@@ -21,26 +21,49 @@
 
 package io.crate.operation.reference.doc.lucene;
 
-import io.crate.operation.Input;
-import org.apache.lucene.index.AtomicReaderContext;
+import io.crate.data.Input;
+import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.Scorer;
+
+import java.io.IOException;
 
 /**
  * An expression which gets evaluated in the collect phase
  */
 public abstract class LuceneCollectorExpression<ReturnType> implements Input<ReturnType> {
 
-    public void startCollect(CollectorContext context){
+    final String columnName;
+
+    public LuceneCollectorExpression(String columnName) {
+        this.columnName = columnName;
+    }
+
+    public void startCollect(CollectorContext context) {
 
     }
 
-    public void setNextDocId(int doc){
+    public void setNextDocId(int doc) {
     }
 
-    public void setNextReader(AtomicReaderContext context){
+    public void setNextReader(LeafReaderContext context) throws IOException {
     }
 
     public void setScorer(Scorer scorer) {
 
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        LuceneCollectorExpression<?> that = (LuceneCollectorExpression<?>) o;
+
+        return columnName.equals(that.columnName);
+    }
+
+    @Override
+    public int hashCode() {
+        return columnName.hashCode();
     }
 }

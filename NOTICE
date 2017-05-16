@@ -1,5 +1,5 @@
 Crate
-Copyright 2013-2015 CRATE Technology GmbH ("Crate")
+Copyright 2013-2015 Crate.IO GmbH ("Crate")
 
 
 Third party dependencies:
@@ -15,7 +15,7 @@ License: Apache License v2 (http://www.apache.org/licenses)
 
 Elasticsearch
 http://www.elasticsearch.org/
-developed by Elasticsearch and Shay Banon
+developed by Elastic and Shay Banon
 License: Apache License v2 (http://www.apache.org/licenses)
 
 =========================================================================
@@ -30,6 +30,20 @@ License: Apache License v2 (http://www.apache.org/licenses)
 Netty
 http://netty.io
 developed by The Netty Project
+License: Apache License v2 (http://www.apache.org/licenses)
+
+=========================================================================
+
+SRV Discovery Plugin for Elasticsearch
+https://github.com/grantr/elasticsearch-srv-discovery
+developed by Grant Rodgers
+License: MIT License, http://www.opensource.org/licenses/mit-license.php
+
+=========================================================================
+
+AWS Cloud Plugin for Elasticsearch
+https://github.com/elastic/elasticsearch-cloud-aws
+developed by Elastic
 License: Apache License v2 (http://www.apache.org/licenses)
 
 =========================================================================
@@ -108,3 +122,9 @@ http://www.lovelysystems.com
 Copyright Lovely Systems GmbH
 License: Apache 2.0 (http://www.apache.org/licenses)
 
+=========================================================================
+
+Apache XBean
+http://geronimo.apache.org/xbean/
+Copyright Apache Software Foundation
+License: Apache License v2 (http://www.apache.org/licenses)

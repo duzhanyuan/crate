@@ -1,12 +1,12 @@
 /*
- * Licensed to CRATE Technology GmbH ("Crate") under one or more contributor
+ * Licensed to Crate.IO GmbH ("Crate") under one or more contributor
  * license agreements.  See the NOTICE file distributed with this work for
  * additional information regarding copyright ownership.  Crate licenses
  * this file to you under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.  You may
  * obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -21,18 +21,24 @@
 
 package io.crate.operation.collect;
 
-import io.crate.core.collections.Row;
-import io.crate.operation.Input;
 
-public abstract class CollectExpression<ReturnType> implements Input<ReturnType> {
+import io.crate.data.Input;
+import io.crate.metadata.RowContextCollectorExpression;
 
-    /**
-     * An expression which gets evaluated in the collect phase
-     */
+import java.util.function.Function;
 
-    public void startCollect() {
+public interface CollectExpression<TRow, TReturnValue> extends Input<TReturnValue> {
+
+    void setNextRow(TRow row);
+
+
+    static <TRow, TReturnValue> CollectExpression<TRow, TReturnValue> of(Function<TRow, TReturnValue> valueExtractor) {
+        return new RowContextCollectorExpression<TRow, TReturnValue>() {
+
+            @Override
+            public TReturnValue value() {
+                return valueExtractor.apply(row);
+            }
+        };
     }
-
-    public abstract boolean setNextRow(Row row);
 }
-

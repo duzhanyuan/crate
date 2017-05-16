@@ -21,82 +21,107 @@
 
 package io.crate.analyze;
 
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.data.Row;
+import io.crate.sql.tree.ParameterExpression;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 
 import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
+import java.util.function.Function;
 
-import static io.crate.planner.symbol.Literal.newLiteral;
 
-public class ParameterContext {
+public class ParameterContext implements Function<ParameterExpression, Symbol> {
 
-    final Object[] parameters;
+    public static final ParameterContext EMPTY = new ParameterContext(Row.EMPTY, Collections.<Row>emptyList());
 
-    final Object[][] bulkParameters;
-
-    @Nullable
-    private final String defaultSchema;
+    private final Row parameters;
+    private final List<Row> bulkParameters;
 
     private int currentIdx = 0;
+    private ParamTypeHints typeHints = null;
 
-    public ParameterContext(Object[] parameters, Object[][] bulkParameters, @Nullable String defaultSchema) {
+
+    public ParameterContext(Row parameters, List<Row> bulkParameters) {
         this.parameters = parameters;
-        this.defaultSchema = defaultSchema;
-        if (bulkParameters.length > 0) {
+        if (bulkParameters.size() > 0) {
             validateBulkParams(bulkParameters);
         }
         this.bulkParameters = bulkParameters;
     }
 
-    @Nullable
-    public String defaultSchema() {
-        return defaultSchema;
-    }
-
-    private void validateBulkParams(Object[][] bulkParams) {
-        int length = bulkParams[0].length;
-        for (Object[] bulkParam : bulkParams) {
-            if (bulkParam.length != length) {
+    private void validateBulkParams(List<Row> bulkParams) {
+        int length = bulkParams.get(0).numColumns();
+        for (Row bulkParam : bulkParams) {
+            if (bulkParam.numColumns() != length) {
                 throw new IllegalArgumentException("mixed number of arguments inside bulk arguments");
             }
         }
     }
 
     private static DataType guessTypeSafe(Object value) throws IllegalArgumentException {
-        DataType guessedType = DataTypes.guessType(value, true);
+        DataType guessedType = DataTypes.guessType(value);
         if (guessedType == null) {
-            throw new IllegalArgumentException(String.format(
-                    "Got an argument \"%s\" that couldn't be recognized", value));
+            throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+                "Got an argument \"%s\" that couldn't be recognized", value));
         }
         return guessedType;
     }
 
     public boolean hasBulkParams() {
-        return bulkParameters.length > 0;
+        return bulkParameters.size() > 0;
+    }
+
+    public int numBulkParams() {
+        return bulkParameters.size();
     }
 
     public void setBulkIdx(int i) {
         this.currentIdx = i;
     }
 
-    public Object[] parameters() {
+    public Row parameters() {
         if (hasBulkParams()) {
-            return bulkParameters[currentIdx];
+            return bulkParameters.get(currentIdx);
         }
         return parameters;
     }
 
-    public io.crate.planner.symbol.Literal getAsSymbol(int index) {
+    public io.crate.analyze.symbol.Literal getAsSymbol(int index) {
         try {
-            Object value = parameters()[index];
+            Object value = parameters().get(index);
             DataType type = guessTypeSafe(value);
             // use type.value because some types need conversion (String to BytesRef, List to Array)
-            return newLiteral(type, type.value(value));
+            return Literal.of(type, type.value(value));
         } catch (ArrayIndexOutOfBoundsException e) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                    "Tried to resolve a parameter but the arguments provided with the " +
-                            "SQLRequest don't contain a parameter at position %d", index), e);
+                "Tried to resolve a parameter but the arguments provided with the " +
+                "SQLRequest don't contain a parameter at position %d", index), e);
         }
+    }
+
+    public ParamTypeHints typeHints() {
+        if (typeHints == null) {
+            List<DataType> types = new ArrayList<>(parameters.numColumns());
+            for (int i = 0; i < parameters.numColumns(); i++) {
+                types.add(guessTypeSafe(parameters.get(i)));
+            }
+            typeHints = new ParamTypeHints(types);
+        }
+        return typeHints;
+    }
+
+    @Nullable
+    @Override
+    public Symbol apply(@Nullable ParameterExpression input) {
+        if (input == null) {
+            return null;
+        }
+        return getAsSymbol(input.index());
     }
 }

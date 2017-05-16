@@ -21,30 +21,32 @@
 
 package io.crate.operation.scalar.timestamp;
 
-import java.math.RoundingMode;
-
 import com.google.common.collect.ImmutableList;
 import com.google.common.math.LongMath;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.format.FunctionFormatSpec;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
 import io.crate.metadata.Scalar;
-import io.crate.operation.Input;
+import io.crate.metadata.TransactionContext;
+import io.crate.data.Input;
 import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.joda.time.DateTimeUtils;
 
-public class CurrentTimestampFunction extends Scalar<Long, Integer> {
+import java.math.RoundingMode;
+import java.util.Locale;
 
-    public static final String NAME = "CURRENT_TIMESTAMP";
+public class CurrentTimestampFunction extends Scalar<Long, Integer> implements FunctionFormatSpec {
+
+    public static final String NAME = "current_timestamp";
     public static final int DEFAULT_PRECISION = 3;
 
     public static final FunctionInfo INFO = new FunctionInfo(
-            new FunctionIdent(NAME, ImmutableList.<DataType>of(DataTypes.INTEGER)),
-            DataTypes.TIMESTAMP);
+        new FunctionIdent(NAME, ImmutableList.<DataType>of(DataTypes.INTEGER)), DataTypes.TIMESTAMP);
 
     public static void register(ScalarFunctionModule function) {
         function.register(new CurrentTimestampFunction());
@@ -54,31 +56,35 @@ public class CurrentTimestampFunction extends Scalar<Long, Integer> {
     @Override
     public Long evaluate(Input<Integer>... args) {
         long millis = DateTimeUtils.currentTimeMillis();
+        Integer precision = 3;
         if (args.length == 1) {
-            Integer precision = args[0].value();
+            precision = args[0].value();
             if (precision == null) {
-                throw new IllegalArgumentException(String.format("NULL precision not supported for %s", NAME));
+                throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+                    "NULL precision not supported for %s", NAME));
             }
-            int factor;
-            switch (precision) {
-                case 0:
-                    factor = 1000;
-                    break;
-                case 1:
-                    factor = 100;
-                    break;
-                case 2:
-                    factor = 10;
-                    break;
-                case 3:
-                    factor = 1;
-                    break;
-                default:
-                    throw new IllegalArgumentException("Precision must be between 0 and 3");
-            }
-            millis = LongMath.divide(millis, factor, RoundingMode.DOWN) * factor;
         }
-        return millis;
+        return applyPrecision(millis, precision);
+    }
+
+    private static long applyPrecision(long millis, int precision) {
+        int factor;
+        switch (precision) {
+            case 0:
+                factor = 1000;
+                break;
+            case 1:
+                factor = 100;
+                break;
+            case 2:
+                factor = 10;
+                break;
+            case 3:
+                return millis;
+            default:
+                throw new IllegalArgumentException("Precision must be between 0 and 3");
+        }
+        return LongMath.divide(millis, factor, RoundingMode.DOWN) * factor;
     }
 
     @Override
@@ -87,16 +93,42 @@ public class CurrentTimestampFunction extends Scalar<Long, Integer> {
     }
 
     @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        if (symbol.arguments().isEmpty()) {
-            return Literal.newLiteral(INFO.returnType(), evaluate());
+    public Symbol normalizeSymbol(Function function, TransactionContext transactionContext) {
+        if (transactionContext == null) {
+            return eval(function, DateTimeUtils.currentTimeMillis());
         }
-        Symbol precision = symbol.arguments().get(0);
-        if (precision.symbolType().isValueSymbol()) {
-            return Literal.newLiteral(INFO.returnType(), evaluate((Input) precision));
-        } else {
-            throw new IllegalArgumentException(String.format("Invalid argument to %s", NAME));
-        }
+        // use evaluatedFunctions map to make sure multiple occurrences of current_timestamp within a query result in the same result
+        return eval(function, transactionContext.currentTimeMillis());
+    }
 
+    private Symbol eval(Function function, long currentTimeMillis) {
+        Symbol symbol;
+        if (function.arguments().isEmpty()) {
+            symbol = Literal.of(INFO.returnType(), currentTimeMillis);
+        } else {
+            Symbol precision = function.arguments().get(0);
+            if (precision.symbolType().isValueSymbol()) {
+                symbol = Literal.of(INFO.returnType(),
+                    applyPrecision(currentTimeMillis, (Integer) ((Input) precision).value()));
+            } else {
+                throw new IllegalArgumentException(String.format(Locale.ENGLISH, "Invalid argument to %s", NAME));
+            }
+        }
+        return symbol;
+    }
+
+    @Override
+    public String beforeArgs(Function function) {
+        return "current_timestamp" + (function.arguments().isEmpty() ? "" : "(");
+    }
+
+    @Override
+    public String afterArgs(Function function) {
+        return function.arguments().isEmpty() ? "" : ")";
+    }
+
+    @Override
+    public boolean formatArgs(Function function) {
+        return !function.arguments().isEmpty();
     }
 }

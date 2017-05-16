@@ -22,45 +22,57 @@
 package io.crate.planner.projection;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.planner.symbol.Aggregation;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.AggregateMode;
+import io.crate.analyze.symbol.Aggregation;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.Symbols;
+import io.crate.metadata.RowGranularity;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * A projection which aggregates all inputs to a single row
  */
 public class AggregationProjection extends Projection {
 
-    List<Aggregation> aggregations = ImmutableList.of();
+    private RowGranularity contextGranularity;
+    private AggregateMode mode;
+    private List<Aggregation> aggregations = ImmutableList.of();
 
-    public static final ProjectionFactory<AggregationProjection> FACTORY = new ProjectionFactory<AggregationProjection>() {
-        @Override
-        public AggregationProjection newInstance() {
-            return new AggregationProjection();
+    public AggregationProjection(StreamInput in) throws IOException {
+        int size = in.readVInt();
+        aggregations = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            aggregations.add((Aggregation) Symbols.fromStream(in));
         }
-    };
-
-
-    public AggregationProjection() {
+        contextGranularity = RowGranularity.fromStream(in);
+        mode = AggregateMode.readFrom(in);
     }
 
-    public AggregationProjection(List<Aggregation> aggregations) {
-        assert aggregations != null;
+    public AggregationProjection(List<Aggregation> aggregations, RowGranularity contextGranularity, AggregateMode mode) {
+        assert aggregations != null : "aggregations must not be null";
+
+        this.contextGranularity = contextGranularity;
+        this.mode = mode;
         this.aggregations = aggregations;
+    }
+
+    @Override
+    public RowGranularity requiredGranularity() {
+        return contextGranularity;
+    }
+
+    @Override
+    public void replaceSymbols(Function<Symbol, Symbol> replaceFunction) {
     }
 
     public List<Aggregation> aggregations() {
         return aggregations;
-    }
-
-    public void aggregations(List<Aggregation> aggregations) {
-        assert aggregations != null;
-        this.aggregations = aggregations;
     }
 
     @Override
@@ -79,20 +91,10 @@ public class AggregationProjection extends Projection {
     }
 
     @Override
-    public void readFrom(StreamInput in) throws IOException {
-        int size = in.readVInt();
-        aggregations = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
-            aggregations.add((Aggregation) Symbol.fromStream(in));
-        }
-    }
-
-    @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeVInt(aggregations.size());
-        for (Symbol symbol : aggregations) {
-            Symbol.toStream(symbol, out);
-        }
+        Symbols.toStream(aggregations, out);
+        RowGranularity.toStream(contextGranularity, out);
+        AggregateMode.writeTo(mode, out);
     }
 
     @Override
@@ -106,4 +108,7 @@ public class AggregationProjection extends Projection {
         return true;
     }
 
+    public AggregateMode mode() {
+        return mode;
+    }
 }

@@ -21,7 +21,6 @@
 
 package io.crate.operation.collect.files;
 
-import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 
 import java.io.*;
@@ -30,21 +29,27 @@ import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 
 public class LocalFsFileInput implements FileInput {
 
     @Override
     public List<URI> listUris(final URI fileUri, final Predicate<URI> uriPredicate) throws IOException {
-        final List<URI> uris = new ArrayList<>();
+        assert fileUri != null : "fileUri must not be null";
+        assert uriPredicate != null : "uriPredicate must not be null";
+
         Path path = Paths.get(fileUri);
-        File file = path.toFile();
-        if (!file.isDirectory()) {
-            file = file.getParentFile();
+        if (!Files.isDirectory(path)) {
+            path = path.getParent();
+            if (path == null) {
+                return ImmutableList.of();
+            }
         }
-        if (file == null || !file.exists()) {
+        if (Files.notExists(path)) {
             return ImmutableList.of();
         }
-        path = file.toPath();
+
+        final List<URI> uris = new ArrayList<>();
         Files.walkFileTree(path, new SimpleFileVisitor<Path>() {
             @Override
             public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException {
@@ -57,7 +62,7 @@ public class LocalFsFileInput implements FileInput {
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
                 URI uri = file.toUri();
-                if (uriPredicate.apply(uri)) {
+                if (uriPredicate.test(uri)) {
                     uris.add(uri);
                 }
                 return FileVisitResult.CONTINUE;

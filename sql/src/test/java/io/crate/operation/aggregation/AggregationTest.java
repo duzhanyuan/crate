@@ -22,59 +22,62 @@
 package io.crate.operation.aggregation;
 
 import com.google.common.collect.ImmutableList;
+import io.crate.action.sql.SessionContext;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
 import io.crate.breaker.RamAccountingContext;
-import io.crate.core.collections.ArrayBucket;
-import io.crate.core.collections.Row;
+import io.crate.data.ArrayBucket;
+import io.crate.data.Row;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.Functions;
-import io.crate.operation.aggregation.impl.AggregationImplModule;
+import io.crate.metadata.TransactionContext;
 import io.crate.operation.collect.InputCollectExpression;
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.types.DataType;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.NoopCircuitBreaker;
-import org.elasticsearch.common.inject.AbstractModule;
-import org.elasticsearch.common.inject.Injector;
-import org.elasticsearch.common.inject.ModulesBuilder;
 import org.junit.Before;
+
+import java.util.Arrays;
+import java.util.List;
+
+import static io.crate.testing.TestingHelpers.getFunctions;
 
 public abstract class AggregationTest extends CrateUnitTest {
 
     protected static final RamAccountingContext ramAccountingContext =
-            new RamAccountingContext("dummy", new NoopCircuitBreaker(CircuitBreaker.Name.FIELDDATA));
+        new RamAccountingContext("dummy", new NoopCircuitBreaker(CircuitBreaker.FIELDDATA));
 
     protected Functions functions;
 
-    class AggregationTestModule extends AbstractModule {
-
-        @Override
-        protected void configure() {
-            bind(Functions.class).asEagerSingleton();
-        }
-    }
-
     @Before
     public void prepare() throws Exception {
-        Injector injector = new ModulesBuilder().add(
-                new AggregationTestModule(),
-                new AggregationImplModule()
-        ).createInjector();
-
-        functions = injector.getInstance(Functions.class);
+        functions = getFunctions();
     }
 
     public Object[][] executeAggregation(String name, DataType dataType, Object[][] data) throws Exception {
+        if (dataType == null) {
+            return executeAggregation(name, dataType, data, ImmutableList.<DataType>of());
+        } else {
+            return executeAggregation(name, dataType, data, ImmutableList.of(dataType));
+        }
+    }
 
+    public Object[][] executeAggregation(String name, DataType dataType, Object[][] data, List<DataType> argumentTypes) throws Exception {
         FunctionIdent fi;
         InputCollectExpression[] inputs;
         if (dataType != null) {
-            fi = new FunctionIdent(name, ImmutableList.of(dataType));
-            inputs = new InputCollectExpression[]{new InputCollectExpression(0)};
+            fi = new FunctionIdent(name, argumentTypes);
+            inputs = new InputCollectExpression[argumentTypes.size()];
+            for (int i = 0; i < argumentTypes.size(); i++) {
+                inputs[i] = new InputCollectExpression(i);
+            }
         } else {
             fi = new FunctionIdent(name, ImmutableList.<DataType>of());
             inputs = new InputCollectExpression[0];
         }
-        AggregationFunction impl = (AggregationFunction) functions.get(fi);
+        AggregationFunction impl = (AggregationFunction) functions.getBuiltin(fi.name(), fi.argumentTypes());
         Object state = impl.newState(ramAccountingContext);
 
         ArrayBucket bucket = new ArrayBucket(data);
@@ -90,4 +93,17 @@ public abstract class AggregationTest extends CrateUnitTest {
         return new Object[][]{{state}};
     }
 
+    protected Symbol normalize(String functionName, Object value, DataType type) {
+        return normalize(functionName, Literal.of(type, value));
+    }
+
+    protected Symbol normalize(String functionName, Symbol... args) {
+        DataType[] argTypes = new DataType[args.length];
+        for (int i = 0; i < args.length; i++) {
+            argTypes[i] = args[i].valueType();
+        }
+        AggregationFunction function =
+            (AggregationFunction) functions.getBuiltin(functionName, Arrays.asList(argTypes));
+        return function.normalizeSymbol(new Function(function.info(), Arrays.asList(args)), new TransactionContext(SessionContext.SYSTEM_SESSION));
+    }
 }

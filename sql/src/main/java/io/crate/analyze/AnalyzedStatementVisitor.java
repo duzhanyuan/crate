@@ -33,12 +33,20 @@ public class AnalyzedStatementVisitor<C, R> {
         return null;
     }
 
-    protected R visitCopyStatement(CopyAnalyzedStatement analysis, C context) {
+    protected R visitCopyFromStatement(CopyFromAnalyzedStatement analysis, C context) {
+        return visitAnalyzedStatement(analysis, context);
+    }
+
+    protected R visitCopyToStatement(CopyToAnalyzedStatement analysis, C context) {
         return visitAnalyzedStatement(analysis, context);
     }
 
     protected R visitCreateTableStatement(CreateTableAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
+    }
+
+    protected R visitCreateRepositoryAnalyzedStatement(CreateRepositoryAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
     }
 
     protected R visitDeleteStatement(DeleteAnalyzedStatement analysis, C context) {
@@ -61,36 +69,60 @@ public class AnalyzedStatementVisitor<C, R> {
         return visitAnalyzedStatement(analysis, context);
     }
 
+    protected R visitCreateFunctionStatement(CreateFunctionAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitDropFunctionStatement(DropFunctionAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
+    protected R visitCreateUserStatement(CreateUserAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
+    protected R visitDropUserStatement(DropUserAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
     protected R visitDropTableStatement(DropTableAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
     }
 
     protected R visitCreateAnalyzerStatement(CreateAnalyzerAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
     }
 
-    protected R visitDDLAnalyzedStatement(AbstractDDLAnalyzedStatement analysis, C context) {
+    protected R visitDDLStatement(DDLStatement analysis, C context) {
         return visitAnalyzedStatement(analysis, context);
     }
 
     public R visitCreateBlobTableStatement(CreateBlobTableAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
     }
 
     public R visitDropBlobTableStatement(DropBlobTableAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitOptimizeTableStatement(OptimizeTableAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
     }
 
     public R visitRefreshTableStatement(RefreshTableAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
     }
 
     public R visitAlterTableStatement(AlterTableAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitAlterTableRenameStatement(AlterTableRenameAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
     }
 
     public R visitAlterBlobTableStatement(AlterBlobTableAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
     }
 
     public R visitSetStatement(SetAnalyzedStatement analysis, C context) {
@@ -98,6 +130,50 @@ public class AnalyzedStatementVisitor<C, R> {
     }
 
     public R visitAddColumnStatement(AddColumnAnalyzedStatement analysis, C context) {
-        return visitDDLAnalyzedStatement(analysis, context);
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitAlterTableOpenCloseStatement(AlterTableOpenCloseAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitKillAnalyzedStatement(KillAnalyzedStatement analysis, C context) {
+        return visitAnalyzedStatement(analysis, context);
+    }
+
+    protected R visitShowAnalyzedStatement(AbstractShowAnalyzedStatement analysis, C context) {
+        return visitAnalyzedStatement(analysis, context);
+    }
+
+    public R visitShowCreateTableAnalyzedStatement(ShowCreateTableAnalyzedStatement analysis, C context) {
+        return visitShowAnalyzedStatement(analysis, context);
+    }
+
+    public R visitDropRepositoryAnalyzedStatement(DropRepositoryAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitDropSnapshotAnalyzedStatement(DropSnapshotAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitCreateSnapshotAnalyzedStatement(CreateSnapshotAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitRestoreSnapshotAnalyzedStatement(RestoreSnapshotAnalyzedStatement analysis, C context) {
+        return visitDDLStatement(analysis, context);
+    }
+
+    public R visitResetAnalyzedStatement(ResetAnalyzedStatement resetAnalyzedStatement, C context) {
+        return visitAnalyzedStatement(resetAnalyzedStatement, context);
+    }
+
+    public R visitExplainStatement(ExplainAnalyzedStatement explainAnalyzedStatement, C context) {
+        return visitAnalyzedStatement(explainAnalyzedStatement, context);
+    }
+
+    public R visitBegin(AnalyzedBegin analyzedBegin, C context) {
+        return visitAnalyzedStatement(analyzedBegin, context);
     }
 }

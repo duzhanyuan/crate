@@ -22,10 +22,7 @@
 package io.crate.operation.operator;
 
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.data.Input;
 import io.crate.types.DataTypes;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.automaton.ByteRunAutomaton;
@@ -55,10 +52,11 @@ public class RegexpMatchOperator extends Operator<BytesRef> {
         if (pattern == null) {
             return null;
         }
-        if (isPcrePattern(pattern)) {
-            return source.utf8ToString().matches(pattern.utf8ToString());
+        String sPattern = pattern.utf8ToString();
+        if (isPcrePattern(sPattern)) {
+            return source.utf8ToString().matches(sPattern);
         } else {
-            RegExp regexp = new RegExp(pattern.utf8ToString());
+            RegExp regexp = new RegExp(sPattern);
             ByteRunAutomaton regexpRunAutomaton = new ByteRunAutomaton(regexp.toAutomaton());
             return regexpRunAutomaton.run(source.bytes, source.offset, source.length);
         }
@@ -67,23 +65,5 @@ public class RegexpMatchOperator extends Operator<BytesRef> {
     @Override
     public FunctionInfo info() {
         return INFO;
-    }
-
-    @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        assert (symbol != null);
-        assert symbol.arguments().size() == 2;
-
-        Symbol sourceSymbol = symbol.arguments().get(0);
-        Symbol patternSymbol = symbol.arguments().get(1);
-
-        if (containsNull(sourceSymbol, patternSymbol)) {
-            return Literal.NULL;
-        }
-        if (!sourceSymbol.symbolType().isValueSymbol() || !patternSymbol.symbolType().isValueSymbol()) {
-            return symbol;
-        }
-
-        return Literal.newLiteral(evaluate((Literal) sourceSymbol, (Literal) patternSymbol));
     }
 }

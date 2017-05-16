@@ -21,14 +21,19 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Objects;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
-import io.crate.Constants;
+import com.google.common.collect.Sets;
+import io.crate.analyze.ddl.GeoSettingsApplier;
 import io.crate.exceptions.InvalidColumnNameException;
 import io.crate.metadata.ColumnIdent;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import io.crate.metadata.Reference;
+import io.crate.sql.tree.Expression;
+import io.crate.types.DataTypes;
 import org.elasticsearch.common.settings.Settings;
 
 import javax.annotation.Nullable;
@@ -36,32 +41,59 @@ import java.util.*;
 
 public class AnalyzedColumnDefinition {
 
+    private final static Set<String> UNSUPPORTED_PK_TYPES = Sets.newHashSet(
+        DataTypes.OBJECT.getName(),
+        DataTypes.GEO_POINT.getName(),
+        DataTypes.GEO_SHAPE.getName()
+    );
+
+    private final static Set<String> UNSUPPORTED_INDEX_TYPES = Sets.newHashSet(
+        "array",
+        DataTypes.OBJECT.getName(),
+        DataTypes.GEO_POINT.getName(),
+        DataTypes.GEO_SHAPE.getName()
+    );
+
+    private final static Set<String> STRING_TYPES = ImmutableSet.of("string", "keyword", "text");
+
     private final AnalyzedColumnDefinition parent;
     private ColumnIdent ident;
     private String name;
     private String dataType;
     private String collectionType;
-    private String index;
+    private Reference.IndexType indexType;
+    private String geoTree;
     private String analyzer;
-    private String objectType = "true"; // dynamic = true
+    @VisibleForTesting
+    String objectType = "true"; // dynamic = true
     private boolean isPrimaryKey = false;
-    private Settings analyzerSettings = ImmutableSettings.EMPTY;
+    private boolean isNotNull = false;
+    private Settings analyzerSettings = Settings.EMPTY;
+    private Settings geoSettings = Settings.EMPTY;
 
     private List<AnalyzedColumnDefinition> children = new ArrayList<>();
     private boolean isIndex = false;
     private ArrayList<String> copyToTargets;
     private boolean isParentColumn;
 
-    public AnalyzedColumnDefinition(@Nullable AnalyzedColumnDefinition parent) {
+    @Nullable
+    private String formattedGeneratedExpression;
+    @Nullable
+    private Expression generatedExpression;
+
+    public static void validateName(String name) {
+        Preconditions.checkArgument(!name.startsWith("_"), "Column name must not start with '_'");
+        if (ColumnIdent.INVALID_COLUMN_NAME_PREDICATE.apply(name)) {
+            throw new InvalidColumnNameException(name);
+        }
+    }
+
+    AnalyzedColumnDefinition(@Nullable AnalyzedColumnDefinition parent) {
         this.parent = parent;
     }
 
     public void name(String name) {
-        Preconditions.checkArgument(!name.startsWith("_"), "Column ident must not start with '_'");
-        if(Constants.INVALID_COLUMN_NAME_PREDICATE.apply(name)){
-            throw new InvalidColumnNameException(name);
-        }
-
+        validateName(name);
         this.name = name;
         if (this.parent != null) {
             this.ident = ColumnIdent.getChild(this.parent.ident, name);
@@ -74,21 +106,25 @@ public class AnalyzedColumnDefinition {
         this.analyzer = analyzer;
     }
 
-    @Nullable
-    public String analyzer() {
-        return this.analyzer;
+    void indexConstraint(Reference.IndexType indexType) {
+        this.indexType = indexType;
     }
 
-    public void index(String index) {
-        this.index = index;
+    @Nullable
+    Reference.IndexType indexConstraint() {
+        return indexType;
+    }
+
+    void geoTree(String geoTree) {
+        this.geoTree = geoTree;
     }
 
     public void analyzerSettings(Settings settings) {
         this.analyzerSettings = settings;
     }
 
-    public String index() {
-        return Objects.firstNonNull(index, "not_analyzed");
+    void geoSettings(Settings settings) {
+        this.geoSettings = settings;
     }
 
     public void dataType(String dataType) {
@@ -108,40 +144,33 @@ public class AnalyzedColumnDefinition {
         return this.dataType;
     }
 
-    public void objectType(String objectType) {
+    void objectType(String objectType) {
         this.objectType = objectType;
     }
 
-    public void collectionType(String type) {
+    void collectionType(String type) {
         this.collectionType = type;
     }
 
-    public boolean docValues() {
-        return !isIndex()
-                && collectionType == null
-                && !dataType.equals("object")
-                && index().equals("not_analyzed");
-    }
-
-    protected boolean isIndex() {
+    boolean isIndexColumn() {
         return isIndex;
     }
 
-    public void isIndex(boolean isIndex) {
-        this.isIndex = isIndex;
+    void setAsIndexColumn() {
+        this.isIndex = true;
     }
 
-    public void addChild(AnalyzedColumnDefinition analyzedColumnDefinition) {
+    void addChild(AnalyzedColumnDefinition analyzedColumnDefinition) {
         children.add(analyzedColumnDefinition);
     }
 
-    public boolean hasChildren() {
+    boolean hasChildren() {
         return !children.isEmpty();
     }
 
     public Settings analyzerSettings() {
         if (!children().isEmpty()) {
-            ImmutableSettings.Builder builder = ImmutableSettings.builder();
+            Settings.Builder builder = Settings.builder();
             builder.put(analyzerSettings);
             for (AnalyzedColumnDefinition child : children()) {
                 builder.put(child.analyzerSettings());
@@ -152,18 +181,36 @@ public class AnalyzedColumnDefinition {
     }
 
     public void validate() {
-        if (analyzer != null && !analyzer.equals("not_analyzed") && !dataType.equals("string")) {
+        if (analyzer != null && !"not_analyzed".equals(analyzer) && !STRING_TYPES.contains(dataType)) {
             throw new IllegalArgumentException(
-                    String.format("Can't use an Analyzer on column \"%s\" because analyzers are only allowed on columns of type \"string\".",
-                            ident.sqlFqn()
-                    ));
+                String.format(Locale.ENGLISH, "Can't use an Analyzer on column %s because analyzers are only allowed on columns of type \"string\".",
+                    ident.sqlFqn()
+                ));
         }
-        if (isPrimaryKey() && collectionType != null) {
-            throw new UnsupportedOperationException(
-                    String.format("Cannot use columns of type \"%s\" as primary key", collectionType));
+        if (indexType != null && UNSUPPORTED_INDEX_TYPES.contains(dataType)) {
+            throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+                "INDEX constraint cannot be used on columns of type \"%s\"", dataType));
+        }
+        if (hasPrimaryKeyConstraint()) {
+            ensureTypeCanBeUsedAsKey();
         }
         for (AnalyzedColumnDefinition child : children) {
             child.validate();
+        }
+    }
+
+    private void ensureTypeCanBeUsedAsKey() {
+        if (collectionType != null) {
+            throw new UnsupportedOperationException(
+                String.format(Locale.ENGLISH, "Cannot use columns of type \"%s\" as primary key", collectionType));
+        }
+        if (UNSUPPORTED_PK_TYPES.contains(dataType)) {
+            throw new UnsupportedOperationException(
+                String.format(Locale.ENGLISH, "Cannot use columns of type \"%s\" as primary key", dataType));
+        }
+        if (isArrayOrInArray()) {
+            throw new UnsupportedOperationException(
+                String.format(Locale.ENGLISH, "Cannot use column \"%s\" as primary key within an array object", name));
         }
     }
 
@@ -171,24 +218,23 @@ public class AnalyzedColumnDefinition {
         return name;
     }
 
-    public Map<String, Object> toMapping() {
+    Map<String, Object> toMapping() {
         Map<String, Object> mapping = new HashMap<>();
 
-        mapping.put("doc_values", docValues());
-        mapping.put("type", dataType());
-        mapping.put("index", index());
-        mapping.put("store", false);
+        String dataType = addTypeOptions(mapping);
+        mapping.put("type", dataType);
 
+        if (indexType == Reference.IndexType.NO) {
+            mapping.put("index", "false");
+        }
         if (copyToTargets != null) {
             mapping.put("copy_to", copyToTargets);
         }
-        if (dataType().equals("string") && analyzer != null) {
-            mapping.put("analyzer", analyzer());
-        } else if(collectionType == "array"){
-            Map<String, Object> outerMapping = new HashMap<String, Object>(){{
-                put("type", "array");
-            }};
-            if(dataType().equals("object")){
+
+        if ("array".equals(collectionType)) {
+            Map<String, Object> outerMapping = new HashMap<>();
+            outerMapping.put("type", "array");
+            if (dataType().equals("object")) {
                 objectMapping(mapping);
             }
             outerMapping.put("inner", mapping);
@@ -199,7 +245,39 @@ public class AnalyzedColumnDefinition {
         return mapping;
     }
 
-    private void objectMapping(Map<String, Object> mapping){
+    /**
+     * @return ES internal type name .
+     *          Usually this equals the crate type name, but for example string may become keyword or text
+     */
+    private String addTypeOptions(Map<String, Object> mapping) {
+        switch (dataType) {
+            case "date":
+                /*
+                 * We want 1000 not be be interpreted as year 1000AD but as 1970-01-01T00:00:01.000
+                 * so prefer date mapping format epoch_millis over strict_date_optional_time
+                 */
+                mapping.put("format", "epoch_millis||strict_date_optional_time");
+                break;
+            case "geo_shape":
+                GeoSettingsApplier.applySettings(mapping, geoSettings, geoTree);
+                break;
+            case "string":
+                if (analyzer == null) {
+                    return "keyword";
+                }
+                mapping.put("analyzer", analyzer);
+                return "text";
+            case "text":
+                // explicit index definition
+                if (analyzer != null) {
+                    mapping.put("analyzer", analyzer);
+                }
+                break;
+        }
+        return dataType;
+    }
+
+    private void objectMapping(Map<String, Object> mapping) {
         mapping.put("dynamic", objectType);
         Map<String, Object> childProperties = new HashMap<>();
         for (AnalyzedColumnDefinition child : children) {
@@ -212,15 +290,23 @@ public class AnalyzedColumnDefinition {
         return ident;
     }
 
-    public void isPrimaryKey(boolean isPrimaryKey) {
-        this.isPrimaryKey = isPrimaryKey;
+    void setPrimaryKeyConstraint() {
+        this.isPrimaryKey = true;
     }
 
-    public boolean isPrimaryKey() {
+    boolean hasPrimaryKeyConstraint() {
         return this.isPrimaryKey;
     }
 
-    public Map<String, Object> toMetaIndicesMapping() {
+    void setNotNullConstraint() {
+        isNotNull = true;
+    }
+
+    boolean hasNotNullConstraint() {
+        return isNotNull;
+    }
+
+    Map<String, Object> toMetaIndicesMapping() {
         return ImmutableMap.of();
     }
 
@@ -231,9 +317,7 @@ public class AnalyzedColumnDefinition {
 
         AnalyzedColumnDefinition that = (AnalyzedColumnDefinition) o;
 
-        if (ident != null ? !ident.equals(that.ident) : that.ident != null) return false;
-
-        return true;
+        return ident != null ? ident.equals(that.ident) : that.ident == null;
     }
 
     @Override
@@ -243,35 +327,54 @@ public class AnalyzedColumnDefinition {
 
     @Override
     public String toString() {
-        return Objects.toStringHelper(this).add("ident", ident).toString();
+        return MoreObjects.toStringHelper(this).add("ident", ident).toString();
     }
 
     public List<AnalyzedColumnDefinition> children() {
         return children;
     }
 
-    public void addCopyTo(Set<String> targets) {
+    void addCopyTo(Set<String> targets) {
         this.copyToTargets = Lists.newArrayList(targets);
     }
 
     public void ident(ColumnIdent ident) {
-        assert this.ident == null;
+        assert this.ident == null : "ident must be null";
         this.ident = ident;
     }
 
-    public boolean isArrayOrInArray() {
+    boolean isArrayOrInArray() {
         return collectionType != null || (parent != null && parent.isArrayOrInArray());
     }
 
-    public void isParentColumn(boolean isParentColumn) {
-        this.isParentColumn = isParentColumn;
+    void markAsParentColumn() {
+        this.isParentColumn = true;
     }
 
     /**
      * @return true if this column has a defined child
      * (which is not coming from an object column definition payload in case of ADD COLUMN)
      */
-    public boolean isParentColumn() {
+    boolean isParentColumn() {
         return isParentColumn;
     }
+
+    public void formattedGeneratedExpression(String formattedGeneratedExpression) {
+        this.formattedGeneratedExpression = formattedGeneratedExpression;
+    }
+
+    @Nullable
+    public String formattedGeneratedExpression() {
+        return formattedGeneratedExpression;
+    }
+
+    public void generatedExpression(Expression generatedExpression) {
+        this.generatedExpression = generatedExpression;
+    }
+
+    @Nullable
+    public Expression generatedExpression() {
+        return generatedExpression;
+    }
+
 }

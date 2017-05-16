@@ -21,82 +21,74 @@
 
 package io.crate.executor.transport.task.elasticsearch;
 
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.SettableFuture;
-import io.crate.executor.TaskResult;
+import com.google.common.collect.Iterables;
+import io.crate.analyze.expressions.ExpressionToObjectVisitor;
+import io.crate.data.BatchConsumer;
+import io.crate.data.Row;
+import io.crate.data.Row1;
 import io.crate.executor.JobTask;
-import io.crate.planner.node.ddl.ESClusterUpdateSettingsNode;
-import org.elasticsearch.action.ActionListener;
+import io.crate.executor.transport.OneRowActionListener;
+import io.crate.metadata.settings.CrateSettings;
+import io.crate.planner.node.ddl.ESClusterUpdateSettingsPlan;
+import io.crate.sql.tree.Expression;
 import org.elasticsearch.action.admin.cluster.settings.ClusterUpdateSettingsRequest;
 import org.elasticsearch.action.admin.cluster.settings.ClusterUpdateSettingsResponse;
 import org.elasticsearch.action.admin.cluster.settings.TransportClusterUpdateSettingsAction;
+import org.elasticsearch.common.settings.Settings;
 
-import java.util.Arrays;
 import java.util.List;
-import java.util.Locale;
-import java.util.UUID;
+import java.util.Map;
+import java.util.function.Function;
 
 public class ESClusterUpdateSettingsTask extends JobTask {
 
-    private final List<ListenableFuture<TaskResult>> results;
+    private static final Function<Object, Row> TO_ONE_ROW = o -> new Row1(1L);
+
+    private final ESClusterUpdateSettingsPlan plan;
     private final TransportClusterUpdateSettingsAction transport;
-    private final ClusterUpdateSettingsRequest request;
-    private final ActionListener<ClusterUpdateSettingsResponse> listener;
 
-    public ESClusterUpdateSettingsTask(UUID jobId,
-                                       TransportClusterUpdateSettingsAction transport,
-                                       ESClusterUpdateSettingsNode node) {
-        super(jobId);
+    public ESClusterUpdateSettingsTask(ESClusterUpdateSettingsPlan plan,
+                                       TransportClusterUpdateSettingsAction transport) {
+        super(plan.jobId());
+        this.plan = plan;
         this.transport = transport;
-
-        final SettableFuture<TaskResult> result = SettableFuture.create();
-        results = Arrays.<ListenableFuture<TaskResult>>asList(result);
-
-        request = new ClusterUpdateSettingsRequest();
-        request.persistentSettings(node.persistentSettings());
-        request.transientSettings(node.transientSettings());
-        if (node.persistentSettingsToRemove() != null) {
-            request.persistentSettingsToRemove(node.persistentSettingsToRemove());
-        }
-        if (node.transientSettingsToRemove() != null) {
-            request.transientSettingsToRemove(node.transientSettingsToRemove());
-        }
-        listener = new ClusterUpdateSettingsResponseListener(result);
-    }
-
-    static class ClusterUpdateSettingsResponseListener implements ActionListener<ClusterUpdateSettingsResponse> {
-
-        private final SettableFuture<TaskResult> result;
-
-        public ClusterUpdateSettingsResponseListener(SettableFuture<TaskResult> result) {
-            this.result = result;
-        }
-
-        @Override
-        public void onResponse(ClusterUpdateSettingsResponse response) {
-            result.set(TaskResult.ONE_ROW);
-        }
-
-        @Override
-        public void onFailure(Throwable e) {
-            result.setException(e);
-        }
     }
 
     @Override
-    public void start() {
-        transport.execute(request, listener);
+    public void execute(BatchConsumer consumer, Row parameters) {
+        ClusterUpdateSettingsRequest request = buildESUpdateClusterSettingRequest(
+            buildSettingsFrom(plan.persistentSettings(), parameters),
+            buildSettingsFrom(plan.transientSettings(), parameters)
+        );
+        OneRowActionListener<ClusterUpdateSettingsResponse> actionListener = new OneRowActionListener<>(consumer, TO_ONE_ROW);
+        transport.execute(request, actionListener);
     }
 
-    @Override
-    public List<ListenableFuture<TaskResult>> result() {
-        return results;
+    static Settings buildSettingsFrom(Map<String, List<Expression>> settingsMap, Row parameters) {
+        Settings.Builder settings = Settings.builder();
+        for (Map.Entry<String, List<Expression>> entry : settingsMap.entrySet()) {
+            String settingsName = entry.getKey();
+            if (CrateSettings.isValidSetting(settingsName) == false) {
+                throw new IllegalArgumentException("Setting '" + settingsName + "' is not supported");
+            }
+
+            List<Expression> value = entry.getValue();
+            // value can be null to reset settings
+            if (value == null) {
+                settings.put(settingsName, (String) null);
+            } else {
+                CrateSettings.flattenSettings(settings, settingsName,
+                    ExpressionToObjectVisitor.convert(Iterables.getOnlyElement(value), parameters));
+            }
+        }
+        return settings.build();
     }
 
-    @Override
-    public void upstreamResult(List<ListenableFuture<TaskResult>> result) {
-        throw new UnsupportedOperationException(
-                String.format(Locale.ENGLISH, "upstreamResult not supported on %s",
-                        getClass().getSimpleName()));
+    private ClusterUpdateSettingsRequest buildESUpdateClusterSettingRequest(Settings persistentSettings,
+                                                                            Settings transientSettings) {
+        ClusterUpdateSettingsRequest request = new ClusterUpdateSettingsRequest();
+        request.persistentSettings(persistentSettings);
+        request.transientSettings(transientSettings);
+        return request;
     }
 }

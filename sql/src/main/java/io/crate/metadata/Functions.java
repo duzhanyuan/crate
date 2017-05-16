@@ -22,64 +22,158 @@
 package io.crate.metadata;
 
 import com.google.common.base.Joiner;
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Multimap;
+import io.crate.types.DataType;
+import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.inject.Inject;
 
-import java.util.Map;
+import javax.annotation.Nullable;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 public class Functions {
 
-    private final Map<FunctionIdent, FunctionImplementation> functionImplementations;
-    private final Map<String, DynamicFunctionResolver> functionResolvers;
+    private final Map<String, FunctionResolver> functionResolvers;
+    private final Map<String, Map<String, FunctionResolver>> udfResolversBySchema = new ConcurrentHashMap<>();
 
     @Inject
     public Functions(Map<FunctionIdent, FunctionImplementation> functionImplementations,
-                     Map<String, DynamicFunctionResolver> functionResolvers) {
-        this.functionImplementations = functionImplementations;
-        this.functionResolvers = functionResolvers;
+                     Map<String, FunctionResolver> functionResolvers) {
+        this.functionResolvers = Maps.newHashMap(functionResolvers);
+        this.functionResolvers.putAll(generateFunctionResolvers(functionImplementations));
     }
 
-    /**
-     * <p>
-     *     returns the functionImplementation for the given ident.
-     * </p>
-     *
-     * same as {@link #get(FunctionIdent)} but will throw an UnsupportedOperationException
-     * if no implementation is found.
-     */
-    public FunctionImplementation getSafe(FunctionIdent ident)
-            throws IllegalArgumentException, UnsupportedOperationException {
-        FunctionImplementation implementation = null;
-        String exceptionMessage = null;
-        try {
-            implementation = get(ident);
-        } catch (IllegalArgumentException e) {
-            if (e.getMessage() != null && !e.getMessage().isEmpty()) {
-                exceptionMessage = e.getMessage();
-            }
-        }
-        if (implementation == null) {
-            if (exceptionMessage == null) {
-                exceptionMessage = String.format("unknown function: %s(%s)", ident.name(),
-                        Joiner.on(", ").join(ident.argumentTypes()));
-            }
-            throw new UnsupportedOperationException(exceptionMessage);
-        }
-        return implementation;
+    private Map<String, FunctionResolver> generateFunctionResolvers(Map<FunctionIdent, FunctionImplementation> functionImplementations) {
+        Multimap<String, Tuple<FunctionIdent, FunctionImplementation>> signatures = getSignatures(functionImplementations);
+        return signatures.keys().stream()
+            .distinct()
+            .collect(Collectors.toMap(name -> name, name -> new GeneratedFunctionResolver(signatures.get(name))));
     }
 
-    /**
-     * returns the functionImplementation for the given ident.
-     */
-    public FunctionImplementation get(FunctionIdent ident) throws IllegalArgumentException {
-        FunctionImplementation implementation = functionImplementations.get(ident);
-        if (implementation != null) {
-            return implementation;
+    private Multimap<String, Tuple<FunctionIdent, FunctionImplementation>> getSignatures(
+        Map<FunctionIdent, FunctionImplementation> functionImplementations) {
+        Multimap<String, Tuple<FunctionIdent, FunctionImplementation>> signatureMap = ArrayListMultimap.create();
+        for (Map.Entry<FunctionIdent, FunctionImplementation> entry : functionImplementations.entrySet()) {
+            signatureMap.put(entry.getKey().name(), new Tuple<>(entry.getKey(), entry.getValue()));
         }
+        return signatureMap;
+    }
 
-        DynamicFunctionResolver dynamicResolver = functionResolvers.get(ident.name());
-        if (dynamicResolver != null) {
-            return dynamicResolver.getForTypes(ident.argumentTypes());
+    public void registerUdfResolversForSchema(String schema, Map<FunctionIdent, FunctionImplementation> functions) {
+        udfResolversBySchema.put(schema, generateFunctionResolvers(functions));
+    }
+
+    public void deregisterUdfResolversForSchema(String schema) {
+        udfResolversBySchema.remove(schema);
+    }
+
+    @Nullable
+    private static FunctionImplementation resolveFunctionForArgumentTypes(List<DataType> types, FunctionResolver resolver) {
+        List<DataType> signature = resolver.getSignature(types);
+        if (signature != null) {
+            return resolver.getForTypes(signature);
         }
         return null;
+    }
+
+    /**
+     * Returns the built-in function implementation for the given function name and arguments.
+     *
+     * @param name The function name.
+     * @param argumentsTypes The function argument types.
+     * @return a function implementation or null if it was not found.
+     */
+    @Nullable
+    public FunctionImplementation getBuiltin(String name, List<DataType> argumentsTypes) {
+        FunctionResolver resolver = functionResolvers.get(name);
+        if (resolver == null) {
+            return null;
+        }
+        return resolveFunctionForArgumentTypes(argumentsTypes, resolver);
+    }
+
+    /**
+     * Returns the user-defined function implementation for the given function name and arguments.
+     *
+     * @param name The function name.
+     * @param argumentsTypes The function argument types.
+     * @return a function implementation.
+     * @throws UnsupportedOperationException if no implementation is found.
+     */
+    public FunctionImplementation getUserDefined(String schema, String name, List<DataType> argumentsTypes) throws UnsupportedOperationException {
+        Map<String, FunctionResolver> functionResolvers = udfResolversBySchema.get(schema);
+        if (functionResolvers == null) {
+            throw createUnknownFunctionException(name, argumentsTypes);
+        }
+        FunctionResolver resolver = functionResolvers.get(name);
+        if (resolver == null) {
+            throw createUnknownFunctionException(name, argumentsTypes);
+        }
+        FunctionImplementation impl = resolveFunctionForArgumentTypes(argumentsTypes, resolver);
+        if (impl == null) {
+            throw createUnknownFunctionException(name, argumentsTypes);
+        }
+        return impl;
+    }
+
+    /**
+     * Returns the function implementation for the given function ident.
+     * First look up function in built-ins then fallback to user-defined functions.
+     *
+     * @param ident The function ident.
+     * @return The function implementation.
+     * @throws UnsupportedOperationException if no implementation is found.
+     */
+    public FunctionImplementation getQualified(FunctionIdent ident) throws UnsupportedOperationException {
+        FunctionImplementation impl = null;
+        if (ident.schema() == null) {
+            impl = getBuiltin(ident.name(), ident.argumentTypes());
+        }
+        if (impl == null) {
+            impl = getUserDefined(ident.schema(), ident.name(), ident.argumentTypes());
+        }
+        return impl;
+    }
+
+    public static UnsupportedOperationException createUnknownFunctionException(String name, List<DataType> argumentTypes) {
+        return new UnsupportedOperationException(
+            String.format(Locale.ENGLISH, "unknown function: %s(%s)", name, Joiner.on(", ").join(argumentTypes))
+        );
+    }
+
+    private static class GeneratedFunctionResolver implements FunctionResolver {
+
+        private final List<Signature.SignatureOperator> signatures;
+        private final Map<List<DataType>, FunctionImplementation> functions;
+
+        GeneratedFunctionResolver(Collection<Tuple<FunctionIdent, FunctionImplementation>> functionTuples) {
+            signatures = new ArrayList<>(functionTuples.size());
+            functions = new HashMap<>(functionTuples.size());
+            for (Tuple<FunctionIdent, FunctionImplementation> functionTuple : functionTuples) {
+                List<DataType> argumentTypes = functionTuple.v1().argumentTypes();
+                signatures.add(Signature.of(argumentTypes));
+                functions.put(argumentTypes, functionTuple.v2());
+            }
+        }
+
+        @Override
+        public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
+            return functions.get(dataTypes);
+        }
+
+        @Nullable
+        @Override
+        public List<DataType> getSignature(List<DataType> dataTypes) {
+            for (Signature.SignatureOperator signature : signatures) {
+                List<DataType> sig = signature.apply(dataTypes);
+                if (sig != null) {
+                    return sig;
+                }
+            }
+            return null;
+        }
     }
 }

@@ -25,9 +25,8 @@ import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.model.ObjectListing;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
-import com.google.common.base.Predicate;
 import io.crate.external.S3ClientHelper;
-import org.elasticsearch.common.logging.ESLogger;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.common.logging.Loggers;
 
 import java.io.IOException;
@@ -35,11 +34,12 @@ import java.io.InputStream;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 
 public class S3FileInput implements FileInput {
 
     private AmazonS3 client; // to prevent early GC during getObjectContent() in getStream()
-    private static final ESLogger logger = Loggers.getLogger(S3FileInput.class);
+    private static final Logger logger = Loggers.getLogger(S3FileInput.class);
 
     final S3ClientHelper clientBuilder;
 
@@ -59,7 +59,6 @@ public class S3FileInput implements FileInput {
         }
         String prefix = uri.getPath().length() > 1 ? uri.getPath().substring(1) : "";
         List<URI> uris = new ArrayList<>();
-
         ObjectListing list = client.listObjects(bucketName, prefix);
         addKeyUris(uris, list, uri, uriPredicate);
         while (list.isTruncated()) {
@@ -73,11 +72,14 @@ public class S3FileInput implements FileInput {
     private void addKeyUris(List<URI> uris, ObjectListing list, URI uri, Predicate<URI> uriPredicate) {
         List<S3ObjectSummary> summaries = list.getObjectSummaries();
         for (S3ObjectSummary summary : summaries) {
-            URI keyUri = uri.resolve("/" + summary.getKey());
-            if (uriPredicate.apply(keyUri)) {
-                uris.add(keyUri);
-                if (logger.isDebugEnabled()) {
-                    logger.debug("{}", keyUri);
+            String key = summary.getKey();
+            if (!key.endsWith("/")) {
+                URI keyUri = uri.resolve("/" + key);
+                if (uriPredicate.test(keyUri)) {
+                    uris.add(keyUri);
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("{}", keyUri);
+                    }
                 }
             }
         }

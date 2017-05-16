@@ -22,40 +22,47 @@
 package io.crate.operation.reference.doc.lucene;
 
 import io.crate.exceptions.GroupByOnArrayUnsupportedException;
-import org.apache.lucene.index.AtomicReaderContext;
+import org.apache.lucene.index.LeafReaderContext;
 import org.elasticsearch.index.fielddata.IndexNumericFieldData;
 import org.elasticsearch.index.fielddata.SortedNumericDoubleValues;
+import org.elasticsearch.index.mapper.MappedFieldType;
+
+import java.io.IOException;
 
 public class DoubleColumnReference extends FieldCacheExpression<IndexNumericFieldData, Double> {
 
     private SortedNumericDoubleValues values;
+    private Double value;
 
-    public DoubleColumnReference(String columnName) {
-        super(columnName);
+    public DoubleColumnReference(String columnName, MappedFieldType mappedFieldType) {
+        super(columnName, mappedFieldType);
     }
 
     @Override
     public Double value() {
-        switch (values.count()) {
-            case 0:
-                return null;
-            case 1:
-                return values.valueAt(0);
-            default:
-                throw new GroupByOnArrayUnsupportedException(columnName());
-        }
-    }
-
-    @Override
-    public void setNextReader(AtomicReaderContext context) {
-        super.setNextReader(context);
-        values = indexFieldData.load(context).getDoubleValues();
+        return value;
     }
 
     @Override
     public void setNextDocId(int docId) {
         super.setNextDocId(docId);
         values.setDocument(docId);
+        switch (values.count()) {
+            case 0:
+                value = null;
+                break;
+            case 1:
+                value = values.valueAt(0);
+                break;
+            default:
+                throw new GroupByOnArrayUnsupportedException(columnName);
+        }
+    }
+
+    @Override
+    public void setNextReader(LeafReaderContext context) throws IOException {
+        super.setNextReader(context);
+        values = indexFieldData.load(context).getDoubleValues();
     }
 
     @Override

@@ -21,14 +21,12 @@
 
 package io.crate.exceptions;
 
+import java.util.Locale;
+
 public class InvalidColumnNameException extends ValidationException {
 
-    public InvalidColumnNameException(String columnName, Throwable e) {
-        super(String.format("column name \"%s\" is invalid.", columnName), e);
-    }
-
     public InvalidColumnNameException(String columnName) {
-        super(String.format("column name \"%s\" is invalid.", columnName));
+        super(String.format(Locale.ENGLISH, "column name \"%s\" is invalid.", columnName));
     }
 
     @Override

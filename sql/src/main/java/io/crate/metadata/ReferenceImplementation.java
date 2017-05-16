@@ -6,7 +6,7 @@
  * you may not use this file except in compliance with the License.  You may
  * obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -21,7 +21,11 @@
 
 package io.crate.metadata;
 
-public interface ReferenceImplementation {
+import io.crate.data.Input;
+
+import java.util.List;
+
+public interface ReferenceImplementation<T> extends Input<T> {
 
     /**
      * Returns an implementation for a child.
@@ -30,6 +34,18 @@ public interface ReferenceImplementation {
      * @return an implementation for the child or null if not applicable or if there is no child available
      * with the given name
      */
-    public ReferenceImplementation getChildImplementation(String name);
+    default ReferenceImplementation getChildImplementation(String name) {
+        return null;
+    }
 
+
+    static ReferenceImplementation<?> findInChildImplementations(ReferenceImplementation<?> impl, List<String> path) {
+        for (int i = 0; i < path.size(); i++) {
+            impl = impl.getChildImplementation(path.get(i));
+            if (impl == null) {
+                return null;
+            }
+        }
+        return impl;
+    }
 }

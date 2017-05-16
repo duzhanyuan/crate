@@ -28,7 +28,7 @@ import io.crate.breaker.SizeEstimatorFactory;
 import io.crate.exceptions.CircuitBreakingException;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.aggregation.AggregationFunction;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
@@ -43,7 +43,7 @@ public abstract class MinimumAggregation extends AggregationFunction<Comparable,
     public static void register(AggregationImplModule mod) {
         for (final DataType dataType : DataTypes.PRIMITIVE_TYPES) {
             FunctionInfo functionInfo = new FunctionInfo(new FunctionIdent(NAME, ImmutableList.of(dataType)),
-                    dataType, FunctionInfo.Type.AGGREGATE);
+                dataType, FunctionInfo.Type.AGGREGATE);
 
             if (dataType instanceof FixedWidthType) {
                 mod.register(new FixedMinimumAggregation(functionInfo));

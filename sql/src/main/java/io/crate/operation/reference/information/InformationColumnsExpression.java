@@ -21,49 +21,23 @@
 
 package io.crate.operation.reference.information;
 
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.ReferenceInfos;
-import io.crate.metadata.information.RowCollectExpression;
-import io.crate.metadata.information.InformationColumnsTableInfo;
+import io.crate.metadata.RowContextCollectorExpression;
 import org.apache.lucene.util.BytesRef;
 
 
 public abstract class InformationColumnsExpression<T>
-        extends RowCollectExpression<ColumnContext, T> {
-
-    public static final ColumnsSchemaNameExpression SCHEMA_NAME_EXPRESSION = new ColumnsSchemaNameExpression();
-    public static final ColumnsTableNameExpression TABLE_NAME_EXPRESSION = new ColumnsTableNameExpression();
-    public static final ColumnsColumnNameExpression COLUMN_NAME_EXPRESSION = new ColumnsColumnNameExpression();
-    public static final ColumnsOrdinalExpression ORDINAL_EXPRESSION = new ColumnsOrdinalExpression();
-    public static final ColumnsDataTypeExpression DATA_TYPE_EXPRESSION = new ColumnsDataTypeExpression();
-
-    protected InformationColumnsExpression(ReferenceInfo info) {
-        super(info);
-    }
+    extends RowContextCollectorExpression<ColumnContext, T> {
 
     public static class ColumnsSchemaNameExpression extends InformationColumnsExpression<BytesRef> {
 
-        static final BytesRef DOC_SCHEMA_INFO = new BytesRef(ReferenceInfos.DEFAULT_SCHEMA_NAME);
-
-        public ColumnsSchemaNameExpression() {
-            super(InformationColumnsTableInfo.ReferenceInfos.SCHEMA_NAME);
-        }
-
         @Override
         public BytesRef value() {
-            String schema = row.info.ident().tableIdent().schema();
-            if (schema == null) {
-                return DOC_SCHEMA_INFO;
-            }
-            return new BytesRef(schema);
+            assert row.info.ident().tableIdent().schema() != null : "table schema can't be null";
+            return new BytesRef(row.info.ident().tableIdent().schema());
         }
     }
 
     public static class ColumnsTableNameExpression extends InformationColumnsExpression<BytesRef> {
-
-        public ColumnsTableNameExpression() {
-            super(InformationColumnsTableInfo.ReferenceInfos.TABLE_NAME);
-        }
 
         @Override
         public BytesRef value() {
@@ -72,12 +46,7 @@ public abstract class InformationColumnsExpression<T>
         }
     }
 
-
     public static class ColumnsColumnNameExpression extends InformationColumnsExpression<BytesRef> {
-
-        public ColumnsColumnNameExpression() {
-            super(InformationColumnsTableInfo.ReferenceInfos.COLUMN_NAME);
-        }
 
         @Override
         public BytesRef value() {
@@ -88,10 +57,6 @@ public abstract class InformationColumnsExpression<T>
 
     public static class ColumnsOrdinalExpression extends InformationColumnsExpression<Short> {
 
-        public ColumnsOrdinalExpression() {
-            super(InformationColumnsTableInfo.ReferenceInfos.ORDINAL_POSITION);
-        }
-
         @Override
         public Short value() {
             return row.ordinal;
@@ -100,14 +65,23 @@ public abstract class InformationColumnsExpression<T>
 
     public static class ColumnsDataTypeExpression extends InformationColumnsExpression<BytesRef> {
 
-        public ColumnsDataTypeExpression() {
-            super(InformationColumnsTableInfo.ReferenceInfos.DATA_TYPE);
-        }
-
         @Override
         public BytesRef value() {
-            assert row.info.type() != null && row.info.type().getName() != null : "columns must always have a type and the type must have a name";
-            return new BytesRef(row.info.type().getName());
+            assert row.info.valueType() != null && row.info.valueType().getName() !=
+                                                   null : "columns must always have a type and the type must have a name";
+            return new BytesRef(row.info.valueType().getName());
+        }
+    }
+
+    public static class ColumnsIsNullableExpression extends InformationColumnsExpression<Boolean> {
+
+        @Override
+        public Boolean value() {
+            if (row.tableInfo.primaryKey().contains(row.info.ident().columnIdent())) {
+                return false;
+            } else {
+                return row.info.isNullable();
+            }
         }
     }
 }

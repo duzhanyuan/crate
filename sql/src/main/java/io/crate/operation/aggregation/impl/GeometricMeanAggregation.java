@@ -27,7 +27,7 @@ import io.crate.Streamer;
 import io.crate.breaker.RamAccountingContext;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.aggregation.AggregationFunction;
 import io.crate.types.DataType;
 import io.crate.types.DataTypeFactory;
@@ -46,19 +46,25 @@ public class GeometricMeanAggregation extends AggregationFunction<GeometricMeanA
 
     public static final String NAME = "geometric_mean";
 
+    static {
+        DataTypes.register(GeometricMeanStateType.ID, GeometricMeanStateType.INSTANCE);
+    }
+
     public static void register(AggregationImplModule mod) {
         for (DataType<?> t : DataTypes.NUMERIC_PRIMITIVE_TYPES) {
             mod.register(new GeometricMeanAggregation(new FunctionInfo(
-                    new FunctionIdent(NAME, ImmutableList.<DataType>of(t)), DataTypes.DOUBLE,
-                    FunctionInfo.Type.AGGREGATE)));
+                new FunctionIdent(NAME, ImmutableList.<DataType>of(t)), DataTypes.DOUBLE,
+                FunctionInfo.Type.AGGREGATE)));
         }
         mod.register(new GeometricMeanAggregation(new FunctionInfo(
-                new FunctionIdent(NAME, ImmutableList.<DataType>of(DataTypes.TIMESTAMP)), DataTypes.DOUBLE,
-                FunctionInfo.Type.AGGREGATE)));
+            new FunctionIdent(NAME, ImmutableList.<DataType>of(DataTypes.TIMESTAMP)), DataTypes.DOUBLE,
+            FunctionInfo.Type.AGGREGATE)));
     }
 
     public static class GeometricMeanState implements Comparable<GeometricMeanState>, Streamable {
-        /**Number of values that have been added */
+        /**
+         * Number of values that have been added
+         */
         private long n;
 
         /**
@@ -92,9 +98,9 @@ public class GeometricMeanAggregation extends AggregationFunction<GeometricMeanA
         @Override
         public int compareTo(GeometricMeanState o) {
             return ComparisonChain.start()
-                    .compare(value, o.value)
-                    .compare(n, o.n)
-                    .result();
+                .compare(value, o.value)
+                .compare(n, o.n)
+                .result();
         }
 
         @Override
@@ -111,7 +117,7 @@ public class GeometricMeanAggregation extends AggregationFunction<GeometricMeanA
     }
 
     public static class GeometricMeanStateType extends DataType<GeometricMeanState>
-            implements Streamer<GeometricMeanState>, FixedWidthType, DataTypeFactory {
+        implements Streamer<GeometricMeanState>, FixedWidthType, DataTypeFactory {
 
         public static final GeometricMeanStateType INSTANCE = new GeometricMeanStateType();
         public static final int ID = 4096;
@@ -133,7 +139,7 @@ public class GeometricMeanAggregation extends AggregationFunction<GeometricMeanA
 
         @Override
         public GeometricMeanState value(Object value) throws IllegalArgumentException, ClassCastException {
-            return (GeometricMeanState)value;
+            return (GeometricMeanState) value;
         }
 
         @Override
@@ -160,7 +166,7 @@ public class GeometricMeanAggregation extends AggregationFunction<GeometricMeanA
 
         @Override
         public void writeValueTo(StreamOutput out, Object v) throws IOException {
-            GeometricMeanState state = (GeometricMeanState)v;
+            GeometricMeanState state = (GeometricMeanState) v;
             state.writeTo(out);
         }
     }

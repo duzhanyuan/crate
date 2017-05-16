@@ -21,22 +21,19 @@
 
 package io.crate.planner.projection.builder;
 
-import io.crate.analyze.HavingClause;
-import io.crate.analyze.OrderBy;
+import io.crate.analyze.QuerySpec;
+import io.crate.analyze.symbol.Aggregation;
+import io.crate.analyze.symbol.DefaultTraversalSymbolVisitor;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Symbol;
 import io.crate.metadata.FunctionInfo;
-import io.crate.planner.symbol.Aggregation;
-import io.crate.planner.symbol.DefaultTraversalSymbolVisitor;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Symbol;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.List;
 
-class SplitPointVisitor extends DefaultTraversalSymbolVisitor<
-        SplitPointVisitor.Context, Void> {
+final class SplitPointVisitor extends DefaultTraversalSymbolVisitor<SplitPointVisitor.Context, Void> {
 
-    public static final SplitPointVisitor INSTANCE = new SplitPointVisitor();
+    private static final SplitPointVisitor INSTANCE = new SplitPointVisitor();
 
     static class Context {
         final ArrayList<Symbol> toCollect;
@@ -48,44 +45,41 @@ class SplitPointVisitor extends DefaultTraversalSymbolVisitor<
             this.aggregates = aggregates;
         }
 
-        void allocateCollectSymbol(Symbol symbol){
+        void allocateCollectSymbol(Symbol symbol) {
             if (!toCollect.contains(symbol)) {
                 toCollect.add(symbol);
             }
         }
 
-        void allocateAggregate(Function aggregate){
+        void allocateAggregate(Function aggregate) {
             if (!aggregates.contains(aggregate)) {
                 aggregates.add(aggregate);
             }
         }
     }
 
-    public void process(Collection<Symbol> symbols, Context context){
+    private void process(Collection<Symbol> symbols, Context context) {
         for (Symbol symbol : symbols) {
             context.aggregateSeen = false;
             process(symbol, context);
-            if (!context.aggregateSeen){
+            if (!context.aggregateSeen) {
                 // add directly since it must be an entry without aggregate
                 context.allocateCollectSymbol(symbol);
             }
         }
     }
 
-    public void process(SplitPoints splitContext){
+    static void addAggregatesAndToCollectSymbols(QuerySpec querySpec, SplitPoints splitContext) {
         Context context = new Context(splitContext.toCollect(), splitContext.aggregates());
-        process(splitContext.querySpec().outputs(), context);
-        OrderBy orderBy = splitContext.querySpec().orderBy();
-        if (orderBy != null){
-            process(orderBy.orderBySymbols(), context);
+        INSTANCE.process(querySpec.outputs(), context);
+        if (querySpec.orderBy().isPresent()) {
+            INSTANCE.process(querySpec.orderBy().get().orderBySymbols(), context);
         }
-        HavingClause havingClause = splitContext.querySpec().having();
-        if (havingClause != null && havingClause.query() != null){
-            process(havingClause.query(), context);
+        if (querySpec.having().isPresent() && querySpec.having().get().query() != null) {
+            INSTANCE.process(querySpec.having().get().query(), context);
         }
-        List<Symbol> groupBy = splitContext.querySpec().groupBy();
-        if (groupBy != null){
-            process(groupBy, context);
+        if (querySpec.groupBy().isPresent()) {
+            INSTANCE.process(querySpec.groupBy().get(), context);
         }
     }
 
@@ -105,7 +99,7 @@ class SplitPointVisitor extends DefaultTraversalSymbolVisitor<
     @Override
     public Void visitAggregation(Aggregation symbol, Context context) {
         throw new AssertionError("Aggregation Symbols must not be visited with " +
-                getClass().getCanonicalName());
+                                 getClass().getCanonicalName());
     }
 
 }

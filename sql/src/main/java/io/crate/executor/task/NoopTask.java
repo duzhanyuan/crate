@@ -21,20 +21,16 @@
 
 package io.crate.executor.task;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
+import io.crate.data.BatchConsumer;
+import io.crate.data.Row;
+import io.crate.data.RowsBatchIterator;
 import io.crate.executor.Task;
-import io.crate.executor.TaskResult;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 public class NoopTask implements Task {
-
-    private static final List<ListenableFuture<TaskResult>> EMPTY_RESULT =
-            ImmutableList.<ListenableFuture<TaskResult>>of(
-                    Futures.immediateFuture((TaskResult) TaskResult.EMPTY_RESULT)
-            );
 
     public static final NoopTask INSTANCE = new NoopTask();
 
@@ -42,17 +38,12 @@ public class NoopTask implements Task {
     }
 
     @Override
-    public void start() {
-
+    public void execute(BatchConsumer consumer, Row parameters) {
+        consumer.accept(RowsBatchIterator.empty(0), null);
     }
 
     @Override
-    public List<ListenableFuture<TaskResult>> result() {
-        return EMPTY_RESULT;
-    }
-
-    @Override
-    public void upstreamResult(List<ListenableFuture<TaskResult>> result) {
-
+    public List<CompletableFuture<Long>> executeBulk() {
+        return Collections.emptyList();
     }
 }

@@ -22,13 +22,17 @@
 package io.crate.types;
 
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.index.mapper.ip.IpFieldMapper;
+import org.elasticsearch.index.mapper.LegacyIpFieldMapper;
+
+import java.util.Locale;
 
 public class IpType extends StringType {
 
     public final static int ID = 5;
     public final static IpType INSTANCE = new IpType();
-    protected IpType() {}
+
+    IpType() {
+    }
 
     @Override
     public int id() {
@@ -50,15 +54,21 @@ public class IpType extends StringType {
             validate(ip);
             return ip;
         } else {
-            Long longIp = ((Number)value).longValue();
-            String strIp = IpFieldMapper.longToIp(longIp);
+            Long longIp = ((Number) value).longValue();
+            if (longIp < 0) {
+                throw new IllegalArgumentException(String.format(Locale.ENGLISH, "Failed to convert long value: %s to ipv4 address)",
+                    longIp));
+            }
+            String strIp = LegacyIpFieldMapper.longToIp(longIp);
             return new BytesRef(strIp);
         }
     }
 
     private void validate(BytesRef ip) {
-        if(!isValid(ip))
-            throw new IllegalArgumentException("Failed to validate ip ["+ ip.utf8ToString() + "], not a valid ipv4 address");
+        if (!isValid(ip)) {
+            throw new IllegalArgumentException(
+                "Failed to validate ip [" + ip.utf8ToString() + "], not a valid ipv4 address");
+        }
     }
 
     @Override
@@ -71,56 +81,43 @@ public class IpType extends StringType {
         return IpType.INSTANCE;
     }
 
-    static public boolean isValid(BytesRef ip) {
-        if (ip.length < 7) { // minimum length of a valid ip address
+    static boolean isValid(BytesRef ip) {
+        if (ip.length < 7 || ip.length > 15) { // min/max length of a valid ip address
             return false;
         }
-        boolean firstSymbolInOctet = true;
-        boolean firstSymbolInOctetHigherThenTwo = false;
         boolean precededByZero = false;
         short symbolsInOctet = 0;
         short numberOfDots = 0;
-        for (int i = 0; i < ip.length; i++) {
+        int segmentValue = 0;
+        for (int i = ip.offset; i < ip.length + ip.offset; i++) {
             int sym = ip.bytes[i] & 0xff;
-            if (sym < 46 || sym > 57 || // digits and dot symbol range
-                    sym == 47) {        // a slash in a symbol range
+            if (sym < 46 || sym > 57 || sym == 47) {  // digits and dot symbol range a slash in a symbol range
                 return false;
             }
-            if (firstSymbolInOctet && (sym >= 48 && sym < 58)) {
-                firstSymbolInOctet = false;
+            if (isDigit(sym) && symbolsInOctet < 3 && !precededByZero) {
+                precededByZero = (sym == 48 && symbolsInOctet == 0);
+                segmentValue = segmentValue * 10 + (sym - '0');
                 symbolsInOctet++;
-                if (sym == 48) {
-                    precededByZero = true;
-                }
-                if (sym > 50) {
-                    firstSymbolInOctetHigherThenTwo = true;
-                }
-            } else if ((sym == 48 && precededByZero) || symbolsInOctet > 3) {
-                return false;
-            } else if (sym == 46) {
-                // if there are three digits in an octet and the first one is greater then '2' — it's not a valid ipv4 address
-                if (symbolsInOctet > 2 && firstSymbolInOctetHigherThenTwo) {
-                    return false;
-                }
-                firstSymbolInOctet = true;
+            } else if (sym == 46 && i < ip.length + ip.offset - 1) {
                 numberOfDots++;
-                symbolsInOctet = 0;
-                firstSymbolInOctetHigherThenTwo = false;
-                precededByZero = false;
                 if (numberOfDots > 3) {
                     return false;
                 }
-            } else if (sym >= 48 && sym < 58 && symbolsInOctet < 3 && !precededByZero) {
-                symbolsInOctet++;
+                segmentValue = 0;
+                symbolsInOctet = 0;
+                precededByZero = false;
             } else {
                 return false;
             }
 
-            // if there are three digits in an octet and the first one is greater then '2' — it's not a valid ipv4 address
-            if (symbolsInOctet > 2 && firstSymbolInOctetHigherThenTwo) {
+            if (segmentValue > 255) {
                 return false;
             }
         }
-        return true;
+        return numberOfDots == 3;
+    }
+
+    private static boolean isDigit(int sym) {
+        return sym >= 48 && sym < 58;
     }
 }

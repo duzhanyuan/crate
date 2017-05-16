@@ -21,18 +21,19 @@
 
 package io.crate.integrationtests;
 
-import io.crate.blob.v2.BlobIndices;
-import io.crate.test.integration.CrateIntegrationTest;
+import io.crate.blob.v2.BlobAdminClient;
+import io.crate.testing.UseJdbc;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.common.settings.ImmutableSettings;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
+@ESIntegTestCase.ClusterScope(numDataNodes = 2)
+@UseJdbc
 public class ShardStatsTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -56,20 +57,25 @@ public class ShardStatsTest extends SQLTransportIntegrationTest {
     @Test
     public void testSelectIncludingUnassignedShards() throws Exception {
         execute("create table locations (id integer primary key, name string) " +
-            "clustered into 2 shards " +
-            "with (number_of_replicas=2)");
+                "clustered into 2 shards " +
+                "with (number_of_replicas=2)");
         client().admin().cluster().prepareHealth("locations").setWaitForYellowStatus().execute().actionGet();
 
-        execute("select * from sys.shards where table_name = 'locations' order by state, \"primary\"");
+        execute("select state, \"primary\", recovery from sys.shards where table_name = 'locations' order by state, \"primary\"");
         assertEquals(6L, response.rowCount());
-        assertEquals(10, response.cols().length);
-        assertEquals("UNASSIGNED", response.rows()[5][8]);
-        assertEquals(false, response.rows()[5][5]);
+        for (int i = 4; i < response.rowCount(); i++) {
+            Object[] row = response.rows()[i];
+            assertEquals("UNASSIGNED", row[0]);
+            assertEquals(false, row[1]);
+            assertEquals(null, row[2]);
+        }
     }
 
     @Test
     public void testSelectGroupByIncludingUnassignedShards() throws Exception {
-        execute("create table locations (id integer primary key, name string) with(number_of_replicas=2)");
+        execute("create table locations (id integer primary key, name string) " +
+                "clustered into 5 shards " +
+                "with(number_of_replicas=2)");
         ensureYellow();
 
         execute("select count(*), state, \"primary\" from sys.shards " +
@@ -82,33 +88,47 @@ public class ShardStatsTest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    public void testSelectCountIncludingUnassignedShards() throws Exception {
+        execute("create table locations (id integer primary key, name string) " +
+                "clustered into 5 shards " +
+                "with(number_of_replicas=2)");
+        ensureYellow();
+
+        execute("select count(*) from sys.shards where schema_name='doc' AND table_name='locations'");
+        assertThat(response.rowCount(), is(1L));
+        assertThat((Long) response.rows()[0][0], is(15L));
+    }
+
+    @Test
     public void testTableNameBlobTable() throws Exception {
-        BlobIndices blobIndices = cluster().getInstance(BlobIndices.class);
-        Settings indexSettings = ImmutableSettings.builder()
-                .put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, 1)
-                .put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, 1)
-                .build();
-        blobIndices.createBlobTable("blobs", indexSettings).get();
+        BlobAdminClient blobAdminClient = internalCluster().getInstance(BlobAdminClient.class);
+        Settings indexSettings = Settings.builder()
+            .put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, 1)
+            .put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, 1)
+            .build();
+        blobAdminClient.createBlobTable("blobs", indexSettings).get();
         ensureGreen();
 
-        execute("select * from sys.shards where table_name = 'blobs'");
+        execute("select schema_name, table_name from sys.shards where table_name = 'blobs'");
         assertThat(response.rowCount(), is(2L));
-        for (int i = 0; i<response.rowCount(); i++) {
-            assertThat((String)response.rows()[0][1], is("blobs"));
+        for (int i = 0; i < response.rowCount(); i++) {
+            assertThat((String) response.rows()[i][0], is("blob"));
+            assertThat((String) response.rows()[i][1], is("blobs"));
         }
 
         execute("create blob table sbolb clustered into 4 shards with (number_of_replicas=3)");
         ensureYellow();
 
-        execute("select * from sys.shards where table_name = 'sbolb'");
+        execute("select schema_name, table_name from sys.shards where table_name = 'sbolb'");
         assertThat(response.rowCount(), is(16L));
         for (int i = 0; i < response.rowCount(); i++) {
-            assertThat((String)response.rows()[i][1], is("sbolb"));
+            assertThat((String) response.rows()[i][0], is("blob"));
+            assertThat((String) response.rows()[i][1], is("sbolb"));
         }
         execute("select count(*) from sys.shards " +
                 "where schema_name='blob' and table_name != 'blobs' " +
                 "and table_name != 'sbolb'");
         assertThat(response.rowCount(), is(1L));
-        assertThat((Long)response.rows()[0][0], is(0L));
+        assertThat((Long) response.rows()[0][0], is(0L));
     }
 }

@@ -22,37 +22,39 @@
 package io.crate.operation.reference.doc.lucene;
 
 
-import org.apache.lucene.index.AtomicReaderContext;
+import org.apache.lucene.index.LeafReaderContext;
 import org.elasticsearch.search.lookup.SourceLookup;
 
 import java.util.Map;
 
-public class ObjectColumnReference extends ColumnReferenceCollectorExpression<Map<String, Object>> {
+public class ObjectColumnReference extends LuceneCollectorExpression<Map<String, Object>> {
 
-    protected SourceLookup sourceLookup;
+    private SourceLookup sourceLookup;
+    private LeafReaderContext context;
+    private Map<String, Object> value;
 
     public ObjectColumnReference(String columnName) {
         super(columnName);
     }
 
     @Override
-    public void setNextDocId(int doc) {
-        sourceLookup.setNextDocId(doc);
+    public Map<String, Object> value() {
+        return value;
     }
 
     @Override
-    public void setNextReader(AtomicReaderContext context) {
-        sourceLookup.setNextReader(context);
+    public void setNextDocId(int doc) {
+        sourceLookup.setSegmentAndDocument(context, doc);
+        value = (Map<String, Object>) sourceLookup.extractValue(columnName);
+    }
+
+    @Override
+    public void setNextReader(LeafReaderContext context) {
+        this.context = context;
     }
 
     @Override
     public void startCollect(CollectorContext context) {
-        sourceLookup = context.searchContext().lookup().source();
-    }
-
-
-    @Override
-    public Map<String, Object> value() {
-        return (Map<String, Object>)sourceLookup.extractValue(columnName);
+        sourceLookup = context.sourceLookup();
     }
 }

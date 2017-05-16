@@ -21,102 +21,37 @@
 
 package io.crate.operation.scalar.arithmetic;
 
-import io.crate.metadata.FunctionIdent;
-import io.crate.operation.Input;
 import io.crate.operation.scalar.AbstractScalarFunctionsTest;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
-import io.crate.testing.TestingHelpers;
-import io.crate.types.DataType;
-import io.crate.types.DataTypes;
-import org.hamcrest.Matchers;
 import org.junit.Test;
 
-import java.util.Arrays;
+import static io.crate.testing.SymbolMatchers.isFunction;
+import static io.crate.testing.SymbolMatchers.isLiteral;
 
-import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.nullValue;
 
 public class AbsFunctionTest extends AbstractScalarFunctionsTest {
 
-    private AbsFunction getFunction(DataType type) {
-        return (AbsFunction) functions.get(new FunctionIdent(AbsFunction.NAME, Arrays.asList(type)));
-    }
-
-    private Number evaluate(Number number, DataType type) {
-        return getFunction(type).evaluate((Input) Literal.newLiteral(type, number));
-    }
-
-    private Symbol normalize(Number number, DataType type) {
-        AbsFunction function = getFunction(type);
-        return function.normalizeSymbol(new Function(function.info(),
-                Arrays.<Symbol>asList(Literal.newLiteral(type, number))));
+    @Test
+    public void testAbs() throws Exception {
+        assertEvaluate("abs(-2)", 2L);
+        assertEvaluate("abs(-2.0)", 2.0);
+        assertEvaluate("abs(cast(-2 as integer))", 2);
+        assertEvaluate("abs(cast(-2.0 as float))", 2.0f);
+        assertEvaluate("abs(null)", null);
     }
 
     @Test
-    public void testEvaluate() throws Exception {
-        Number posVal;
-        Number negVal;
-
-        for (DataType type : DataTypes.NUMERIC_PRIMITIVE_TYPES) {
-            posVal = (Number)type.value(1);
-            assertThat(evaluate((Number)type.value(posVal), type), is(type.value(1)));
-
-            assertThat(evaluate((Number)type.value(0), type), is(type.value(0)));
-
-            negVal = (Number)type.value(-1);
-            assertThat(evaluate((Number)type.value(negVal), type), is(type.value(1)));
-        }
-    }
-
-    @Test
-    public void testEvaluateNull() throws Exception {
-        for (DataType type : DataTypes.NUMERIC_PRIMITIVE_TYPES) {
-            assertThat(evaluate(null, type), nullValue());
-        }
-
-    }
-
-    @Test(expected = IllegalArgumentException.class)
     public void testWrongType() throws Exception {
-        getFunction(DataTypes.STRING);
-    }
-
-    @Test
-    public void testNormalizeValueSymbol() throws Exception {
-        Number posVal;
-        Number zeroVal;
-        Number negVal;
-        for (DataType type : DataTypes.NUMERIC_PRIMITIVE_TYPES) {
-            posVal = (Number)type.value(1);
-            TestingHelpers.assertLiteralSymbol(normalize(posVal, type),
-                    type.value(1), type);
-
-            zeroVal = (Number)type.value(0);
-            TestingHelpers.assertLiteralSymbol(normalize(zeroVal, type),
-                    type.value(0), type);
-
-            negVal = (Number)type.value(-1);
-            TestingHelpers.assertLiteralSymbol(normalize(negVal, type),
-                    type.value(1), type);
-        }
-    }
-
-    @Test
-    public void testNormalizeNull() throws Exception {
-        for (DataType type : DataTypes.NUMERIC_PRIMITIVE_TYPES) {
-            TestingHelpers.assertLiteralSymbol(normalize(null, type), null, type);
-        }
+        expectedException.expectMessage("unknown function: abs(string)");
+        assertEvaluate("abs('foo')", null);
     }
 
     @Test
     public void testNormalizeReference() throws Exception {
-        Reference height = TestingHelpers.createReference("height", DataTypes.DOUBLE);
-        AbsFunction abs = getFunction(DataTypes.DOUBLE);
-        Function function = new Function(abs.info(), Arrays.<Symbol>asList(height));
-        Function normalized = (Function) abs.normalizeSymbol(function);
-        assertThat(normalized, Matchers.sameInstance(function));
+        assertNormalize("abs(id)", isFunction("abs"));
+    }
+
+    @Test
+    public void testNormalizeNull() throws Exception {
+        assertNormalize("abs(null)", isLiteral(null));
     }
 }

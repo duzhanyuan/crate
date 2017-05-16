@@ -24,50 +24,35 @@ package io.crate.integrationtests;
 import io.crate.action.sql.SQLActionException;
 import io.crate.breaker.CrateCircuitBreakerService;
 import io.crate.breaker.RamAccountingContext;
-import io.crate.test.integration.CrateIntegrationTest;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import io.crate.testing.UseJdbc;
 import org.elasticsearch.common.settings.Settings;
-import org.hamcrest.Matchers;
 import org.junit.Before;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.SUITE)
+@UseJdbc
 public class GroupByAggregateBreakerTest extends SQLTransportIntegrationTest {
-
-    static {
-        ClassLoader.getSystemClassLoader().setDefaultAssertionStatus(true);
-    }
-
-
-    private Setup setup = new Setup(sqlExecutor);
-    private boolean setUpDone = false;
-
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
-
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
         RamAccountingContext.FLUSH_BUFFER_SIZE = 24;
-        return ImmutableSettings.builder()
-                .put(CrateCircuitBreakerService.QUERY_CIRCUIT_BREAKER_LIMIT_SETTING, 512)
-                .build();
+        return Settings.builder()
+            .put(super.nodeSettings(nodeOrdinal))
+            .put(CrateCircuitBreakerService.QUERY_CIRCUIT_BREAKER_LIMIT_SETTING.getKey(), "256b")
+            .build();
     }
 
     @Before
     public void initTestData() {
-        if (!setUpDone) {
-            this.setup.setUpEmployees();
-            setUpDone = true;
-        }
+        Setup setup = new Setup(sqlExecutor);
+        setup.setUpEmployees();
     }
 
     @Test
     public void selectGroupByWithBreaking() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage(Matchers.startsWith("[QUERY] Data too large, data for "));
+        expectedException.expectMessage("CircuitBreakingException: [query] Data too large, data for ");
+        // query takes 252 bytes of memory
+        // 252b * 1.09 = 275b => should break with limit 256b
         execute("select name, department, max(income), min(age) from employees group by name, department order by 3");
     }
 }

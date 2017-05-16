@@ -27,7 +27,7 @@ public class SelectAnalyzedStatement implements AnalyzedStatement {
 
     private final QueriedRelation relation;
 
-    public SelectAnalyzedStatement(QueriedRelation relation){
+    public SelectAnalyzedStatement(QueriedRelation relation) {
         this.relation = relation;
     }
 
@@ -40,4 +40,8 @@ public class SelectAnalyzedStatement implements AnalyzedStatement {
         return analyzedStatementVisitor.visitSelectStatement(this, context);
     }
 
+    @Override
+    public boolean isWriteOperation() {
+        return false;
+    }
 }

@@ -21,139 +21,47 @@
 
 package io.crate.operation.projectors;
 
-import com.google.common.base.Preconditions;
-import io.crate.Constants;
-import io.crate.core.collections.ArrayBucket;
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.Row;
-import io.crate.executor.transport.distributed.ResultProviderBase;
-import io.crate.operation.Input;
-import io.crate.operation.RowDownstream;
-import io.crate.operation.RowUpstream;
-import io.crate.operation.RowDownstreamHandle;
+import io.crate.data.*;
 import io.crate.operation.collect.CollectExpression;
-import io.crate.operation.projectors.sorting.OrderingByPosition;
-import io.crate.operation.projectors.sorting.RowPriorityQueue;
 
+import java.util.Collection;
 import java.util.Comparator;
 
-public class SortingTopNProjector extends ResultProviderBase implements Projector, RowUpstream, RowDownstreamHandle {
+public class SortingTopNProjector implements Projector {
 
-    private final int offset;
-    private final int maxSize;
-    private final int numOutputs;
-
-    private RowDownstreamHandle downstream;
-
-    private RowPriorityQueue<Object[]> pq;
-    private final Comparator[] comparators;
-    private final Input<?>[] inputs;
-    private final CollectExpression<?>[] collectExpressions;
-    private Object[] spare;
+    private final SortingTopNCollector collector;
 
     /**
-     * @param inputs             contains output {@link io.crate.operation.Input}s and orderBy {@link io.crate.operation.Input}s
+     * @param inputs             contains output {@link Input}s and orderBy {@link Input}s
      * @param collectExpressions gathered from outputs and orderBy inputs
-     * @param numOutputs         <code>inputs</code> contains this much output {@link io.crate.operation.Input}s starting form index 0
-     * @param orderBy            indices of {@link io.crate.operation.Input}s in parameter <code>inputs</code> we sort by
-     * @param reverseFlags       for every index orderBy a boolean indicates ascending (<code>false</code>) or descending (<code>true</code>) order
+     * @param numOutputs         <code>inputs</code> contains this much output {@link Input}s starting form index 0
+     * @param ordering           ordering that is used to compare the rows
      * @param limit              the number of rows to gather, pass to upStream
      * @param offset             the initial offset, this number of rows are skipped
      */
-    public SortingTopNProjector(Input<?>[] inputs,
-                                CollectExpression<?>[] collectExpressions,
+    public SortingTopNProjector(Collection<? extends Input<?>> inputs,
+                                Iterable<? extends CollectExpression<Row, ?>> collectExpressions,
                                 int numOutputs,
-                                int[] orderBy,
-                                boolean[] reverseFlags,
-                                Boolean[] nullsFirst,
+                                Comparator<Object[]> ordering,
                                 int limit,
                                 int offset) {
-        Preconditions.checkArgument(limit >= TopN.NO_LIMIT, "invalid limit");
-        Preconditions.checkArgument(offset >= 0, "invalid offset");
-        assert nullsFirst.length == reverseFlags.length;
-
-        this.inputs = inputs;
-        this.numOutputs = numOutputs;
-        this.collectExpressions = collectExpressions;
-        this.offset = offset;
-
-        if (limit == TopN.NO_LIMIT) {
-            limit = Constants.DEFAULT_SELECT_LIMIT;
-        }
-        this.maxSize = this.offset + limit;
-        comparators = new Comparator[orderBy.length];
-        for (int i = 0; i < orderBy.length; i++) {
-            int col = orderBy[i];
-            boolean reverse = reverseFlags[i];
-            comparators[i] = OrderingByPosition.arrayOrdering(col, reverse, nullsFirst[i]);
-        }
+        collector = new SortingTopNCollector(
+            inputs,
+            collectExpressions,
+            numOutputs,
+            ordering,
+            limit,
+            offset
+        );
     }
 
     @Override
-    public void startProjection() {
-        super.startProjection();
-        synchronized (this){
-            if (pq==null) {
-                pq = new RowPriorityQueue<>(maxSize, comparators);
-            }
-        }
+    public BatchIterator apply(BatchIterator batchIterator) {
+        return CollectingBatchIterator.newInstance(batchIterator, collector, collector.numOutputs());
     }
 
     @Override
-    public synchronized boolean setNextRow(Row row) {
-        if (spare == null) {
-            spare = new Object[inputs.length];
-        }
-        evaluateRow(row);
-        spare = pq.insertWithOverflow(spare);
+    public boolean providesIndependentScroll() {
         return true;
     }
-
-    private synchronized void evaluateRow(Row row) {
-        for (CollectExpression<?> collectExpression : collectExpressions) {
-            collectExpression.setNextRow(row);
-        }
-        int i = 0;
-        for (Input<?> input : inputs) {
-            spare[i++] = input.value();
-        }
-    }
-
-    @Override
-    public Bucket doFinish() {
-        Bucket bucket;
-        if (pq != null){
-            final int resultSize = Math.max(pq.size() - offset, 0);
-            Object[][] rows = new Object[resultSize][];
-            for (int i = resultSize - 1; i >= 0; i--) {
-                rows[i] = pq.pop();
-            }
-            pq.clear();
-            bucket = new ArrayBucket(rows, numOutputs);
-        } else {
-            bucket = Bucket.EMPTY;
-        }
-        if (downstream != null) {
-            for (Row row : bucket) {
-                downstream.setNextRow(row);
-            }
-            downstream.finish();
-        }
-        return bucket;
-    }
-
-    @Override
-    public Throwable doFail(Throwable t) {
-        if (downstream != null) {
-            downstream.fail(t);
-        }
-        return t;
-    }
-
-    @Override
-    public void downstream(RowDownstream downstream) {
-        this.downstream = downstream.registerUpstream(this);
-    }
-
-
 }

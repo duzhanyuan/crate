@@ -22,307 +22,489 @@
 package org.elasticsearch.action.bulk;
 
 import com.carrotsearch.hppc.cursors.IntCursor;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.SettableFuture;
-import io.crate.Constants;
-import io.crate.core.collections.Row;
-import io.crate.exceptions.Exceptions;
-import io.crate.executor.transport.ShardUpsertRequest;
-import io.crate.executor.transport.ShardUpsertResponse;
-import io.crate.operation.collect.ShardingProjector;
-import io.crate.planner.symbol.*;
-import io.crate.types.DataType;
-import org.elasticsearch.ExceptionsHelper;
-import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
-import org.elasticsearch.action.admin.indices.create.TransportCreateIndexAction;
+import com.google.common.base.Optional;
+import com.google.common.base.Predicate;
+import com.google.common.base.Predicates;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.FutureCallback;
+import io.crate.exceptions.JobKilledException;
+import io.crate.exceptions.SQLExceptions;
+import io.crate.executor.transport.ShardRequest;
+import io.crate.executor.transport.ShardResponse;
+import io.crate.metadata.PartitionName;
+import io.crate.settings.CrateSetting;
+import io.crate.types.DataTypes;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.admin.indices.create.BulkCreateIndicesRequest;
+import org.elasticsearch.action.admin.indices.create.BulkCreateIndicesResponse;
+import org.elasticsearch.action.admin.indices.create.TransportBulkCreateIndicesAction;
 import org.elasticsearch.action.support.AutoCreateIndex;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.logging.ESLogger;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.io.stream.NotSerializableExceptionWrapper;
 import org.elasticsearch.common.logging.Loggers;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
+import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.shard.ShardId;
-import org.elasticsearch.indices.IndexAlreadyExistsException;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Processor to do Bulk Inserts, similar to {@link BulkProcessor}
+ * Processor to do Bulk Inserts, similar to {@link org.elasticsearch.action.bulk.BulkProcessor}
  * but less flexible (only supports IndexRequests)
- *
+ * <p>
  * If the Bulk threadPool Queue is full retries are made and
  * the {@link #add} method will start to block.
  */
-public class BulkShardProcessor {
+public class BulkShardProcessor<Request extends ShardRequest> {
 
-    private static final AssignmentVisitor ASSIGNMENT_VISITOR = new AssignmentVisitor();
-    private static final ESLogger LOGGER = Loggers.getLogger(BulkShardProcessor.class);
+    public static final CrateSetting<TimeValue> BULK_REQUEST_TIMEOUT_SETTING = CrateSetting.of(Setting.positiveTimeSetting(
+        "bulk.request_timeout", new TimeValue(1, TimeUnit.MINUTES),
+        Setting.Property.NodeScope, Setting.Property.Dynamic), DataTypes.STRING);
+
+    public static final int DEFAULT_BULK_SIZE = 10_000;
+
+    private static final int MAX_CREATE_INDICES_BULK_SIZE = 100;
 
     private final boolean autoCreateIndices;
-    private final int bulkSize;
+    private final Predicate<String> shouldAutocreateIndexPredicate;
 
-    private final Map<ShardId, ShardUpsertRequest> requestsByShard = new HashMap<>();
+    private final int bulkSize;
+    private final UUID jobId;
+    private final int createIndicesBulkSize;
+
+    private final Map<ShardId, Request> requestsByShard = new HashMap<>();
     private final AtomicInteger globalCounter = new AtomicInteger(0);
-    private final AtomicInteger counter = new AtomicInteger(0);
+    private final AtomicInteger requestItemCounter = new AtomicInteger(0);
     private final AtomicInteger pending = new AtomicInteger(0);
     private final Semaphore executeLock = new Semaphore(1);
 
-    private final SettableFuture<BitSet> result;
+    private final CompletableFuture<BitSet> result;
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private final BitSet responses;
     private final Object responsesLock = new Object();
-    private final boolean overwriteDuplicates;
+    private final boolean isTraceEnabled;
+    private final boolean isDebugEnabled;
     private volatile boolean closed = false;
 
     private final ClusterService clusterService;
-    private final TransportCreateIndexAction transportCreateIndexAction;
-    private final AutoCreateIndex autoCreateIndex;
+    private final TransportBulkCreateIndicesAction transportBulkCreateIndicesAction;
+
+    private final AtomicInteger pendingNewIndexRequests = new AtomicInteger(0);
+    private final Map<String, List<PendingRequest>> requestsForNewIndices = new HashMap<>();
     private final Set<String> indicesCreated = new HashSet<>();
+    private final Set<String> indicesDeleted = new HashSet<>();
 
     private final BulkRetryCoordinatorPool bulkRetryCoordinatorPool;
-    private final TimeValue requestTimeout;
 
-    private final boolean continueOnErrors;
-    private final ShardingProjector shardingProjector;
-    private final AssignmentVisitorContext assignmentVisitorContext;
+    private final BulkRequestBuilder<Request> requestBuilder;
+    private final BulkRequestExecutor<Request> requestExecutor;
 
-
-    @Nullable
-    private Map<Reference, Symbol> updateAssignments;
-    @Nullable
-    private Map<Reference, Symbol> insertAssignments;
-
-    private final ResponseListener responseListener = new ResponseListener(false);
-    private final ResponseListener retryResponseListener = new ResponseListener(true);
-
+    private static final Logger LOGGER = Loggers.getLogger(BulkShardProcessor.class);
 
     public BulkShardProcessor(ClusterService clusterService,
-                              Settings settings,
-                              TransportCreateIndexAction transportCreateIndexAction,
-                              ShardingProjector shardingProjector,
-                              boolean autoCreateIndices,
-                              boolean overwriteDuplicates,
-                              int bulkSize,
+                              TransportBulkCreateIndicesAction transportBulkCreateIndicesAction,
+                              IndexNameExpressionResolver indexNameExpressionResolver,
+                              final Settings settings,
                               BulkRetryCoordinatorPool bulkRetryCoordinatorPool,
-                              boolean continueOnErrors,
-                              @Nullable Map<Reference, Symbol> updateAssignments,
-                              @Nullable Map<Reference, Symbol> insertAssignments) {
-        assert updateAssignments != null | insertAssignments != null;
+                              final boolean autoCreateIndices,
+                              int bulkSize,
+                              BulkRequestBuilder<Request> requestBuilder,
+                              BulkRequestExecutor<Request> requestExecutor,
+                              UUID jobId) {
         this.bulkRetryCoordinatorPool = bulkRetryCoordinatorPool;
         this.clusterService = clusterService;
         this.autoCreateIndices = autoCreateIndices;
-        this.overwriteDuplicates = overwriteDuplicates;
         this.bulkSize = bulkSize;
-        this.continueOnErrors = continueOnErrors;
+        this.jobId = jobId;
+        this.createIndicesBulkSize = Math.min(bulkSize, MAX_CREATE_INDICES_BULK_SIZE);
+        this.isTraceEnabled = LOGGER.isTraceEnabled();
+        this.isDebugEnabled = LOGGER.isDebugEnabled();
 
-        this.autoCreateIndex = new AutoCreateIndex(settings);
-        this.transportCreateIndexAction = transportCreateIndexAction;
-        this.shardingProjector = shardingProjector;
 
-        this.updateAssignments = updateAssignments;
-        this.insertAssignments = insertAssignments;
+        if (autoCreateIndices) {
+            final AutoCreateIndex autoCreateIndex = new AutoCreateIndex(
+                settings,clusterService.getClusterSettings(), indexNameExpressionResolver);
 
-        requestTimeout = settings.getAsTime("insert_by_query.request_timeout", BulkShardRequest.DEFAULT_TIMEOUT);
-        assignmentVisitorContext = processAssignments(updateAssignments, insertAssignments);
+            shouldAutocreateIndexPredicate = new Predicate<String>() {
+                @Override
+                public boolean apply(@Nullable String input) {
+                    assert input != null : "input must not be null";
+                    return autoCreateIndex.shouldAutoCreate(input, BulkShardProcessor.this.clusterService.state());
+                }
+            };
+        } else {
+            shouldAutocreateIndexPredicate = Predicates.alwaysFalse();
+        }
 
+        this.transportBulkCreateIndicesAction = transportBulkCreateIndicesAction;
         responses = new BitSet();
-        result = SettableFuture.create();
+        result = new CompletableFuture<>();
+
+        this.requestExecutor = requestExecutor;
+        this.requestBuilder = requestBuilder;
     }
 
-    public boolean add(String indexName,
-                       Row row,
-                       @Nullable Long version) {
+    public boolean add(String indexName, Request.Item item, @Nullable String routing) {
+        assert item != null : "request item must not be null";
+        if (indicesDeleted.contains(indexName)) {
+            trace("index already deleted, will ignore item");
+            return true;
+        }
+
         pending.incrementAndGet();
         Throwable throwable = failure.get();
         if (throwable != null) {
-            result.setException(throwable);
+            result.completeExceptionally(throwable);
             return false;
         }
 
-        if (autoCreateIndices) {
-            createIndexIfRequired(indexName);
+        ShardId shardId = shardId(indexName, item.id(), routing);
+        if (shardId == null) {
+            addRequestForNewIndex(indexName, item, routing);
+        } else {
+            try {
+                // will only block if retries/writer are active
+                bulkRetryCoordinatorPool.coordinator(shardId).acquireReadLock();
+            } catch (InterruptedException e) {
+                Thread.interrupted();
+            } catch (Throwable e) {
+                setFailure(e);
+                return false;
+            }
+            partitionRequestByShard(shardId, item, routing);
+        }
+        executeIfNeeded();
+        return true;
+    }
+
+    public boolean addForExistingShard(ShardId shardId, Request.Item item, @Nullable String routing) {
+        assert item != null : "item must not be null";
+        pending.incrementAndGet();
+        Throwable throwable = failure.get();
+        if (throwable != null) {
+            result.completeExceptionally(throwable);
+            return false;
         }
 
-        shardingProjector.setNextRow(row);
-        ShardId shardId = shardId(indexName, shardingProjector.id(), shardingProjector.routing());
+        // will only block if retries/writer are active
         try {
-            bulkRetryCoordinatorPool.coordinator(shardId).retryLock().acquireReadLock();
+            bulkRetryCoordinatorPool.coordinator(shardId).acquireReadLock();
         } catch (InterruptedException e) {
             Thread.interrupted();
         } catch (Throwable e) {
             setFailure(e);
             return false;
         }
-
-        partitionRequestByShard(shardId, shardingProjector.id(), row, shardingProjector.routing(), version);
+        partitionRequestByShard(shardId, item, routing);
         executeIfNeeded();
         return true;
     }
 
+    @Nullable
     private ShardId shardId(String indexName, String id, @Nullable String routing) {
-        return clusterService.operationRouting().indexShards(
+        ShardId shardId = null;
+        try {
+            shardId = clusterService.operationRouting().indexShards(
                 clusterService.state(),
                 indexName,
-                Constants.DEFAULT_MAPPING_TYPE,
                 id,
                 routing
-        ).shardId();
+            ).shardId();
+        } catch (IndexNotFoundException e) {
+            if (!autoCreateIndices) {
+                throw e;
+            }
+        }
+        return shardId;
     }
 
-    private void partitionRequestByShard(ShardId shardId,
-                                         String id,
-                                         Row row,
-                                         @Nullable String routing,
-                                         @Nullable Long version) {
+    private void addRequestForNewIndex(String indexName, Request.Item item, @Nullable String routing) {
+        synchronized (requestsForNewIndices) {
+            List<PendingRequest> pendingRequestList = requestsForNewIndices.get(indexName);
+            if (pendingRequestList == null) {
+                pendingRequestList = new ArrayList<>();
+                requestsForNewIndices.put(indexName, pendingRequestList);
+            }
+            pendingRequestList.add(new PendingRequest(indexName, item, routing));
+            pendingNewIndexRequests.incrementAndGet();
+        }
+    }
+
+    private void partitionRequestByShard(ShardId shardId, Request.Item item, @Nullable String routing) {
         try {
             executeLock.acquire();
-            ShardUpsertRequest updateRequest = requestsByShard.get(shardId);
-            if (updateRequest == null) {
-                updateRequest = new ShardUpsertRequest(
-                        shardId,
-                        assignmentVisitorContext.dataTypes(),
-                        assignmentVisitorContext.columnIndicesToStream(),
-                        updateAssignments,
-                        insertAssignments);
-                updateRequest.timeout(requestTimeout);
-                updateRequest.continueOnError(continueOnErrors);
-                updateRequest.overwriteDuplicates(overwriteDuplicates);
-                requestsByShard.put(shardId, updateRequest);
+            Request request = requestsByShard.get(shardId);
+            if (request == null) {
+                request = requestBuilder.newRequest(shardId, routing);
+                requestsByShard.put(shardId, request);
             }
-            counter.getAndIncrement();
-            updateRequest.add(globalCounter.getAndIncrement(), id, row, version, routing);
+            requestItemCounter.getAndIncrement();
+            request.add(globalCounter.getAndIncrement(), item);
         } catch (InterruptedException e) {
             Thread.interrupted();
         } finally {
             executeLock.release();
-        }
-    }
-
-    public ListenableFuture<BitSet> result() {
-        return result;
-    }
-
-    public void close() {
-        trace("close");
-        closed = true;
-        executeRequests();
-        if (pending.get() == 0) {
-            setResult();
-        }
-    }
-
-    private void setFailure(Throwable e) {
-        failure.compareAndSet(null, e);
-        result.setException(e);
-    }
-
-    private void setResult() {
-        Throwable throwable = failure.get();
-
-        if (throwable == null) {
-            result.set(responses);
-        } else {
-            result.setException(throwable);
-        }
-    }
-
-    private void setResultIfDone(int successes) {
-        for (int i = 0; i < successes; i++) {
-            if (pending.decrementAndGet() == 0 && closed) {
-                setResult();
-            }
-        }
-    }
-
-    private void executeIfNeeded() {
-        if (closed || counter.get() >= bulkSize) {
-            executeRequests();
         }
     }
 
     private void executeRequests() {
         try {
             executeLock.acquire();
-            for (Iterator<Map.Entry<ShardId, ShardUpsertRequest>> it = requestsByShard.entrySet().iterator(); it.hasNext(); ) {
-                Map.Entry<ShardId, ShardUpsertRequest> entry = it.next();
-                ShardUpsertRequest shardUpsertRequest = entry.getValue();
-                BulkRetryCoordinator coordinator = bulkRetryCoordinatorPool.coordinator(entry.getKey());
-                coordinator.execute(shardUpsertRequest, responseListener);
+            for (Iterator<Map.Entry<ShardId, Request>> it = requestsByShard.entrySet().iterator(); it.hasNext(); ) {
+                if (failure.get() != null) {
+                    return;
+                }
+                Map.Entry<ShardId, Request> entry = it.next();
+                final Request request = entry.getValue();
+                final ShardId shardId = entry.getKey();
+                requestExecutor.execute(request, new ActionListener<ShardResponse>() {
+                    @Override
+                    public void onResponse(ShardResponse response) {
+                        processResponse(response);
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) {
+                        Throwable t = SQLExceptions.unwrap(e, throwable -> throwable instanceof RuntimeException);
+                        if (t instanceof ClassCastException || t instanceof NotSerializableExceptionWrapper) {
+                            // this is caused by passing mixed argument types into a bulk upsert.
+                            // it can happen after an valid request already succeeded and data was written.
+                            // so never bubble, but rather mark all items of this request as failed.
+                            markItemsAsFailedAndReleaseRetryLock(request, Optional.absent());
+                            if (isDebugEnabled) {
+                                LOGGER.debug("ShardUpsert: {} items failed", t, request.items().size());
+                            }
+                            return;
+                        }
+                        processFailure(t, shardId, request, Optional.absent());
+                    }
+                });
                 it.remove();
             }
         } catch (InterruptedException e) {
             Thread.interrupted();
-        } catch (Throwable t) {
-            setFailure(t);
+        } catch (Throwable e) {
+            setFailure(e);
         } finally {
-            counter.set(0);
+            requestItemCounter.set(0);
             executeLock.release();
         }
     }
 
-    private void createIndexIfRequired(final String indexName) {
-        if (!indicesCreated.contains(indexName) || autoCreateIndex.shouldAutoCreate(indexName, clusterService.state())) {
-            try {
-                transportCreateIndexAction.execute(new CreateIndexRequest(indexName).cause("bulkShardProcessor")).actionGet();
-                indicesCreated.add(indexName);
-            } catch (Throwable e) {
-                e = ExceptionsHelper.unwrapCause(e);
-                if (e instanceof IndexAlreadyExistsException) {
-                    // copy from with multiple readers might attempt to create the index
-                    // multiple times
-                    // can be ignored.
-                    if (LOGGER.isTraceEnabled()) {
-                        LOGGER.trace("copy from index {}", e.getMessage());
+    private void createPendingIndicesAndExecuteRequests() {
+        final List<PendingRequest> pendings = new ArrayList<>();
+        final Set<String> indices;
+
+        synchronized (requestsForNewIndices) {
+            indices = ImmutableSet.copyOf(
+                Iterables.filter(
+                    Sets.difference(requestsForNewIndices.keySet(), indicesCreated),
+                    shouldAutocreateIndexPredicate)
+            );
+            for (Map.Entry<String, List<PendingRequest>> entry : requestsForNewIndices.entrySet()) {
+                pendings.addAll(entry.getValue());
+            }
+            requestsForNewIndices.clear();
+            pendingNewIndexRequests.set(0);
+        }
+
+
+        if (pendings.size() > 0 || indices.size() > 0) {
+            if (isDebugEnabled) {
+                LOGGER.debug("create {} pending indices in bulk...", indices.size());
+            }
+            BulkCreateIndicesRequest bulkCreateIndicesRequest = new BulkCreateIndicesRequest(indices, jobId);
+
+            final FutureCallback<Void> indicesCreatedCallback = new FutureCallback<Void>() {
+                @Override
+                public void onSuccess(@Nullable Void result) {
+                    if (failure.get() != null) {
+                        return;
                     }
-                    indicesCreated.add(indexName);
-                } else {
-                    setFailure(e);
+                    trace("applying pending requests for created indices...");
+                    Iterator<PendingRequest> it = pendings.iterator();
+                    while (it.hasNext()) {
+                        PendingRequest pendingRequest = it.next();
+                        // add pending requests for created indices
+                        ShardId shardId = shardId(pendingRequest.indexName, pendingRequest.item.id(), pendingRequest.routing);
+                        if (shardId == null) {
+                            // seems like index is deleted meanwhile, mark item as failed and remove pending
+                            indicesDeleted.add(pendingRequest.indexName);
+                            it.remove();
+                            synchronized (responsesLock) {
+                                responses.set(globalCounter.getAndIncrement(), false);
+                            }
+                            setResultIfDone(1);
+                            continue;
+                        }
+                        partitionRequestByShard(shardId, pendingRequest.item, pendingRequest.routing);
+                    }
+                    trace("added %d pending requests, lets see if we can execute them", pendings.size());
+                    executeRequestsIfNeeded();
                 }
+
+                @Override
+                public void onFailure(@Nonnull Throwable t) {
+                    setFailure(t);
+                }
+            };
+
+            if (indices.isEmpty()) {
+                indicesCreatedCallback.onSuccess(null);
+            } else {
+                transportBulkCreateIndicesAction.execute(bulkCreateIndicesRequest, new ActionListener<BulkCreateIndicesResponse>() {
+                    @Override
+                    public void onResponse(BulkCreateIndicesResponse response) {
+                        indicesCreated.addAll(indices);
+                        indicesCreatedCallback.onSuccess(null);
+                    }
+
+                    @Override
+                    public void onFailure(Exception t) {
+                        indicesCreatedCallback.onFailure(t);
+                    }
+                });
             }
+        }
+
+    }
+
+
+    public CompletableFuture<BitSet> result() {
+        return result;
+    }
+
+    public void close() {
+        trace("close");
+        closed = true;
+        executeIfNeeded();
+        if (pending.get() == 0) {
+            setResult();
         }
     }
 
-    private void processResponse(ShardUpsertResponse shardUpsertResponse) {
-        trace("execute response");
-        for (int i = 0; i < shardUpsertResponse.locations().size(); i++) {
-            int location = shardUpsertResponse.locations().get(i);
-            synchronized (responsesLock) {
-                responses.set(location, shardUpsertResponse.responses().get(i) != null);
-            }
-        }
-        setResultIfDone(shardUpsertResponse.locations().size());
+    public void kill(@Nullable Throwable throwable) {
+        failure.compareAndSet(null, throwable);
+        result.completeExceptionally(new InterruptedException(JobKilledException.MESSAGE));
     }
 
-    private void processFailure(Throwable e, ShardUpsertRequest shardUpsertRequest, boolean repeatingRetry) {
-        trace("execute failure");
-        e = Exceptions.unwrap(e);
-        ShardId shardId = new ShardId(shardUpsertRequest.index(), shardUpsertRequest.shardId());
+    private void setFailure(Throwable e) {
+        failure.compareAndSet(null, e);
+        result.completeExceptionally(e);
+    }
 
-        BulkRetryCoordinator coordinator;
-        try {
-            coordinator = bulkRetryCoordinatorPool.coordinator(shardId);
-        } catch (Throwable t) {
-            setFailure(t);
+    private void setResult() {
+        Throwable throwable = failure.get();
+        if (throwable == null) {
+            result.complete(responses);
+        } else {
+            result.completeExceptionally(throwable);
+        }
+    }
+
+    private void setResultIfDone(int successes) {
+        if (pending.addAndGet(-successes) == 0 && closed) {
+            setResult();
+        }
+    }
+
+    private void executeIfNeeded() {
+        // we don't want to auto-create indices for every index item,
+        // so execute this only after a certain threshold or if the whole operation is closed/finished.
+        if (((closed && pendingNewIndexRequests.get() > 0)
+             || requestsForNewIndices.size() >= createIndicesBulkSize
+             || pendingNewIndexRequests.get() >= bulkSize) && failure.get() == null) {
+            createPendingIndicesAndExecuteRequests();
+        } else {
+            executeRequestsIfNeeded();
+        }
+    }
+
+    private void executeRequestsIfNeeded() {
+        if ((closed || requestItemCounter.get() >= bulkSize) && failure.get() == null) {
+            executeRequests();
+        }
+    }
+
+    private void processResponse(ShardResponse response) {
+        trace("process response");
+        if (response.failure() != null) {
+            setFailure(response.failure());
             return;
         }
-        if (e instanceof EsRejectedExecutionException) {
-            LOGGER.trace("{}, retrying", e.getMessage());
-            coordinator.retry(shardUpsertRequest, repeatingRetry, retryResponseListener);
-        } else {
-            if (repeatingRetry) {
-                // release failed retry
-                try {
-                    coordinator.retryLock().releaseWriteLock();
-                } catch (InterruptedException ex) {
-                    Thread.interrupted();
-                }
+        for (int i = 0; i < response.itemIndices().size(); i++) {
+            int location = response.itemIndices().get(i);
+            ShardResponse.Failure failure = response.failures().get(i);
+            boolean succeeded = failure == null;
+            if (!succeeded && isDebugEnabled) {
+                LOGGER.debug("ShardUpsert Item {} failed: {}", location, failure);
             }
-            for (IntCursor intCursor : shardUpsertRequest.locations()) {
+            synchronized (responsesLock) {
+                responses.set(location, succeeded);
+            }
+        }
+        setResultIfDone(response.itemIndices().size());
+        trace("response executed.");
+    }
+
+    private void processFailure(Throwable e,
+                                final ShardId shardId,
+                                final Request request,
+                                Optional<BulkRetryCoordinator> retryCoordinator) {
+        trace("execute failure");
+        e = SQLExceptions.unwrap(e);
+
+        // index missing exception on a partition should never bubble, mark all items as failed instead
+        if (e instanceof IndexNotFoundException && PartitionName.isPartition(request.index())) {
+            indicesDeleted.add(request.index());
+            markItemsAsFailedAndReleaseRetryLock(request, retryCoordinator);
+            return;
+        }
+
+        final BulkRetryCoordinator coordinator;
+        if (retryCoordinator.isPresent()) {
+            coordinator = retryCoordinator.get();
+        } else {
+            try {
+                coordinator = bulkRetryCoordinatorPool.coordinator(shardId);
+            } catch (Throwable coordinatorException) {
+                setFailure(coordinatorException);
+                return;
+            }
+        }
+        if (e instanceof EsRejectedExecutionException) {
+            trace("rejected execution: [%s] - retrying", e.getMessage());
+            coordinator.retry(request, requestExecutor, new ActionListener<ShardResponse>() {
+                @Override
+                public void onResponse(ShardResponse response) {
+                    processResponse(response);
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    processFailure(e, shardId, request, Optional.of(coordinator));
+                }
+            });
+        } else {
+            if (retryCoordinator.isPresent()) {
+                // release failed retry
+                coordinator.releaseWriteLock();
+            }
+            for (IntCursor intCursor : request.itemIndices()) {
                 synchronized (responsesLock) {
                     responses.set(intCursor.value, false);
                 }
@@ -331,104 +513,46 @@ public class BulkShardProcessor {
         }
     }
 
-    /**
-     * Process update and insert assignments to extract data types and define which row values
-     * must be streamed.
-     */
-    public static AssignmentVisitorContext processAssignments(@Nullable Map<Reference, Symbol> updateAssignments,
-                                                              @Nullable Map<Reference, Symbol> insertAssignments) {
-        AssignmentVisitorContext context = new AssignmentVisitorContext();
-        if (updateAssignments != null) {
-            for (Symbol symbol : updateAssignments.values()) {
-                ASSIGNMENT_VISITOR.process(symbol, context);
+    private void markItemsAsFailedAndReleaseRetryLock(final Request request,
+                                                      Optional<BulkRetryCoordinator> retryCoordinator) {
+        int size = request.itemIndices().size();
+        for (int i = 0; i < request.itemIndices().size(); i++) {
+            int location = request.itemIndices().get(i);
+            synchronized (responsesLock) {
+                responses.set(location, false);
             }
         }
-        if (insertAssignments != null) {
-            for (Symbol symbol : insertAssignments.values()) {
-                ASSIGNMENT_VISITOR.process(symbol, context);
-            }
+        setResultIfDone(size);
+
+        if (retryCoordinator.isPresent()) {
+            // release failed retry
+            retryCoordinator.get().releaseWriteLock();
         }
-
-        Collections.sort(context.inputColumns, new Comparator<InputColumn>() {
-            @Override
-            public int compare(InputColumn o1, InputColumn o2) {
-                return Integer.compare(o1.index(), o2.index());
-            }
-        });
-
-        context.dataTypes = new DataType[context.inputColumns.size()];
-        for (int i = 0; i < context.inputColumns.size(); i++) {
-            context.dataTypes[i] = context.inputColumns.get(i).valueType();
-        }
-
-        return context;
     }
 
-    private void trace(String message) {
-        if (LOGGER.isTraceEnabled()) {
+    private void trace(String message, Object... args) {
+        if (isTraceEnabled) {
             LOGGER.trace("BulkShardProcessor: pending: {}; {}",
-                    pending.get(), message);
+                pending.get(),
+                String.format(Locale.ENGLISH, message, args));
         }
     }
 
-    class ResponseListener implements BulkRetryCoordinator.RequestActionListener<ShardUpsertRequest, ShardUpsertResponse> {
+    static class PendingRequest {
+        private final String indexName;
+        private final ShardRequest.Item item;
+        @Nullable
+        private final String routing;
 
-        private final boolean retryListener;
 
-        private ResponseListener(boolean retryListener) {
-            this.retryListener = retryListener;
-        }
-
-        @Override
-        public void onResponse(ShardUpsertRequest shardUpsertRequest,
-                               ShardUpsertResponse shardUpsertResponse) {
-            processResponse(shardUpsertResponse);
-        }
-
-        @Override
-        public void onFailure(ShardUpsertRequest shardUpsertRequest, Throwable e) {
-            processFailure(e, shardUpsertRequest, retryListener);
+        PendingRequest(String indexName, ShardRequest.Item item, @Nullable String routing) {
+            this.indexName = indexName;
+            this.item = item;
+            this.routing = routing;
         }
     }
 
-    public static class AssignmentVisitorContext {
-
-        private List<InputColumn> inputColumns = new ArrayList<>();
-        private List<Integer> indices = new ArrayList<>();
-        private DataType[] dataTypes;
-
-        public List<Integer> columnIndicesToStream() {
-            return indices;
-        }
-
-        public DataType[] dataTypes() {
-            return dataTypes;
-        }
+    public interface BulkRequestBuilder<Request extends ShardRequest> {
+        Request newRequest(ShardId shardId, String routing);
     }
-
-    static class AssignmentVisitor extends SymbolVisitor<AssignmentVisitorContext, Symbol> {
-
-        @Override
-        public Symbol visitInputColumn(InputColumn inputColumn, AssignmentVisitorContext context) {
-            if (!context.inputColumns.contains(inputColumn)) {
-                context.inputColumns.add(inputColumn);
-                context.indices.add(inputColumn.index());
-            }
-            return inputColumn;
-        }
-
-        @Override
-        public Symbol visitFunction(Function symbol, AssignmentVisitorContext context) {
-            for (Symbol argument : symbol.arguments()) {
-                process(argument, context);
-            }
-            return symbol;
-        }
-
-        @Override
-        protected Symbol visitSymbol(Symbol symbol, AssignmentVisitorContext context) {
-            return symbol;
-        }
-    }
-
 }

@@ -21,43 +21,28 @@
 
 package io.crate.executor;
 
-import com.google.common.util.concurrent.ListenableFuture;
+import io.crate.data.BatchConsumer;
+import io.crate.data.Row;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
-/**
- * A task gets executed as part of or in the context of a
- * {@linkplain io.crate.executor.Job} and returns a result asynchronously
- * as a list of futures.
- *
- * create a task, call {@linkplain #start()} and wait for the futures returned
- * by {@linkplain #result()} to return the result or raise an exception.
- *
- * If tasks are chained, it is necessary to call {@linkplain #upstreamResult(java.util.List)}
- * with the result of the former task, so the current task can itself wait for
- * the upstream result if necessary before it starts its execution.
- *
- * @see io.crate.executor.TaskExecutor
- * @see io.crate.executor.Job
- *
- */
 public interface Task {
 
     /**
-     * start the execution
+     * execute the task if it represents a single operation.
+     * <p>
+     * The consumer will receive a BatchIterator containing the result.
      */
-    void start();
+    void execute(BatchConsumer consumer, Row parameters);
 
     /**
-     * Get the result of the task execution as a list of
-     * {@linkplain com.google.common.util.concurrent.ListenableFuture} instances.
-     * This method may be called before {@linkplain #start()} is called.
+     * execute the task if it represents a bulk operation.
+     * <p>
+     * The result will be a List containing the row-counts per operation.
+     * Elements of the list cannot be null, but will be -1 if unknown and -2 if an error occurred.
+     *
+     * @throws UnsupportedOperationException if the task doesn't support bulk operations
      */
-    List<ListenableFuture<TaskResult>> result();
-
-    /**
-     * let this class get to know the result of the former ("upstream") task
-     * @param result the result of the "upstream" task.
-     */
-    void upstreamResult(List<ListenableFuture<TaskResult>> result);
+    List<CompletableFuture<Long>> executeBulk();
 }

@@ -24,17 +24,16 @@ package io.crate.operation.operator.any;
 import io.crate.metadata.FunctionImplementation;
 import io.crate.metadata.FunctionInfo;
 import io.crate.operation.operator.OperatorModule;
-import io.crate.planner.symbol.Function;
 import io.crate.sql.tree.ComparisonExpression;
 
-public class AnyLteOperator extends AnyOperator<AnyLteOperator> {
+public class AnyLteOperator extends AnyOperator {
 
     public static final String NAME = OPERATOR_PREFIX + ComparisonExpression.Type.LESS_THAN_OR_EQUAL.getValue();
 
     static class AnyLteResolver extends AnyResolver {
 
         @Override
-        public FunctionImplementation<Function> newInstance(FunctionInfo info) {
+        public FunctionImplementation newInstance(FunctionInfo info) {
             return new AnyLteOperator(info);
         }
 

@@ -21,53 +21,62 @@
 
 package io.crate.planner.projection;
 
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.Aggregation;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.AggregateMode;
+import io.crate.analyze.symbol.Aggregation;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.Symbols;
+import io.crate.collections.Lists2;
+import io.crate.metadata.RowGranularity;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 public class GroupProjection extends Projection {
 
-    List<Symbol> keys;
-    List<Aggregation> values;
-    List<Symbol> outputs;
+    private List<Symbol> keys;
+    private List<Aggregation> values;
+    private List<Symbol> outputs;
 
+    private AggregateMode mode;
     private RowGranularity requiredGranularity = RowGranularity.CLUSTER;
 
-    public static final ProjectionFactory<GroupProjection> FACTORY = new ProjectionFactory<GroupProjection>() {
-        @Override
-        public GroupProjection newInstance() {
-            return new GroupProjection();
-        }
-    };
-
-    public GroupProjection() {
-    }
-
-    public GroupProjection(List<Symbol> keys, List<Aggregation> values) {
+    public GroupProjection(List<Symbol> keys,
+                           List<Aggregation> values,
+                           AggregateMode mode,
+                           RowGranularity requiredGranularity) {
         this.keys = keys;
         this.values = values;
+        this.mode = mode;
+        this.requiredGranularity = requiredGranularity;
+    }
+
+    public GroupProjection(StreamInput in) throws IOException {
+        mode = AggregateMode.readFrom(in);
+        keys = Symbols.listFromStream(in);
+        int size = in.readVInt();
+        values = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            values.add((Aggregation) Symbols.fromStream(in));
+        }
+        requiredGranularity = RowGranularity.fromStream(in);
+    }
+
+    @Override
+    public void replaceSymbols(Function<Symbol, Symbol> replaceFunction) {
+        Lists2.replaceItems(keys, replaceFunction);
+        Lists2.replaceItems(outputs, replaceFunction);
     }
 
     public List<Symbol> keys() {
         return keys;
     }
 
-    public void keys(List<Symbol> keys) {
-        this.keys = keys;
-    }
-
     public List<Aggregation> values() {
         return values;
-    }
-
-    public void values(List<Aggregation> values) {
-        this.values = values;
     }
 
     @Override
@@ -95,31 +104,10 @@ public class GroupProjection extends Projection {
     }
 
     @Override
-    public void readFrom(StreamInput in) throws IOException {
-        int size = in.readVInt();
-        keys = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
-            keys.add(Symbol.fromStream(in));
-        }
-        size = in.readVInt();
-        values = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
-            values.add((Aggregation) Symbol.fromStream(in));
-        }
-        requiredGranularity = RowGranularity.fromStream(in);
-    }
-
-    @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeVInt(keys.size());
-        for (Symbol symbol : keys) {
-            Symbol.toStream(symbol, out);
-        }
-
-        out.writeVInt(values.size());
-        for (Symbol symbol : values) {
-            Symbol.toStream(symbol, out);
-        }
+        AggregateMode.writeTo(mode, out);
+        Symbols.toStream(keys, out);
+        Symbols.toStream(values, out);
         RowGranularity.toStream(requiredGranularity, out);
     }
 
@@ -141,7 +129,7 @@ public class GroupProjection extends Projection {
         return requiredGranularity;
     }
 
-    public void setRequiredGranularity(RowGranularity requiredGranularity) {
-        this.requiredGranularity = requiredGranularity;
+    public AggregateMode mode() {
+        return mode;
     }
 }

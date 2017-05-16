@@ -21,476 +21,235 @@
 
 package io.crate.action.sql;
 
-import com.carrotsearch.hppc.cursors.ObjectObjectCursor;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.SettableFuture;
-import io.crate.Constants;
+import io.crate.action.FutureActionListener;
 import io.crate.analyze.*;
-import io.crate.analyze.relations.TableRelation;
-import io.crate.blob.v2.BlobIndices;
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.Row;
-import io.crate.exceptions.AlterTableAliasException;
-import io.crate.executor.Executor;
-import io.crate.executor.Job;
-import io.crate.executor.TaskResult;
-import io.crate.executor.transport.TransportActionProvider;
-import io.crate.metadata.OutputName;
-import io.crate.metadata.PartitionName;
-import io.crate.metadata.table.TableInfo;
-import io.crate.operation.aggregation.impl.CountAggregation;
-import io.crate.planner.Plan;
-import io.crate.planner.Planner;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Symbol;
-import io.crate.sql.tree.QualifiedName;
-import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.action.admin.indices.alias.Alias;
-import org.elasticsearch.action.admin.indices.mapping.put.PutMappingRequest;
-import org.elasticsearch.action.admin.indices.mapping.put.PutMappingResponse;
+import io.crate.blob.v2.BlobAdminClient;
+import io.crate.data.Row;
+import io.crate.executor.transport.AlterTableOperation;
+import io.crate.executor.transport.RepositoryService;
+import io.crate.executor.transport.SnapshotRestoreDDLDispatcher;
+import io.crate.executor.transport.TableCreator;
+import io.crate.operation.udf.UserDefinedFunctionDDLClient;
+import io.crate.operation.user.UserManager;
+import io.crate.operation.user.UserManagerProvider;
+import org.elasticsearch.action.admin.indices.forcemerge.ForceMergeRequest;
+import org.elasticsearch.action.admin.indices.forcemerge.ForceMergeResponse;
+import org.elasticsearch.action.admin.indices.forcemerge.TransportForceMergeAction;
 import org.elasticsearch.action.admin.indices.refresh.RefreshRequest;
 import org.elasticsearch.action.admin.indices.refresh.RefreshResponse;
-import org.elasticsearch.action.admin.indices.settings.put.UpdateSettingsRequest;
-import org.elasticsearch.action.admin.indices.settings.put.UpdateSettingsResponse;
-import org.elasticsearch.action.admin.indices.template.get.GetIndexTemplatesRequest;
-import org.elasticsearch.action.admin.indices.template.get.GetIndexTemplatesResponse;
-import org.elasticsearch.action.admin.indices.template.put.PutIndexTemplateRequest;
-import org.elasticsearch.action.admin.indices.template.put.PutIndexTemplateResponse;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.cluster.metadata.AliasMetaData;
-import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.cluster.metadata.IndexTemplateMetaData;
-import org.elasticsearch.common.compress.CompressedString;
+import org.elasticsearch.action.admin.indices.refresh.TransportRefreshAction;
+import org.elasticsearch.action.admin.indices.upgrade.post.TransportUpgradeAction;
+import org.elasticsearch.action.admin.indices.upgrade.post.UpgradeRequest;
+import org.elasticsearch.action.admin.indices.upgrade.post.UpgradeResponse;
+import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.inject.Provider;
-import org.elasticsearch.common.settings.ImmutableSettings;
-import org.elasticsearch.common.xcontent.XContentFactory;
-import org.elasticsearch.common.xcontent.XContentHelper;
+import org.elasticsearch.common.inject.Singleton;
 
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Locale;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * visitor that dispatches requests based on Analysis class to different actions.
- *
+ * <p>
  * Its methods return a future returning a Long containing the response rowCount.
  * If the future returns <code>null</code>, no row count shall be created.
  */
-public class DDLStatementDispatcher extends AnalyzedStatementVisitor<Void, ListenableFuture<Long>> {
+@Singleton
+public class DDLStatementDispatcher {
 
-    private final ClusterService clusterService;
-    private final BlobIndices blobIndices;
-    private final Provider<Executor> executorProvider;
-    private final TransportActionProvider transportActionProvider;
-    private final Planner planner;
+    private final Provider<BlobAdminClient> blobAdminClient;
+    private final TableCreator tableCreator;
+    private final AlterTableOperation alterTableOperation;
+    private final RepositoryService repositoryService;
+    private final SnapshotRestoreDDLDispatcher snapshotRestoreDDLDispatcher;
+    private final UserDefinedFunctionDDLClient udfDDLClient;
+    private final Provider<TransportUpgradeAction> transportUpgradeActionProvider;
+    private final Provider<TransportForceMergeAction> transportForceMergeActionProvider;
+    private final Provider<TransportRefreshAction> transportRefreshActionProvider;
+    private final UserManager userManager;
+
+    private final InnerVisitor innerVisitor = new InnerVisitor();
+
 
     @Inject
-    public DDLStatementDispatcher(ClusterService clusterService,
-                                  BlobIndices blobIndices,
-                                  Provider<Executor> executorProvider,
-                                  TransportActionProvider transportActionProvider,
-                                  Planner planner) {
-        this.clusterService = clusterService;
-        this.blobIndices = blobIndices;
-        this.executorProvider = executorProvider;
-        this.transportActionProvider = transportActionProvider;
-        this.planner = planner;
+    public DDLStatementDispatcher(Provider<BlobAdminClient> blobAdminClient,
+                                  TableCreator tableCreator,
+                                  AlterTableOperation alterTableOperation,
+                                  RepositoryService repositoryService,
+                                  SnapshotRestoreDDLDispatcher snapshotRestoreDDLDispatcher,
+                                  UserDefinedFunctionDDLClient udfDDLClient,
+                                  UserManagerProvider userManagerProvider,
+                                  Provider<TransportUpgradeAction> transportUpgradeActionProvider,
+                                  Provider<TransportForceMergeAction> transportForceMergeActionProvider,
+                                  Provider<TransportRefreshAction> transportRefreshActionProvider) {
+        this.blobAdminClient = blobAdminClient;
+        this.tableCreator = tableCreator;
+        this.alterTableOperation = alterTableOperation;
+        this.repositoryService = repositoryService;
+        this.snapshotRestoreDDLDispatcher = snapshotRestoreDDLDispatcher;
+        this.udfDDLClient = udfDDLClient;
+        this.transportUpgradeActionProvider = transportUpgradeActionProvider;
+        this.transportForceMergeActionProvider = transportForceMergeActionProvider;
+        this.transportRefreshActionProvider = transportRefreshActionProvider;
+        this.userManager = userManagerProvider.get();
     }
 
-    @Override
-    protected ListenableFuture<Long> visitAnalyzedStatement(AnalyzedStatement analyzedStatement, Void context) {
-        throw new UnsupportedOperationException(String.format("Can't handle \"%s\"", analyzedStatement));
+    public CompletableFuture<Long> dispatch(AnalyzedStatement analyzedStatement, Row parameters) {
+        return innerVisitor.process(analyzedStatement, parameters);
     }
 
-   @Override
-    public ListenableFuture<Long> visitCreateBlobTableStatement(
-           CreateBlobTableAnalyzedStatement analysis, Void context) {
-        return wrapRowCountFuture(
-                blobIndices.createBlobTable(
-                        analysis.tableName(),
-                        analysis.tableParameter().settings()
-                ),
-                1L
-        );
-    }
+    private class InnerVisitor extends AnalyzedStatementVisitor<Row, CompletableFuture<Long>> {
 
-    @Override
-    public ListenableFuture<Long> visitAddColumnStatement(final AddColumnAnalyzedStatement analysis, Void context) {
-        final SettableFuture<Long> result = SettableFuture.create();
-        if (analysis.newPrimaryKeys()) {
-            Plan plan = genCountStarPlan(analysis.table());
-            Job job = executorProvider.get().newJob(plan);
-            ListenableFuture<List<TaskResult>> resultFuture = Futures.allAsList(executorProvider.get().execute(job));
-            Futures.addCallback(resultFuture, new FutureCallback<List<TaskResult>>() {
-                @Override
-                public void onSuccess(@Nullable List<TaskResult> resultList) {
-                    assert resultList != null && resultList.size() == 1;
-                    Bucket rows = resultList.get(0).rows();
-                    Row row = Iterables.getOnlyElement(rows);
-                    if ((Long) row.get(0) == 0L) {
-                        addColumnToTable(analysis, result);
-                    } else {
-                        result.setException(new UnsupportedOperationException(
-                                "Cannot add a primary key column to a table that isn't empty"));
-                    }
-                }
-
-                @Override
-                public void onFailure(@Nonnull Throwable t) {
-                    result.setException(t);
-                }
-            });
-        } else {
-            addColumnToTable(analysis, result);
-        }
-        return result;
-    }
-
-    private Plan genCountStarPlan(TableInfo table) {
-        QuerySpec querySpec = new QuerySpec();
-        querySpec.where(WhereClause.MATCH_ALL);
-        Function countFunction = new Function(
-                CountAggregation.COUNT_STAR_FUNCTION, ImmutableList.<Symbol>of());
-        querySpec.outputs(ImmutableList.<Symbol>of(countFunction));
-        querySpec.hasAggregates(true);
-
-        QueriedTable queriedTable = new QueriedTable(
-                QualifiedName.of(table.ident().fqn()),
-                new TableRelation(table),
-                ImmutableList.of(new OutputName("count(*)")),
-                querySpec
-                );
-        SelectAnalyzedStatement statement = new SelectAnalyzedStatement(queriedTable);
-        return planner.process(statement, new Planner.Context());
-    }
-
-    private void addColumnToTable(AddColumnAnalyzedStatement analysis, final SettableFuture<Long> result) {
-        boolean updateTemplate = analysis.table().isPartitioned();
-        final AtomicInteger operations = new AtomicInteger(updateTemplate ? 2 : 1);
-        final Map<String, Object> mapping = analysis.analyzedTableElements().toMapping();
-
-        if (updateTemplate) {
-            String templateName = PartitionName.templateName(analysis.table().ident().schema(), analysis.table().ident().name());
-            IndexTemplateMetaData indexTemplateMetaData =
-                    clusterService.state().metaData().templates().get(templateName);
-            if (indexTemplateMetaData == null) {
-                result.setException(new RuntimeException("Template for partitioned table is missing"));
-            }
-            mergeMappingAndUpdateTemplate(result, mapping, indexTemplateMetaData, operations);
+        @Override
+        protected CompletableFuture<Long> visitAnalyzedStatement(AnalyzedStatement analyzedStatement, Row parameters) {
+            throw new UnsupportedOperationException(String.format(Locale.ENGLISH, "Can't handle \"%s\"", analyzedStatement));
         }
 
-        // need to merge the _meta part of the mapping mapping before-hand because ES doesn't
-        // update the _meta column recursively. Instead it is overwritten and therefore partitioned by
-        // and collection_type information would be lost.
-        String[] indexNames = getIndexNames(analysis.table(), null);
-        if (indexNames.length == 0) {
-            // if there are no indices yet we can return because we don't need to update existing mapping
-            if (operations.decrementAndGet() == 0) {
-                result.set(1L);
-            }
-            return;
-        }
-        PutMappingRequest request = new PutMappingRequest();
-        request.indices(indexNames);
-        request.type(Constants.DEFAULT_MAPPING_TYPE);
-        IndexMetaData indexMetaData = clusterService.state().getMetaData().getIndices().get(indexNames[0]);
-        try {
-            Map mergedMeta = (Map)indexMetaData.getMappings()
-                    .get(Constants.DEFAULT_MAPPING_TYPE)
-                    .getSourceAsMap()
-                    .get("_meta");
-            if (mergedMeta != null) {
-                XContentHelper.update(mergedMeta, (Map) mapping.get("_meta"), false);
-                mapping.put("_meta", mergedMeta);
-            }
-            request.source(mapping);
-        } catch (IOException e) {
-            result.setException(e);
-        }
-        transportActionProvider.transportPutMappingAction().execute(request, new ActionListener<PutMappingResponse>() {
-            @Override
-            public void onResponse(PutMappingResponse putMappingResponse) {
-                if (operations.decrementAndGet() == 0) {
-                    result.set(1L);
-                }
-            }
-
-            @Override
-            public void onFailure(Throwable e) {
-                result.setException(e);
-            }
-        });
-    }
-
-    private Map<String, Object> parseMapping(String mappingSource) throws IOException {
-        return XContentFactory.xContent(mappingSource).createParser(mappingSource).mapAndClose();
-    }
-
-    private void mergeMappingAndUpdateTemplate(final SettableFuture<Long> result,
-                                               final Map<String, Object> mapping,
-                                               final IndexTemplateMetaData templateMetaData,
-                                               final AtomicInteger operations) {
-        Map<String, Object> mergedMapping = mergeMapping(templateMetaData, mapping);
-        PutIndexTemplateRequest updateTemplateRequest = new PutIndexTemplateRequest(templateMetaData.name())
-                .create(false)
-                .mapping(Constants.DEFAULT_MAPPING_TYPE, mergedMapping)
-                .settings(templateMetaData.settings())
-                .template(templateMetaData.template());
-
-            for (ObjectObjectCursor<String, AliasMetaData> container : templateMetaData.aliases()) {
-                Alias alias = new Alias(container.key);
-                updateTemplateRequest.alias(alias);
-            }
-            transportActionProvider.transportPutIndexTemplateAction().execute(updateTemplateRequest, new ActionListener<PutIndexTemplateResponse>() {
-                @Override
-                public void onResponse(PutIndexTemplateResponse putIndexTemplateResponse) {
-                    if (operations.decrementAndGet() == 0) {
-                        result.set(1L);
-                    }
-                }
-
-                @Override
-                public void onFailure(Throwable e) {
-                    result.setException(e);
-                }
-            });
+        @Override
+        public CompletableFuture<Long> visitCreateTableStatement(CreateTableAnalyzedStatement analysis, Row parameters) {
+            return tableCreator.create(analysis);
         }
 
-    private Map<String, Object> mergeMapping(IndexTemplateMetaData templateMetaData,
-                                             Map<String, Object> newMapping) {
-        Map<String, Object> mergedMapping = new HashMap<>();
-        for (ObjectObjectCursor<String, CompressedString> cursor : templateMetaData.mappings()) {
-            try {
-                Map<String, Object> mapping = parseMapping(cursor.value.toString());
-                Object o = mapping.get(Constants.DEFAULT_MAPPING_TYPE);
-                assert o != null && o instanceof Map;
-
-                XContentHelper.update(mergedMapping, (Map) o, false);
-            } catch (IOException e) {
-                // pass
-            }
+        @Override
+        public CompletableFuture<Long> visitAlterTableStatement(final AlterTableAnalyzedStatement analysis, Row parameters) {
+            return alterTableOperation.executeAlterTable(analysis);
         }
-        XContentHelper.update(mergedMapping, newMapping, false);
-        return mergedMapping;
-    }
 
-    @Override
-    public ListenableFuture<Long> visitAlterBlobTableStatement(AlterBlobTableAnalyzedStatement analysis, Void context) {
-        return wrapRowCountFuture(
-                blobIndices.alterBlobTable(analysis.table().ident().name(), analysis.tableParameter().settings()),
-                1L);
-    }
+        @Override
+        public CompletableFuture<Long> visitAddColumnStatement(AddColumnAnalyzedStatement analysis, Row parameters) {
+            return alterTableOperation.executeAlterTableAddColumn(analysis);
+        }
 
-    @Override
-    public ListenableFuture<Long> visitDropBlobTableStatement(DropBlobTableAnalyzedStatement analysis, Void context) {
-        return wrapRowCountFuture(blobIndices.dropBlobTable(analysis.table().ident().name()), 1L);
-    }
+        public CompletableFuture<Long> visitAlterTableOpenCloseStatement(AlterTableOpenCloseAnalyzedStatement analysis,
+                                                                         Row parameters) {
+            return alterTableOperation.executeAlterTableOpenClose(analysis);
+        }
 
-    private String[] getIndexNames(TableInfo tableInfo, @Nullable PartitionName partitionName) {
-        String[] indexNames;
-        if (tableInfo.isPartitioned()) {
-            if (partitionName == null) {
-                // all partitions
-                indexNames = tableInfo.concreteIndices();
+        @Override
+        public CompletableFuture<Long> visitAlterTableRenameStatement(AlterTableRenameAnalyzedStatement analysis, Row parameters) {
+            return alterTableOperation.executeAlterTableRenameTable(analysis);
+        }
+
+        @Override
+        public CompletableFuture<Long> visitOptimizeTableStatement(OptimizeTableAnalyzedStatement analysis, Row parameters) {
+            if (analysis.settings().getAsBoolean(OptimizeSettings.UPGRADE_SEGMENTS.name(),
+                OptimizeSettings.UPGRADE_SEGMENTS.defaultValue())) {
+                return executeUpgradeSegments(analysis, transportUpgradeActionProvider.get());
             } else {
-                // single partition
-                indexNames = new String[] { partitionName.stringValue() };
+                return executeMergeSegments(analysis, transportForceMergeActionProvider.get());
             }
-        } else {
-            indexNames = new String[] { tableInfo.ident().esName() };
         }
-        return indexNames;
+
+        @Override
+        public CompletableFuture<Long> visitRefreshTableStatement(RefreshTableAnalyzedStatement analysis, Row parameters) {
+            if (analysis.indexNames().isEmpty()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            RefreshRequest request = new RefreshRequest(analysis.indexNames().toArray(
+                new String[analysis.indexNames().size()]));
+            request.indicesOptions(IndicesOptions.lenientExpandOpen());
+
+            FutureActionListener<RefreshResponse, Long> listener =
+                new FutureActionListener<>(r -> (long) analysis.indexNames().size());
+            transportRefreshActionProvider.get().execute(request, listener);
+            return listener;
+        }
+
+
+        @Override
+        public CompletableFuture<Long> visitCreateBlobTableStatement(CreateBlobTableAnalyzedStatement analysis,
+                                                                     Row parameters) {
+            return blobAdminClient.get().createBlobTable(analysis.tableName(), analysis.tableParameter().settings());
+        }
+
+        @Override
+        public CompletableFuture<Long> visitAlterBlobTableStatement(AlterBlobTableAnalyzedStatement analysis, Row parameters) {
+            return blobAdminClient.get().alterBlobTable(analysis.table().ident().name(), analysis.tableParameter().settings());
+        }
+
+        @Override
+        public CompletableFuture<Long> visitDropBlobTableStatement(DropBlobTableAnalyzedStatement analysis, Row parameters) {
+            return blobAdminClient.get().dropBlobTable(analysis.table().ident().name());
+        }
+
+        @Override
+        public CompletableFuture<Long> visitDropRepositoryAnalyzedStatement(DropRepositoryAnalyzedStatement analysis,
+                                                                            Row parameters) {
+            return repositoryService.execute(analysis);
+        }
+
+        @Override
+        public CompletableFuture<Long> visitCreateRepositoryAnalyzedStatement(CreateRepositoryAnalyzedStatement analysis,
+                                                                              Row parameters) {
+            return repositoryService.execute(analysis);
+        }
+
+        @Override
+        public CompletableFuture<Long> visitDropSnapshotAnalyzedStatement(DropSnapshotAnalyzedStatement analysis,
+                                                                          Row parameters) {
+            return snapshotRestoreDDLDispatcher.dispatch(analysis);
+        }
+
+        public CompletableFuture<Long> visitCreateSnapshotAnalyzedStatement(CreateSnapshotAnalyzedStatement analysis,
+                                                                            Row parameters) {
+            return snapshotRestoreDDLDispatcher.dispatch(analysis);
+        }
+
+        @Override
+        public CompletableFuture<Long> visitRestoreSnapshotAnalyzedStatement(RestoreSnapshotAnalyzedStatement analysis,
+                                                                             Row parameters) {
+            return snapshotRestoreDDLDispatcher.dispatch(analysis);
+        }
+
+        @Override
+        protected CompletableFuture<Long> visitCreateFunctionStatement(CreateFunctionAnalyzedStatement analysis,
+                                                                       Row parameters) {
+            return udfDDLClient.execute(analysis, parameters);
+        }
+
+        @Override
+        public CompletableFuture<Long> visitDropFunctionStatement(DropFunctionAnalyzedStatement analysis, Row parameters) {
+            return udfDDLClient.execute(analysis);
+        }
+
+        @Override
+        protected CompletableFuture<Long> visitCreateUserStatement(CreateUserAnalyzedStatement analysis, Row parameters) {
+            return userManager.createUser(analysis.userName());
+        }
+
+        @Override
+        protected CompletableFuture<Long> visitDropUserStatement(DropUserAnalyzedStatement analysis, Row parameters) {
+            return userManager.dropUser(analysis.userName(), analysis.ifExists());
+        }
     }
 
-    @Override
-    public ListenableFuture<Long> visitRefreshTableStatement(RefreshTableAnalyzedStatement analysis, Void context) {
-        String[] indexNames = getIndexNames(analysis.table(), analysis.partitionName());
-        if (analysis.table().schemaInfo().systemSchema() || indexNames.length == 0) {
-            // shortcut when refreshing on system tables
-            // or empty partitioned tables
-            return Futures.immediateFuture(null);
-        } else {
-            final SettableFuture<Long> future = SettableFuture.create();
-            RefreshRequest request = new RefreshRequest(indexNames);
-            transportActionProvider.transportRefreshAction().execute(request, new ActionListener<RefreshResponse>() {
-                @Override
-                public void onResponse(RefreshResponse refreshResponse) {
-                    future.set(null); // no row count
-                }
+    private static CompletableFuture<Long> executeMergeSegments(OptimizeTableAnalyzedStatement analysis,
+                                                                TransportForceMergeAction transportForceMergeAction) {
+        ForceMergeRequest request = new ForceMergeRequest(analysis.indexNames().toArray(new String[0]));
 
-                @Override
-                public void onFailure(Throwable e) {
-                    future.setException(e);
-                }
-            });
-            return future;
-        }
+        // Pass parameters to ES request
+        request.maxNumSegments(analysis.settings().getAsInt(OptimizeSettings.MAX_NUM_SEGMENTS.name(),
+            ForceMergeRequest.Defaults.MAX_NUM_SEGMENTS));
+        request.onlyExpungeDeletes(analysis.settings().getAsBoolean(OptimizeSettings.ONLY_EXPUNGE_DELETES.name(),
+            ForceMergeRequest.Defaults.ONLY_EXPUNGE_DELETES));
+        request.flush(analysis.settings().getAsBoolean(OptimizeSettings.FLUSH.name(),
+            ForceMergeRequest.Defaults.FLUSH));
+
+        request.indicesOptions(IndicesOptions.lenientExpandOpen());
+
+        FutureActionListener<ForceMergeResponse, Long> listener =
+            new FutureActionListener<>(r -> (long) analysis.indexNames().size());
+        transportForceMergeAction.execute(request, listener);
+        return listener;
     }
 
-    private ListenableFuture<Long> wrapRowCountFuture(ListenableFuture<?> wrappedFuture, final Long rowCount) {
-        final SettableFuture<Long> wrappingFuture = SettableFuture.create();
-        Futures.addCallback(wrappedFuture, new FutureCallback<Object>() {
-            @Override
-            public void onSuccess(@Nullable Object result) {
-                wrappingFuture.set(rowCount);
-            }
-
-            @Override
-            public void onFailure(Throwable t) {
-                wrappingFuture.setException(t);
-            }
-        });
-        return wrappingFuture;
-    }
-
-    @Override
-    public ListenableFuture<Long> visitAlterTableStatement(final AlterTableAnalyzedStatement analysis, Void context) {
-        final SettableFuture<Long> result = SettableFuture.create();
-        final String[] indices;
-        boolean updateTemplate = false;
-        boolean updateMapping = !analysis.tableParameter().mappings().isEmpty();
-        final TableParameter tableParameter = analysis.tableParameter();
-        TableParameter concreteTableParameter = tableParameter;
-        if (analysis.table().isPartitioned()) {
-            if (analysis.partitionName().isPresent()) {
-                indices = new String[]{ analysis.partitionName().get().stringValue() };
-            } else {
-                updateTemplate = true; // only update template when updating whole partitioned table
-                indices = analysis.table().concreteIndices();
-                AlterPartitionedTableParameterInfo tableSettingsInfo =
-                        (AlterPartitionedTableParameterInfo)analysis.table().tableParameterInfo();
-                // create new filtered partition table settings
-                concreteTableParameter = new TableParameter(
-                        analysis.tableParameter().settings(),
-                        tableSettingsInfo.partitionTableSettingsInfo().supportedInternalSettings());
-            }
-        } else {
-           indices = new String[]{ analysis.table().ident().esName() };
-        }
-
-        if (analysis.table().isAlias()) {
-            throw new AlterTableAliasException(analysis.table().ident().fqn());
-        }
-
-        final List<ListenableFuture<?>> results = new ArrayList<>(
-                indices.length + (updateTemplate ? 1 : 0) + (updateMapping ? 1 : 0)
-        );
-        if (updateTemplate) {
-            final SettableFuture<?> templateFuture = SettableFuture.create();
-            results.add(templateFuture);
-
-            // update template
-            final String templateName = PartitionName.templateName(analysis.table().ident().schema(), analysis.table().ident().name());
-            GetIndexTemplatesRequest getRequest = new GetIndexTemplatesRequest(templateName);
-
-            transportActionProvider.transportGetIndexTemplatesAction().execute(getRequest, new ActionListener<GetIndexTemplatesResponse>() {
-                @Override
-                public void onResponse(GetIndexTemplatesResponse response) {
-                    Map<String, Object> mapping = new HashMap<>();
-                    IndexTemplateMetaData template = response.getIndexTemplates().get(0);
-                    mapping = mergeMapping(template, analysis.tableParameter().mappings());
-
-                    ImmutableSettings.Builder settingsBuilder = ImmutableSettings.builder();
-                    settingsBuilder.put(template.settings());
-                    settingsBuilder.put(tableParameter.settings());
-
-                    PutIndexTemplateRequest request = new PutIndexTemplateRequest(templateName)
-                            .create(false)
-                            .mapping(Constants.DEFAULT_MAPPING_TYPE, mapping)
-                            .settings(settingsBuilder.build())
-                            .template(template.template());
-                    for (ObjectObjectCursor<String, AliasMetaData> container : response.getIndexTemplates().get(0).aliases()) {
-                        Alias alias = new Alias(container.key);
-                        request.alias(alias);
-                    }
-                    transportActionProvider.transportPutIndexTemplateAction().execute(request, new ActionListener<PutIndexTemplateResponse>() {
-                        @Override
-                        public void onResponse(PutIndexTemplateResponse putIndexTemplateResponse) {
-                            templateFuture.set(null);
-                        }
-
-                        @Override
-                        public void onFailure(Throwable e) {
-                            templateFuture.setException(e);
-                        }
-                    });
-
-                }
-
-                @Override
-                public void onFailure(Throwable e) {
-                    templateFuture.setException(e);
-                }
-            });
-
-        }
-        if (!concreteTableParameter.settings().getAsMap().isEmpty() && indices.length > 0) {
-            // update every concrete index
-            UpdateSettingsRequest request = new UpdateSettingsRequest(
-                    concreteTableParameter.settings(),
-                    indices);
-            final SettableFuture<?> future = SettableFuture.create();
-            results.add(future);
-            transportActionProvider.transportUpdateSettingsAction().execute(request, new ActionListener<UpdateSettingsResponse>() {
-                @Override
-                public void onResponse(UpdateSettingsResponse updateSettingsResponse) {
-                    future.set(null);
-                }
-
-                @Override
-                public void onFailure(Throwable e) {
-                    future.setException(e);
-                }
-            });
-        }
-        if (updateMapping) {
-            Map<String, Object> mapping = null;
-            try {
-                mapping = clusterService.state().metaData().index(indices[0]).mapping(Constants.DEFAULT_MAPPING_TYPE).getSourceAsMap();
-            } catch (IOException e) {
-                result.setException(e);
-                return result;
-            }
-            XContentHelper.update(mapping, analysis.tableParameter().mappings(), false);
-            PutMappingRequest request = new PutMappingRequest(indices);
-            request.type(Constants.DEFAULT_MAPPING_TYPE);
-            request.source(mapping);
-            final SettableFuture<?> future = SettableFuture.create();
-            results.add(future);
-            transportActionProvider.transportPutMappingAction().execute(request, new ActionListener<PutMappingResponse>() {
-                @Override
-                public void onResponse(PutMappingResponse putMappingResponse) {
-                    future.set(null);
-                }
-
-                @Override
-                public void onFailure(Throwable e) {
-                    future.setException(e);
-                }
-            });
-        }
-        Futures.addCallback(Futures.allAsList(results), new FutureCallback<List<?>>() {
-            @Override
-            public void onSuccess(@Nullable List<?> resultList) {
-                result.set(null);
-            }
-
-            @Override
-            public void onFailure(@Nonnull Throwable t) {
-                result.setException(t);
-            }
-        });
-
-        return result;
+    private static CompletableFuture<Long> executeUpgradeSegments(OptimizeTableAnalyzedStatement analysis,
+                                                                  TransportUpgradeAction transportUpgradeAction) {
+        UpgradeRequest request = new UpgradeRequest(analysis.indexNames().toArray(new String[0]));
+        FutureActionListener<UpgradeResponse, Long> listener =
+            new FutureActionListener<>(r -> (long) analysis.indexNames().size());
+        transportUpgradeAction.execute(request, listener);
+        return listener;
     }
 }

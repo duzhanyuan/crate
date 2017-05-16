@@ -1,67 +1,67 @@
 /*
- * Licensed to CRATE Technology GmbH ("Crate") under one or more contributor
- * license agreements.  See the NOTICE file distributed with this work for
- * additional information regarding copyright ownership.  Crate licenses
- * this file to you under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.  You may
+ * Licensed to Crate under one or more contributor license agreements.
+ * See the NOTICE file distributed with this work for additional
+ * information regarding copyright ownership.  Crate licenses this file
+ * to you under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.  You may
  * obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
- * License for the specific language governing permissions and limitations
- * under the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
  *
  * However, if you have executed another commercial license agreement
  * with Crate these terms will supersede the license and you may use the
- * software solely pursuant to the terms of the relevant commercial agreement.
+ * software solely pursuant to the terms of the relevant commercial
+ * agreement.
  */
 
 package io.crate.module;
 
-import com.google.common.util.concurrent.SettableFuture;
 import io.crate.ClusterIdService;
-import io.crate.Version;
-import io.crate.core.CrateLoader;
+import io.crate.plugin.IndexEventListenerProxy;
+import io.crate.rest.CrateRestFilter;
 import io.crate.rest.CrateRestMainAction;
-import org.elasticsearch.common.inject.*;
+import io.crate.settings.SharedSettings;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.common.inject.AbstractModule;
+import org.elasticsearch.common.inject.TypeLiteral;
 import org.elasticsearch.common.inject.matcher.AbstractMatcher;
 import org.elasticsearch.common.inject.spi.InjectionListener;
 import org.elasticsearch.common.inject.spi.TypeEncounter;
 import org.elasticsearch.common.inject.spi.TypeListener;
-import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.rest.action.main.RestMainAction;
+import org.elasticsearch.rest.action.RestMainAction;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
 
-import static org.elasticsearch.common.inject.Modules.createModule;
+public class CrateCoreModule extends AbstractModule {
 
-public class CrateCoreModule extends AbstractModule implements SpawnModules, PreProcessModule {
+    private final Logger logger;
+    private final IndexEventListenerProxy indexEventListenerProxy;
 
-    private static final ESLogger logger = Loggers.getLogger(CrateCoreModule.class);
-    private final CrateLoader crateLoader;
-    private final Settings settings;
-
-    public CrateCoreModule(Settings settings) {
-        this.settings = settings;
-        crateLoader = CrateLoader.getInstance(settings);
+    public CrateCoreModule(Settings settings, IndexEventListenerProxy indexEventListenerProxy) {
+        logger = Loggers.getLogger(getClass().getPackage().getName(), settings);
+        this.indexEventListenerProxy = indexEventListenerProxy;
+        if (SharedSettings.ENTERPRISE_LICENSE_SETTING.setting().get(settings) &&
+            "".equals(SharedSettings.LICENSE_IDENT_SETTING.setting().get(settings))){
+            logger.warn("You are currently using the Enterprise Edition, " +
+                "but have not configured a license. Please request a license or deactivate the "+
+                "Enterprise Edition. https://crate.io/enterprise");
+        }
+        if (CrateRestFilter.ES_API_ENABLED_SETTING.get(settings)) {
+            logger.warn("The Elasticsearch API is currently enabled, which makes it possible to request user data.");
+        }
     }
 
     @Override
     protected void configure() {
-        Version version = Version.CURRENT;
-        logger.info("configuring crate. version: {}", version);
-
-        bind(CrateLoader.class).toInstance(crateLoader);
-
-        /**
+        /*
          * This is a rather hacky method to overwrite the handler for "/"
          * The ES plugins are loaded before the core ES components. That means that the registration for
          * "/" in {@link CrateRestMainAction} is overwritten once {@link RestMainAction} is instantiated.
@@ -84,49 +84,31 @@ public class CrateCoreModule extends AbstractModule implements SpawnModules, Pre
             new RestMainActionListener(crateListener.instanceFuture));
 
         bind(ClusterIdService.class).asEagerSingleton();
-    }
-
-    @Override
-    public void processModule(Module module) {
-        crateLoader.processModule(module);
-    }
-
-    @Override
-    public Iterable<? extends Module> spawnModules() {
-        List<Module> modules = new ArrayList<>();
-        Collection<Class<? extends Module>> moduleClasses = crateLoader.modules();
-        for (Class<? extends Module> moduleClass : moduleClasses) {
-            modules.add(createModule(moduleClass, settings));
-        }
-        modules.addAll(crateLoader.modules(settings));
-        return modules;
+        bind(IndexEventListenerProxy.class).toInstance(indexEventListenerProxy);
     }
 
     private class RestMainActionListener implements TypeListener {
 
-        private final SettableFuture<CrateRestMainAction> instanceFuture;
+        private final CompletableFuture<CrateRestMainAction> instanceFuture;
 
-        public RestMainActionListener(SettableFuture<CrateRestMainAction> instanceFuture) {
+        RestMainActionListener(CompletableFuture<CrateRestMainAction> instanceFuture) {
             this.instanceFuture = instanceFuture;
         }
 
         @Override
         public <I> void hear(TypeLiteral<I> type, TypeEncounter<I> encounter) {
-            encounter.register(new InjectionListener<I>() {
-                @Override
-                public void afterInjection(I injectee) {
-                    try {
-                        CrateRestMainAction crateRestMainAction = instanceFuture.get(10, TimeUnit.SECONDS);
+            encounter.register((InjectionListener<I>) injectee ->
+                instanceFuture.whenComplete((crateRestMainAction, throwable) -> {
+                    if (throwable == null) {
                         crateRestMainAction.registerHandler();
-                    } catch (Exception e) {
-                        logger.error("Could not register CrateRestMainAction handler", e);
+                    } else {
+                        logger.error("Could not register CrateRestMainAction handler", throwable);
                     }
-                }
-            });
+                }));
         }
     }
 
-    private class SubclassOfMatcher extends AbstractMatcher<TypeLiteral<?>> {
+    private static class SubclassOfMatcher extends AbstractMatcher<TypeLiteral<?>> {
 
         private final Class<?> klass;
 
@@ -140,12 +122,12 @@ public class CrateCoreModule extends AbstractModule implements SpawnModules, Pre
         }
     }
 
-    private class CrateRestMainActionListener implements TypeListener {
+    private static class CrateRestMainActionListener implements TypeListener {
 
-        private final SettableFuture<CrateRestMainAction> instanceFuture;
+        private final CompletableFuture<CrateRestMainAction> instanceFuture;
 
-        public CrateRestMainActionListener() {
-            this.instanceFuture = SettableFuture.create();
+        CrateRestMainActionListener() {
+            this.instanceFuture = new CompletableFuture<>();
 
         }
 
@@ -154,7 +136,7 @@ public class CrateCoreModule extends AbstractModule implements SpawnModules, Pre
             encounter.register(new InjectionListener<I>() {
                 @Override
                 public void afterInjection(I injectee) {
-                    instanceFuture.set((CrateRestMainAction)injectee);
+                    instanceFuture.complete((CrateRestMainAction) injectee);
                 }
             });
         }

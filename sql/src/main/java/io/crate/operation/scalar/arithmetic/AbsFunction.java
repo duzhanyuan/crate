@@ -21,28 +21,18 @@
 
 package io.crate.operation.scalar.arithmetic;
 
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import io.crate.metadata.*;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
 import io.crate.types.DataType;
-import io.crate.types.DataTypes;
 
+import javax.annotation.Nullable;
 import java.util.List;
-import java.util.Set;
 
 public class AbsFunction extends Scalar<Number, Number> {
 
     public static final String NAME = "abs";
-    private static final Set<DataType> ALLOWED_TYPES = ImmutableSet.<DataType>builder()
-            .addAll(DataTypes.NUMERIC_PRIMITIVE_TYPES)
-            .add(DataTypes.UNDEFINED)
-            .build();
 
     public static void register(ScalarFunctionModule module) {
         module.register(NAME, new Resolver());
@@ -52,7 +42,7 @@ public class AbsFunction extends Scalar<Number, Number> {
 
     public AbsFunction(DataType dataType) {
         this.info = new FunctionInfo(
-                new FunctionIdent(NAME, ImmutableList.of(dataType)), dataType);
+            new FunctionIdent(NAME, ImmutableList.of(dataType)), dataType);
     }
 
     @Override
@@ -61,35 +51,26 @@ public class AbsFunction extends Scalar<Number, Number> {
     }
 
     @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        Symbol argument = symbol.arguments().get(0);
-
-        if (argument.symbolType().isValueSymbol()) {
-            return Literal.newLiteral(info().returnType(), evaluate((Input) argument));
-        }
-
-        return symbol;
-    }
-
-    @Override
     public Number evaluate(Input<Number>... args) {
-        assert args.length == 1;
+        assert args.length == 1 : "number of args must be 1";
         Number value = args[0].value();
         if (value != null) {
-            return (Number)info.returnType().value(Math.abs(value.doubleValue()));
+            return (Number) info.returnType().value(Math.abs(value.doubleValue()));
         }
         return null;
     }
 
-    private static class Resolver implements DynamicFunctionResolver {
+    private static class Resolver implements FunctionResolver {
 
         @Override
-        public FunctionImplementation<Function> getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
-            Preconditions.checkArgument(dataTypes.size() == 1,
-                    "invalid size of arguments, 1 expected");
-            Preconditions.checkArgument(ALLOWED_TYPES.contains(dataTypes.get(0)),
-                    "invalid datatype %s for %s function", dataTypes.get(0).toString(), NAME);
+        public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
             return new AbsFunction(dataTypes.get(0));
+        }
+
+        @Nullable
+        @Override
+        public List<DataType> getSignature(List<DataType> dataTypes) {
+            return Signature.SIGNATURES_SINGLE_NUMERIC.apply(dataTypes);
         }
     }
 }

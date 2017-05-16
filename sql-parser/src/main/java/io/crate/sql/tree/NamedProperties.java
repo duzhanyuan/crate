@@ -21,19 +21,19 @@
 
 package io.crate.sql.tree;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
-import com.google.common.base.Optional;
 
-import javax.annotation.Nullable;
+import java.util.Optional;
 
 public class NamedProperties extends Node {
 
     private final String ident;
     private final Optional<GenericProperties> properties;
 
-    public NamedProperties(String ident, @Nullable GenericProperties properties) {
+    public NamedProperties(String ident, Optional<GenericProperties> properties) {
         this.ident = ident;
-        this.properties = Optional.fromNullable(properties);
+        this.properties = properties;
     }
 
     public String ident() {
@@ -64,9 +64,9 @@ public class NamedProperties extends Node {
 
     @Override
     public String toString() {
-        return Objects.toStringHelper(this)
-                .add("ident", ident)
-                .add("properties", properties)
-                .toString();
+        return MoreObjects.toStringHelper(this)
+            .add("ident", ident)
+            .add("properties", properties)
+            .toString();
     }
 }

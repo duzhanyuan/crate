@@ -56,14 +56,14 @@ public class RegexMatcherTest extends CrateUnitTest {
         regexMatcher = new RegexMatcher(pattern);
         assertEquals(true, regexMatcher.match(text));
         assertThat(regexMatcher.groups(),
-                arrayContaining(new BytesRef("fooba"), new BytesRef("foo"), new BytesRef("ba")));
+            arrayContaining(new BytesRef("fooba"), new BytesRef("foo"), new BytesRef("ba")));
     }
 
     @Test
     public void testReplaceNoMatch() throws Exception {
         String pattern = "crate";
         BytesRef text = new BytesRef("foobarbequebaz");
-        BytesRef replacement = new BytesRef("crate");
+        String replacement = "crate";
         RegexMatcher regexMatcher = new RegexMatcher(pattern);
         assertEquals(text, regexMatcher.replace(text, replacement));
     }
@@ -72,12 +72,12 @@ public class RegexMatcherTest extends CrateUnitTest {
     public void testReplace() throws Exception {
         String pattern = "ba";
         BytesRef text = new BytesRef("foobarbequebaz");
-        BytesRef replacement = new BytesRef("Crate");
+        String replacement = "Crate";
         RegexMatcher regexMatcher = new RegexMatcher(pattern);
         assertEquals(new BytesRef("fooCraterbequebaz"), regexMatcher.replace(text, replacement));
 
         pattern = "(ba).*(ba)";
-        replacement = new BytesRef("First$1Second$2");
+        replacement = "First$1Second$2";
         regexMatcher = new RegexMatcher(pattern);
         assertEquals(new BytesRef("fooFirstbaSecondbaz"), regexMatcher.replace(text, replacement));
     }
@@ -86,7 +86,7 @@ public class RegexMatcherTest extends CrateUnitTest {
     public void testReplaceGlobal() throws Exception {
         String pattern = "ba";
         BytesRef text = new BytesRef("foobarbequebaz");
-        BytesRef replacement = new BytesRef("Crate");
+        String replacement = "Crate";
         RegexMatcher regexMatcher = new RegexMatcher(pattern, new BytesRef("g"));
         assertEquals(new BytesRef("fooCraterbequeCratez"), regexMatcher.replace(text, replacement));
     }
@@ -98,6 +98,6 @@ public class RegexMatcherTest extends CrateUnitTest {
         RegexMatcher regexMatcher = new RegexMatcher(pattern);
         assertEquals(true, regexMatcher.match(text));
         assertThat(regexMatcher.groups(),
-                arrayContaining(new BytesRef(" --std"), null));
+            arrayContaining(new BytesRef(" --std"), null));
     }
 }

@@ -21,62 +21,29 @@
 
 package io.crate.operation.scalar;
 
-import com.google.common.base.Preconditions;
 import io.crate.metadata.*;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.data.Input;
 import io.crate.types.CollectionType;
 import io.crate.types.DataType;
-import io.crate.types.DataTypes;
 
 import java.util.List;
 
-public class SubscriptFunction extends Scalar<Object, Object[]> implements DynamicFunctionResolver {
+public class SubscriptFunction extends Scalar<Object, Object[]> {
 
     public static final String NAME = "subscript";
-
-    private static FunctionInfo createInfo(List<DataType> argumentTypes, DataType returnType) {
-        return new FunctionInfo(new FunctionIdent(NAME, argumentTypes), returnType);
-    }
-    public static void register(ScalarFunctionModule module) {
-        module.register(NAME, new SubscriptFunction());
-    }
-
     private FunctionInfo info;
 
-    private SubscriptFunction() {
+    public static void register(ScalarFunctionModule module) {
+        module.register(NAME, new Resolver());
     }
 
-    public SubscriptFunction(FunctionInfo info) {
+    private SubscriptFunction(FunctionInfo info) {
         this.info = info;
     }
 
     @Override
     public FunctionInfo info() {
         return info;
-    }
-
-
-    @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        final int size = symbol.arguments().size();
-        assert size == 2 : "invalid number of arguments";
-
-        if (anyNonLiterals(symbol.arguments())) {
-            return symbol;
-        }
-
-        final Symbol input = symbol.arguments().get(0);
-        final Symbol index = symbol.arguments().get(1);
-        final Object inputValue = ((Input) input).value();
-        final Object indexValue = ((Input) index).value();
-        if (inputValue == null || indexValue == null) {
-            return Literal.NULL;
-        }
-
-        return Literal.newLiteral(info.returnType(), evaluate(inputValue, indexValue));
     }
 
     @Override
@@ -90,7 +57,7 @@ public class SubscriptFunction extends Scalar<Object, Object[]> implements Dynam
             return null;
         }
         assert (element instanceof Object[] || element instanceof List)
-                : "first argument must be of type array or list";
+            : "first argument must be of type array or list";
         assert index instanceof Integer : "second argument must be of type integer";
 
         // 1 based arrays as SQL standard says
@@ -105,14 +72,20 @@ public class SubscriptFunction extends Scalar<Object, Object[]> implements Dynam
         }
     }
 
-    @Override
-    public FunctionImplementation<Function> getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
-        Preconditions.checkArgument(dataTypes.size() == 2
-                && DataTypes.isCollectionType(dataTypes.get(0))
-                && dataTypes.get(1) == DataTypes.INTEGER);
-        DataType returnType = ((CollectionType)dataTypes.get(0)).innerType();
-        return new SubscriptFunction(createInfo(dataTypes, returnType));
+    private static class Resolver extends BaseFunctionResolver {
+
+        private static FunctionInfo createInfo(List<DataType> argumentTypes, DataType returnType) {
+            return new FunctionInfo(new FunctionIdent(NAME, argumentTypes), returnType);
+        }
+
+        protected Resolver() {
+            super(Signature.of(Signature.ArgMatcher.ANY_ARRAY, Signature.ArgMatcher.INTEGER));
+        }
+
+        @Override
+        public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
+            DataType returnType = ((CollectionType) dataTypes.get(0)).innerType();
+            return new SubscriptFunction(createInfo(dataTypes, returnType));
+        }
     }
-
-
 }

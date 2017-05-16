@@ -22,10 +22,10 @@
 package io.crate.planner.consumer;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.planner.symbol.InputColumn;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.InputColumn;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.metadata.Reference;
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.testing.TestingHelpers;
 import io.crate.types.DataTypes;
@@ -35,8 +35,8 @@ public class OrderByPositionVisitorTest extends CrateUnitTest {
     @Test
     public void testOrderByPositionInputs() throws Exception {
         int[] orderByPositions = OrderByPositionVisitor.orderByPositions(
-                ImmutableList.<Symbol>of(new InputColumn(0), new InputColumn(1), new InputColumn(0)),
-                ImmutableList.<Symbol>of(Literal.BOOLEAN_TRUE, Literal.newLiteral(1))
+            ImmutableList.<Symbol>of(new InputColumn(0), new InputColumn(1), new InputColumn(0)),
+            ImmutableList.<Symbol>of(Literal.BOOLEAN_TRUE, Literal.of(1))
         );
         assertArrayEquals(new int[]{0, 1, 0}, orderByPositions);
     }
@@ -45,8 +45,8 @@ public class OrderByPositionVisitorTest extends CrateUnitTest {
     public void testSymbols() throws Exception {
         Reference ref = TestingHelpers.createReference("column", DataTypes.STRING);
         int[] orderByPositions = OrderByPositionVisitor.orderByPositions(
-                ImmutableList.of(ref, new InputColumn(1), new InputColumn(0)),
-                ImmutableList.of(ref, Literal.newLiteral(1))
+            ImmutableList.of(ref, new InputColumn(1), new InputColumn(0)),
+            ImmutableList.of(ref, Literal.of(1))
         );
         assertArrayEquals(new int[]{0, 1, 0}, orderByPositions);
     }
@@ -54,12 +54,12 @@ public class OrderByPositionVisitorTest extends CrateUnitTest {
     @Test
     public void testSymbolNotContained() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("Cannot sort by: dummyTable.other - not part of source symbols");
+        expectedException.expectMessage("Cannot sort by: other - not part of source symbols");
 
         Reference ref = TestingHelpers.createReference("column", DataTypes.STRING);
         OrderByPositionVisitor.orderByPositions(
-                ImmutableList.of(ref, new InputColumn(1), TestingHelpers.createReference("other", DataTypes.LONG)),
-                ImmutableList.of(ref, Literal.BOOLEAN_FALSE)
+            ImmutableList.of(ref, new InputColumn(1), TestingHelpers.createReference("other", DataTypes.LONG)),
+            ImmutableList.of(ref, Literal.BOOLEAN_FALSE)
         );
 
     }

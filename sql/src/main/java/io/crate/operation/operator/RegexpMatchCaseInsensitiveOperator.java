@@ -22,14 +22,9 @@
 package io.crate.operation.operator;
 
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.data.Input;
 import io.crate.types.DataTypes;
 import org.apache.lucene.util.BytesRef;
-import org.apache.lucene.util.automaton.ByteRunAutomaton;
-import org.apache.lucene.util.automaton.RegExp;
 
 import java.util.regex.Pattern;
 
@@ -63,23 +58,5 @@ public class RegexpMatchCaseInsensitiveOperator extends Operator<BytesRef> {
     @Override
     public FunctionInfo info() {
         return INFO;
-    }
-
-    @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        assert (symbol != null);
-        assert symbol.arguments().size() == 2;
-
-        Symbol sourceSymbol = symbol.arguments().get(0);
-        Symbol patternSymbol = symbol.arguments().get(1);
-
-        if (containsNull(sourceSymbol, patternSymbol)) {
-            return Literal.NULL;
-        }
-        if (!sourceSymbol.symbolType().isValueSymbol() || !patternSymbol.symbolType().isValueSymbol()) {
-            return symbol;
-        }
-
-        return Literal.newLiteral(evaluate((Literal) sourceSymbol, (Literal) patternSymbol));
     }
 }

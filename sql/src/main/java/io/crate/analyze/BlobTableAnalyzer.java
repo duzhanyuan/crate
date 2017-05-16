@@ -24,32 +24,27 @@ package io.crate.analyze;
 import com.google.common.base.Preconditions;
 import io.crate.metadata.TableIdent;
 import io.crate.metadata.blob.BlobSchemaInfo;
-import io.crate.sql.tree.DefaultTraversalVisitor;
-import io.crate.sql.tree.Node;
 import io.crate.sql.tree.Table;
 
 import java.util.List;
 
-public abstract class BlobTableAnalyzer<StatementType extends AnalyzedStatement>
-        extends DefaultTraversalVisitor<StatementType, Analysis> {
+final class BlobTableAnalyzer {
 
-    public StatementType analyze(Node node, Analysis analysis) {
-        analysis.expectsAffectedRows(true);
-        return super.process(node, analysis);
+    private BlobTableAnalyzer() {
     }
 
-    protected static TableIdent tableToIdent(Table table) {
+    static TableIdent tableToIdent(Table table) {
         List<String> tableNameParts = table.getName().getParts();
         Preconditions.checkArgument(tableNameParts.size() < 3, "Invalid tableName \"%s\"", table.getName());
 
         if (tableNameParts.size() == 2) {
             Preconditions.checkArgument(tableNameParts.get(0).equalsIgnoreCase(BlobSchemaInfo.NAME),
-                    "The Schema \"%s\" isn't valid in a [CREATE | ALTER] BLOB TABLE clause",
-                    tableNameParts.get(0));
+                "The Schema \"%s\" isn't valid in a [CREATE | ALTER] BLOB TABLE clause",
+                tableNameParts.get(0));
 
             return new TableIdent(tableNameParts.get(0), tableNameParts.get(1));
         }
-        assert tableNameParts.size() == 1;
+        assert tableNameParts.size() == 1 : "tableNameParts.size() must be 1";
         return new TableIdent(BlobSchemaInfo.NAME, tableNameParts.get(0));
     }
 }

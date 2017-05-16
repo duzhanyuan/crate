@@ -21,68 +21,47 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.Optional;
-
 import javax.annotation.Nullable;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
-public class CurrentTime
-        extends Expression
-{
+public class CurrentTime extends Expression {
+
     private final Type type;
     private final Optional<Integer> precision;
 
-    public enum Type
-    {
-        TIME("current_time"),
-        DATE("current_date"),
-        TIMESTAMP("current_timestamp");
-
-        private final String name;
-
-        private Type(String name)
-        {
-            this.name = name;
-        }
-
-        public String getName()
-        {
-            return name;
-        }
+    public enum Type {
+        TIME,
+        DATE,
+        TIMESTAMP
     }
 
-    public CurrentTime(Type type)
-    {
+    public CurrentTime(Type type) {
         this(type, null);
     }
 
-    public CurrentTime(Type type, @Nullable Integer precision)
-    {
+    public CurrentTime(Type type, @Nullable Integer precision) {
         checkNotNull(type, "type is null");
         this.type = type;
-        this.precision = Optional.fromNullable(precision);
+        this.precision = Optional.ofNullable(precision);
     }
 
-    public Type getType()
-    {
+    public Type getType() {
         return type;
     }
 
-    public Optional<Integer> getPrecision()
-    {
+    public Optional<Integer> getPrecision() {
         return precision;
     }
 
     @Override
-    public <R, C> R accept(AstVisitor<R, C> visitor, C context)
-    {
+    public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitCurrentTime(this, context);
     }
 
     @Override
-    public boolean equals(Object o)
-    {
+    public boolean equals(Object o) {
         if (this == o) {
             return true;
         }
@@ -103,8 +82,7 @@ public class CurrentTime
     }
 
     @Override
-    public int hashCode()
-    {
+    public int hashCode() {
         int result = type.hashCode();
         result = 31 * result + precision.hashCode();
         return result;

@@ -22,31 +22,34 @@
 package io.crate.operation.projectors;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.core.collections.RowN;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.ReferenceIdent;
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.TableIdent;
-import io.crate.operation.Input;
+import io.crate.analyze.symbol.InputColumn;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.data.BatchIterator;
+import io.crate.data.Row;
+import io.crate.data.RowN;
+import io.crate.data.RowsBatchIterator;
+import io.crate.metadata.*;
 import io.crate.operation.collect.CollectExpression;
 import io.crate.operation.collect.InputCollectExpression;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.InputColumn;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
 import io.crate.test.integration.CrateUnitTest;
+import io.crate.testing.TestingBatchConsumer;
+import io.crate.testing.TestingHelpers;
 import io.crate.types.DataTypes;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.action.admin.indices.create.TransportCreateIndexAction;
+import org.elasticsearch.action.admin.indices.create.TransportBulkCreateIndicesAction;
+import org.elasticsearch.action.bulk.BulkRequestExecutor;
 import org.elasticsearch.action.bulk.BulkRetryCoordinatorPool;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.common.settings.Settings;
 import org.junit.Test;
 import org.mockito.Answers;
 import org.mockito.Mock;
 
 import java.util.Arrays;
-import java.util.concurrent.ExecutionException;
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
 
 import static org.mockito.Mockito.mock;
 
@@ -54,87 +57,48 @@ public class IndexWriterProjectorUnitTest extends CrateUnitTest {
 
     private final static ColumnIdent ID_IDENT = new ColumnIdent("id");
     private static final TableIdent bulkImportIdent = new TableIdent(null, "bulk_import");
-    private static Reference rawSourceReference = new Reference(new ReferenceInfo(
-            new ReferenceIdent(bulkImportIdent, "_raw"), RowGranularity.DOC, DataTypes.STRING));
+    private static Reference rawSourceReference = new Reference(
+        new ReferenceIdent(bulkImportIdent, "_raw"), RowGranularity.DOC, DataTypes.STRING);
 
     @Mock(answer = Answers.RETURNS_MOCKS)
     ClusterService clusterService;
 
     @Test
-    public void testExceptionBubbling() throws Throwable {
-        expectedException.expect(IllegalStateException.class);
-        expectedException.expectMessage("my dummy exception");
-
-        CollectingProjector collectingProjector = new CollectingProjector();
-        InputCollectExpression<Object> sourceInput = new InputCollectExpression<>(1);
-        InputColumn sourceInputColumn = new InputColumn(1);
-        CollectExpression[] collectExpressions = new CollectExpression[]{ sourceInput };
-
-        final IndexWriterProjector indexWriter = new IndexWriterProjector(
-                clusterService,
-                ImmutableSettings.EMPTY,
-                mock(TransportCreateIndexAction.class),
-                mock(BulkRetryCoordinatorPool.class),
-                new TableIdent(null, "bulk_import"),
-                null,
-                rawSourceReference,
-                ImmutableList.of(ID_IDENT),
-                Arrays.<Symbol>asList(new InputColumn(0)),
-                ImmutableList.<Input<?>>of(),
-                null,
-                sourceInput,
-                sourceInputColumn,
-                collectExpressions,
-                20,
-                null, null,
-                false,
-                false
-        );
-        indexWriter.downstream(collectingProjector);
-        indexWriter.registerUpstream(null);
-        indexWriter.fail(new IllegalStateException("my dummy exception"));
-
-        try {
-            collectingProjector.result().get();
-        } catch (InterruptedException | ExecutionException e) {
-            throw e.getCause();
-        }
-    }
-
-    @Test
     public void testNullPKValue() throws Throwable {
+        InputCollectExpression sourceInput = new InputCollectExpression(0);
+        List<CollectExpression<Row, ?>> collectExpressions = Collections.<CollectExpression<Row, ?>>singletonList(sourceInput);
+        final IndexWriterProjector indexWriter = new IndexWriterProjector(
+            clusterService,
+            TestingHelpers.getFunctions(),
+            new IndexNameExpressionResolver(Settings.EMPTY),
+            Settings.EMPTY,
+            mock(TransportBulkCreateIndicesAction.class),
+            mock(BulkRequestExecutor.class),
+            () -> "foo",
+            mock(BulkRetryCoordinatorPool.class, Answers.RETURNS_DEEP_STUBS.get()),
+            rawSourceReference,
+            ImmutableList.of(ID_IDENT),
+            Arrays.<Symbol>asList(new InputColumn(1)),
+            null,
+            null,
+            sourceInput,
+            collectExpressions,
+            20,
+            null, null,
+            false,
+            false,
+            UUID.randomUUID()
+        );
+
+        RowN rowN = new RowN(new Object[]{new BytesRef("{\"y\": \"x\"}"), null});
+        BatchIterator batchIterator = RowsBatchIterator.newInstance(Collections.singletonList(rowN), rowN.numColumns());
+        batchIterator = indexWriter.apply(batchIterator);
+
+        TestingBatchConsumer testingBatchConsumer = new TestingBatchConsumer();
+        testingBatchConsumer.accept(batchIterator, null);
+
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("A primary key value must not be NULL");
-
-
-        CollectingProjector collectingProjector = new CollectingProjector();
-        InputCollectExpression<Object> sourceInput = new InputCollectExpression<>(0);
-        InputColumn sourceInputColumn = new InputColumn(0);
-        CollectExpression[] collectExpressions = new CollectExpression[]{ sourceInput };
-        final IndexWriterProjector indexWriter = new IndexWriterProjector(
-                clusterService,
-                ImmutableSettings.EMPTY,
-                mock(TransportCreateIndexAction.class),
-                mock(BulkRetryCoordinatorPool.class, Answers.RETURNS_DEEP_STUBS.get()),
-                new TableIdent(null, "bulk_import"),
-                null,
-                rawSourceReference,
-                ImmutableList.of(ID_IDENT),
-                Arrays.<Symbol>asList(new InputColumn(1)),
-                ImmutableList.<Input<?>>of(),
-                null,
-                sourceInput,
-                sourceInputColumn,
-                collectExpressions,
-                20,
-                null, null,
-                false,
-                false
-        );
-        indexWriter.downstream(collectingProjector);
-        indexWriter.registerUpstream(null);
-        indexWriter.startProjection();
-        indexWriter.setNextRow(new RowN(new Object[]{new BytesRef("{\"y\": \"x\"}"), null}));
-        indexWriter.finish();
+        testingBatchConsumer.getResult();
     }
 }

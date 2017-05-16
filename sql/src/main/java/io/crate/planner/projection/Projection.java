@@ -21,26 +21,46 @@
 
 package io.crate.planner.projection;
 
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.Symbol;
+import com.google.common.base.Predicate;
+import com.google.common.base.Predicates;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.metadata.RowGranularity;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.io.stream.Streamable;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.List;
+import java.util.function.Function;
 
-public abstract class Projection implements Streamable {
+public abstract class Projection {
+
+    public static final Predicate<Projection> IS_SHARD_PROJECTION = new Predicate<Projection>() {
+        @Override
+        public boolean apply(@Nullable Projection projection) {
+            return projection != null && projection.requiredGranularity() == RowGranularity.SHARD;
+        }
+    };
+    public static final Predicate<Projection> IS_NODE_PROJECTION = Predicates.not(IS_SHARD_PROJECTION);
 
     /**
      * The granularity required to run this projection
+     * <p>
+     * For example:
+     * <p>
+     * CLUSTER - projection may run in any context on the cluster and receive any rows.
+     * <p>
+     * SHARD - projection must be run in a shard-context and it must only receive rows from a
+     * single shard.
      */
     public RowGranularity requiredGranularity() {
         return RowGranularity.CLUSTER;
     }
 
+    public abstract void replaceSymbols(Function<Symbol, Symbol> replaceFunction);
+
     public interface ProjectionFactory<T extends Projection> {
-        public T newInstance();
+        T newInstance(StreamInput in) throws IOException;
     }
 
     public abstract ProjectionType projectionType();
@@ -55,11 +75,10 @@ public abstract class Projection implements Streamable {
     }
 
     public static Projection fromStream(StreamInput in) throws IOException {
-        Projection projection = ProjectionType.values()[in.readVInt()].newInstance();
-        projection.readFrom(in);
-
-        return projection;
+        return ProjectionType.values()[in.readVInt()].newInstance(in);
     }
+
+    public abstract void writeTo(StreamOutput out) throws IOException;
 
     // force subclasses to implement equality
     @Override

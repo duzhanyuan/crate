@@ -21,23 +21,14 @@
 
 package io.crate;
 
-import org.elasticsearch.common.io.stream.StreamInput;
-import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.io.stream.Streamable;
-
-import java.io.IOException;
 import java.util.UUID;
 
-public class ClusterId implements Streamable {
+public class ClusterId {
 
     private UUID uuid;
 
     public ClusterId() {
         this.uuid = UUID.randomUUID();
-    }
-
-    public ClusterId(UUID uuid) {
-        this.uuid = uuid;
     }
 
     public ClusterId(String uuid) {
@@ -46,19 +37,6 @@ public class ClusterId implements Streamable {
 
     public UUID value() {
         return uuid;
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        long msb = in.readVLong();
-        long lsb = in.readVLong();
-        uuid = new UUID(msb, lsb);
-    }
-
-    @Override
-    public void writeTo(StreamOutput out) throws IOException {
-        out.writeVLong(uuid.getMostSignificantBits());
-        out.writeVLong(uuid.getLeastSignificantBits());
     }
 
     @Override
@@ -73,7 +51,7 @@ public class ClusterId implements Streamable {
 
     @Override
     public int hashCode() {
-        return uuid != null ? uuid.hashCode() : 0;
+        return uuid.hashCode();
     }
 
     @Override

@@ -21,21 +21,23 @@
 
 package io.crate.operation;
 
-import io.crate.core.collections.Buckets;
-import io.crate.core.collections.Row;
+import io.crate.data.Buckets;
+import io.crate.data.Input;
+import io.crate.data.Row;
 
 import java.util.List;
 
 public class InputRow implements Row {
 
-    private final List<Input<?>> inputs;
+    private final List<? extends Input<?>> inputs;
 
-    public InputRow(List<Input<?>> inputs) {
+    public InputRow(List<? extends Input<?>> inputs) {
+        assert inputs != null: "inputs must not be null";
         this.inputs = inputs;
     }
 
     @Override
-    public int size() {
+    public int numColumns() {
         return inputs.size();
     }
 
@@ -47,5 +49,12 @@ public class InputRow implements Row {
     @Override
     public Object[] materialize() {
         return Buckets.materialize(this);
+    }
+
+    @Override
+    public String toString() {
+        return "InputRow{" +
+               "inputs=" + inputs +
+               '}';
     }
 }

@@ -1,10 +1,11 @@
 package io.crate.operation.operator;
 
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.metadata.TransactionContext;
+import io.crate.data.Input;
 import io.crate.types.DataTypes;
 
 public class OrOperator extends Operator<Boolean> {
@@ -22,18 +23,18 @@ public class OrOperator extends Operator<Boolean> {
     }
 
     @Override
-    public Symbol normalizeSymbol(Function function) {
-        assert (function != null);
-        assert function.arguments().size() == 2;
+    public Symbol normalizeSymbol(Function function, TransactionContext transactionContext) {
+        assert function != null : "function must not be null";
+        assert function.arguments().size() == 2  : "number of args must be 2";
 
         Symbol left = function.arguments().get(0);
         Symbol right = function.arguments().get(1);
 
         if (left.symbolType().isValueSymbol() && right.symbolType().isValueSymbol()) {
-            return Literal.newLiteral(evaluate((Input) left, (Input) right));
+            return Literal.of(evaluate((Input) left, (Input) right));
         }
 
-        /***
+        /*
          * true  or x    -> true
          * false or x    -> x
          * null  or x    -> null or true -> return function as is
@@ -43,9 +44,9 @@ public class OrOperator extends Operator<Boolean> {
             if (value == null) {
                 return function;
             }
-            assert value instanceof Boolean;
+            assert value instanceof Boolean : "value must be Boolean";
             if ((Boolean) value) {
-                return Literal.newLiteral(true);
+                return Literal.of(true);
             } else {
                 return right;
             }
@@ -56,9 +57,9 @@ public class OrOperator extends Operator<Boolean> {
             if (value == null) {
                 return function;
             }
-            assert value instanceof Boolean;
+            assert value instanceof Boolean : "value must be Boolean";
             if ((Boolean) value) {
-                return Literal.newLiteral(true);
+                return Literal.of(true);
             } else {
                 return left;
             }
@@ -69,9 +70,9 @@ public class OrOperator extends Operator<Boolean> {
 
     @Override
     public Boolean evaluate(Input<Boolean>... args) {
-        assert (args != null);
-        assert (args.length == 2);
-        assert (args[0] != null && args[1] != null);
+        assert args != null : "args must not be null";
+        assert args.length == 2 : "number of args must be 2";
+        assert args[0] != null && args[1] != null : "1st and 2nd argument must not be null";
 
         // implement three valued logic.
         // don't touch anything unless you have a good reason for it! :)

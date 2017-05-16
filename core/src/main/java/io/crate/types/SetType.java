@@ -26,8 +26,7 @@ import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
 import java.io.IOException;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.*;
 
 public class SetType extends DataType implements CollectionType, Streamer<Set> {
 
@@ -35,7 +34,8 @@ public class SetType extends DataType implements CollectionType, Streamer<Set> {
 
     private DataType innerType;
 
-    SetType() {}
+    SetType() {
+    }
 
     public SetType(DataType innerType) {
         this.innerType = innerType;
@@ -63,14 +63,28 @@ public class SetType extends DataType implements CollectionType, Streamer<Set> {
 
     @Override
     public Set value(Object value) {
-        return (Set)value;
+        if (value instanceof Set) {
+            return (Set) value;
+        }
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Collection) {
+            //noinspection unchecked
+            return new HashSet((Collection) value);
+        }
+        if (value.getClass().isArray()) {
+            return new HashSet<>(Arrays.asList((Object[]) value));
+        }
+        throw new IllegalArgumentException(String.format(Locale.ENGLISH,
+            "Cannot convert %s to %s", value, getName()));
     }
 
     @Override
     public boolean isConvertableTo(DataType other) {
         return other.id() == UndefinedType.ID ||
-                ((other instanceof SetType)
-                && this.innerType.isConvertableTo(((SetType) other).innerType));
+               ((other instanceof CollectionType)
+                && this.innerType.isConvertableTo(((CollectionType) other).innerType()));
     }
 
     @Override
@@ -83,13 +97,13 @@ public class SetType extends DataType implements CollectionType, Streamer<Set> {
             return 0;
         }
 
-        return Integer.compare(((Set)val1).size(), ((Set)val2).size());
+        return Integer.compare(((Set) val1).size(), ((Set) val2).size());
     }
 
     @Override
     public int compareTo(Object o) {
         if (!(o instanceof SetType)) return -1;
-        return Integer.compare(innerType.id(), ((SetType)o).innerType().id());
+        return Integer.compare(innerType.id(), ((SetType) o).innerType().id());
     }
 
     @Override
@@ -117,7 +131,7 @@ public class SetType extends DataType implements CollectionType, Streamer<Set> {
 
     @Override
     public void writeValueTo(StreamOutput out, Object v) throws IOException {
-        assert v instanceof Set;
+        assert v instanceof Set : "v must be instance of Set";
         Set s = (Set) v;
         boolean containsNull = s.contains(null);
         out.writeVInt(containsNull ? s.size() - 1 : s.size());

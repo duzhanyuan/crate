@@ -23,54 +23,37 @@ package io.crate.metadata.sys;
 
 import com.google.common.collect.ImmutableList;
 import io.crate.analyze.WhereClause;
-import io.crate.metadata.*;
-import io.crate.planner.RowGranularity;
-import io.crate.types.DataType;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.Routing;
+import io.crate.metadata.RowGranularity;
+import io.crate.metadata.TableIdent;
+import io.crate.metadata.table.ColumnRegistrar;
+import io.crate.metadata.table.StaticTableInfo;
 import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
 
 import javax.annotation.Nullable;
-import java.util.*;
 
-public class SysJobsTableInfo extends SysTableInfo {
+public class SysJobsTableInfo extends StaticTableInfo {
 
-    public static final TableIdent IDENT = new TableIdent(SCHEMA, "jobs");
-    private static final String[] PARTITIONS = new String[]{IDENT.name()};
+    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "jobs");
+    private static final ImmutableList<ColumnIdent> PRIMARY_KEY = ImmutableList.of(Columns.ID);
+    private final ClusterService service;
 
-    private static final ImmutableList<ColumnIdent> primaryKey = ImmutableList.of(new ColumnIdent("id"));
-
-    public static final Map<ColumnIdent, ReferenceInfo> INFOS = new LinkedHashMap<>();
-    private static final LinkedHashSet<ReferenceInfo> columns = new LinkedHashSet<>();
-
-    static {
-        register("id", DataTypes.STRING, null);
-        register("stmt", DataTypes.STRING, null);
-        register("started", DataTypes.TIMESTAMP, null);
+    public static class Columns {
+        public static final ColumnIdent ID = new ColumnIdent("id");
+        public static final ColumnIdent STMT = new ColumnIdent("stmt");
+        public static final ColumnIdent STARTED = new ColumnIdent("started");
     }
 
     @Inject
-    public SysJobsTableInfo(ClusterService service, SysSchemaInfo sysSchemaInfo) {
-        super(service, sysSchemaInfo);
-    }
-
-    private static ReferenceInfo register(String column, DataType type, List<String> path) {
-        ReferenceInfo info = new ReferenceInfo(new ReferenceIdent(IDENT, column, path), RowGranularity.DOC, type);
-        if (info.ident().isColumn()) {
-            columns.add(info);
-        }
-        INFOS.put(info.ident().columnIdent(), info);
-        return info;
-    }
-
-    @Override
-    public ReferenceInfo getReferenceInfo(ColumnIdent columnIdent) {
-        return INFOS.get(columnIdent);
-    }
-
-    @Override
-    public Collection<ReferenceInfo> columns() {
-        return columns;
+    public SysJobsTableInfo(ClusterService service) {
+        super(IDENT, new ColumnRegistrar(IDENT, RowGranularity.DOC)
+            .register(Columns.ID, DataTypes.STRING)
+            .register(Columns.STMT, DataTypes.STRING)
+            .register(Columns.STARTED, DataTypes.TIMESTAMP), PRIMARY_KEY);
+        this.service = service;
     }
 
     @Override
@@ -85,21 +68,6 @@ public class SysJobsTableInfo extends SysTableInfo {
 
     @Override
     public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return tableRouting(whereClause);
-    }
-
-    @Override
-    public List<ColumnIdent> primaryKey() {
-        return primaryKey;
-    }
-
-    @Override
-    public String[] concreteIndices() {
-        return PARTITIONS;
-    }
-
-    @Override
-    public Iterator<ReferenceInfo> iterator() {
-        return INFOS.values().iterator();
+        return Routing.forTableOnAllNodes(IDENT, service.state().nodes());
     }
 }

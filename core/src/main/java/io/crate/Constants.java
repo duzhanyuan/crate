@@ -21,32 +21,14 @@
 
 package io.crate;
 
-import com.google.common.base.Predicate;
-import com.google.common.base.Predicates;
-
-import java.util.regex.Pattern;
-
 public class Constants {
 
-    public static final boolean DEBUG_MODE = false;
-    /**
-     * Mapping Type that contains table definitions
-     */
+    // Mapping Type that contains table definitions
     public static final String DEFAULT_MAPPING_TYPE = "default";
 
-    // port rangess for HTTP and Transport
+    // port ranges for HTTP and Transport
     public static final String HTTP_PORT_RANGE = "4200-4300";
     public static final String TRANSPORT_PORT_RANGE = "4300-4400";
-    public static final String THRIFT_PORT_RANGE = "4500-4600";
-    public static final Integer DEFAULT_SELECT_LIMIT = 10000;
 
-    public static final String CUSTOM_ANALYSIS_SETTINGS_PREFIX = "crate.analysis.custom";
-    public static final Integer DEFAULT_NUM_SHARDS = 5;
-
-    public static final int UPDATE_RETRY_ON_CONFLICT = 3;
-
-
-    public static final Predicate<CharSequence> INVALID_COLUMN_NAME_PREDICATE = Predicates.contains(Pattern.compile("[\\[\\'\\]]"));
-
-    public final static int PAGE_SIZE = 1_000_000;
+    public static final int MAX_SHARD_MISSING_RETRIES = 3;
 }

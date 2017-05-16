@@ -21,7 +21,8 @@
 
 package io.crate.operation.reference.sys;
 
-import io.crate.metadata.sys.SysExpression;
+import io.crate.metadata.ReferenceImplementation;
+import io.crate.operation.reference.NestedObjectExpression;
 import io.crate.test.integration.CrateUnitTest;
 import org.apache.lucene.util.BytesRef;
 import org.junit.Test;
@@ -32,7 +33,7 @@ import static org.hamcrest.Matchers.*;
 
 public class SysExpressionsBytesRefTest extends CrateUnitTest {
 
-    static class BytesRefNullSysExpression extends SysExpression<BytesRef> {
+    static class BytesRefNullSysExpression implements ReferenceImplementation<BytesRef> {
 
         @Override
         public BytesRef value() {
@@ -41,7 +42,7 @@ public class SysExpressionsBytesRefTest extends CrateUnitTest {
 
     }
 
-    static class NullFieldSysObjectReference extends SysObjectReference {
+    static class NullFieldSysObjectReference extends NestedObjectExpression {
 
         protected NullFieldSysObjectReference() {
             childImplementations.put("n", new BytesRefNullSysExpression());
@@ -60,7 +61,7 @@ public class SysExpressionsBytesRefTest extends CrateUnitTest {
     @Test
     public void testSysObjectReferenceNull() throws Exception {
         NullFieldSysObjectReference nullRef = new NullFieldSysObjectReference();
-        SysExpression n = nullRef.getChildImplementation("n");
+        ReferenceImplementation n = nullRef.getChildImplementation("n");
         assertThat(n, instanceOf(BytesRefNullSysExpression.class));
 
         Map<String, Object> value = nullRef.value();

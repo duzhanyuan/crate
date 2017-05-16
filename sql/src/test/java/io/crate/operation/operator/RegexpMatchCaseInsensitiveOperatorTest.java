@@ -21,9 +21,11 @@
 
 package io.crate.operation.operator;
 
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.action.sql.SessionContext;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.metadata.TransactionContext;
 import io.crate.test.integration.CrateUnitTest;
 import org.junit.Test;
 
@@ -36,14 +38,14 @@ public class RegexpMatchCaseInsensitiveOperatorTest extends CrateUnitTest {
     private static Symbol normalizeSymbol(String source, String pattern) {
         RegexpMatchCaseInsensitiveOperator op = new RegexpMatchCaseInsensitiveOperator();
         Function function = new Function(
-                op.info(),
-                Arrays.<Symbol>asList(Literal.newLiteral(source), Literal.newLiteral(pattern))
+            op.info(),
+            Arrays.<Symbol>asList(Literal.of(source), Literal.of(pattern))
         );
-        return op.normalizeSymbol(function);
+        return op.normalizeSymbol(function, new TransactionContext(SessionContext.SYSTEM_SESSION));
     }
 
     private Boolean regexpNormalize(String source, String pattern) {
-        return (Boolean)((Literal)normalizeSymbol(source, pattern)).value();
+        return (Boolean) ((Literal) normalizeSymbol(source, pattern)).value();
     }
 
     @Test
@@ -67,7 +69,7 @@ public class RegexpMatchCaseInsensitiveOperatorTest extends CrateUnitTest {
 
     private Boolean regexpEvaluate(String source, String pattern) {
         RegexpMatchCaseInsensitiveOperator op = new RegexpMatchCaseInsensitiveOperator();
-        return op.evaluate(Literal.newLiteral(source), Literal.newLiteral(pattern));
+        return op.evaluate(Literal.of(source), Literal.of(pattern));
     }
 
     @Test

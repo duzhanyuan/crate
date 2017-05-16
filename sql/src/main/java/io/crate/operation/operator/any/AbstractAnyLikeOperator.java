@@ -24,7 +24,7 @@ package io.crate.operation.operator.any;
 import io.crate.metadata.FunctionInfo;
 import org.apache.lucene.util.BytesRef;
 
-public abstract class AbstractAnyLikeOperator<T extends AbstractAnyLikeOperator<?>> extends AnyOperator<T> {
+public abstract class AbstractAnyLikeOperator extends AnyOperator {
 
     @Override
     protected boolean compare(int comparisonResult) {
@@ -46,13 +46,13 @@ public abstract class AbstractAnyLikeOperator<T extends AbstractAnyLikeOperator<
                 hasNull = true;
                 continue;
             }
-            assert (elem instanceof BytesRef || elem instanceof String);
+            assert elem instanceof BytesRef || elem instanceof String : "elem must be BytesRef or String";
 
             String elemValue;
             if (elem instanceof BytesRef) {
                 elemValue = ((BytesRef) elem).utf8ToString();
             } else {
-                elemValue = (String)elem;
+                elemValue = (String) elem;
             }
             if (matches(elemValue, pattern)) {
                 return true;

@@ -21,26 +21,26 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.ReferenceInfos;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.table.TableInfo;
+import io.crate.metadata.doc.DocTableInfo;
 
-public class AddColumnAnalyzedStatement extends AbstractDDLAnalyzedStatement {
+public class AddColumnAnalyzedStatement implements DDLStatement {
 
-    private final ReferenceInfos referenceInfos;
-    private TableInfo tableInfo;
-    private AnalyzedTableElements analyzedTableElements;
-    private boolean newPrimaryKeys = false;
+    private final DocTableInfo tableInfo;
+    private final AnalyzedTableElements analyzedTableElements;
+    private final boolean newPrimaryKeys;
+    private final boolean hasNewGeneratedColumns;
 
-    protected AddColumnAnalyzedStatement(ReferenceInfos referenceInfos) {
-        this.referenceInfos = referenceInfos;
+    protected AddColumnAnalyzedStatement(DocTableInfo tableInfo,
+                                         AnalyzedTableElements tableElements,
+                                         boolean newPrimaryKeys,
+                                         boolean hasNewGeneratedColumns) {
+        this.tableInfo = tableInfo;
+        analyzedTableElements = tableElements;
+        this.newPrimaryKeys = newPrimaryKeys;
+        this.hasNewGeneratedColumns = hasNewGeneratedColumns;
     }
 
-    public void table(TableIdent tableIdent) {
-        tableInfo = referenceInfos.getWritableTable(tableIdent);
-    }
-
-    public TableInfo table() {
+    public DocTableInfo table() {
         return this.tableInfo;
     }
 
@@ -49,19 +49,15 @@ public class AddColumnAnalyzedStatement extends AbstractDDLAnalyzedStatement {
         return visitor.visitAddColumnStatement(this, context);
     }
 
-    public void analyzedTableElements(AnalyzedTableElements analyzedTableElements) {
-        this.analyzedTableElements = analyzedTableElements;
-    }
-
     public AnalyzedTableElements analyzedTableElements() {
         return this.analyzedTableElements;
     }
 
-    public void newPrimaryKeys(boolean newPrimaryKeys) {
-        this.newPrimaryKeys = newPrimaryKeys;
-    }
-
     public boolean newPrimaryKeys() {
         return this.newPrimaryKeys;
+    }
+
+    public boolean hasNewGeneratedColumns() {
+        return hasNewGeneratedColumns;
     }
 }

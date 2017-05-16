@@ -21,7 +21,12 @@
 
 package io.crate.breaker;
 
-import io.crate.types.*;
+import io.crate.types.DataType;
+import io.crate.types.FixedWidthType;
+import io.crate.types.IpType;
+import io.crate.types.StringType;
+
+import java.util.Locale;
 
 public class SizeEstimatorFactory {
 
@@ -30,12 +35,12 @@ public class SizeEstimatorFactory {
         switch (type.id()) {
             case StringType.ID:
             case IpType.ID:
-                return (SizeEstimator<T>)new BytesRefSizeEstimator();
+                return (SizeEstimator<T>) new BytesRefSizeEstimator();
             default:
                 if (type instanceof FixedWidthType) {
                     return (SizeEstimator<T>) new ConstSizeEstimator(((FixedWidthType) type).fixedSize());
                 }
-                throw new UnsupportedOperationException(String.format("Cannot get SizeEstimator for type %s", type));
+                throw new UnsupportedOperationException(String.format(Locale.ENGLISH, "Cannot get SizeEstimator for type %s", type));
         }
     }
 }

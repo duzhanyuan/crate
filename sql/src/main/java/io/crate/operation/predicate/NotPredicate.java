@@ -21,23 +21,26 @@
 
 package io.crate.operation.predicate;
 
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.format.OperatorFormatSpec;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
 import io.crate.metadata.Scalar;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.metadata.TransactionContext;
+import io.crate.data.Input;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 
 import java.util.Arrays;
 
-public class NotPredicate extends Scalar<Boolean, Boolean> {
+public class NotPredicate extends Scalar<Boolean, Boolean> implements OperatorFormatSpec {
 
     public static final String NAME = "op_not";
+    public static final String OPERATOR_ALIAS = "NOT";
     public static final FunctionInfo INFO = new FunctionInfo(
-            new FunctionIdent(NAME, Arrays.<DataType>asList(DataTypes.BOOLEAN)), DataTypes.BOOLEAN);
+        new FunctionIdent(NAME, Arrays.<DataType>asList(DataTypes.BOOLEAN)), DataTypes.BOOLEAN);
 
     public static void register(PredicateModule module) {
         module.register(new NotPredicate());
@@ -49,18 +52,21 @@ public class NotPredicate extends Scalar<Boolean, Boolean> {
     }
 
     @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        assert (symbol != null);
-        assert (symbol.arguments().size() == 1);
+    public Symbol normalizeSymbol(Function symbol, TransactionContext transactionContext) {
+        assert symbol != null : "function must not be null";
+        assert symbol.arguments().size() == 1 : "function's number of arguments must be 1";
 
         Symbol arg = symbol.arguments().get(0);
         if (arg instanceof Input) {
             Object value = ((Input) arg).value();
             if (value == null) {
-                return Literal.BOOLEAN_TRUE;
+                /**
+                 * WHERE NOT NULL -> WHERE NULL
+                 */
+                return Literal.NULL;
             }
             if (value instanceof Boolean) {
-                return Literal.newLiteral(!((Boolean) value));
+                return Literal.of(!((Boolean) value));
             }
         }
         return symbol;
@@ -68,11 +74,13 @@ public class NotPredicate extends Scalar<Boolean, Boolean> {
 
     @Override
     public Boolean evaluate(Input<Boolean>... args) {
-        assert args.length == 1;
+        assert args.length == 1 : "number of args must be 1";
         Boolean value = args[0].value();
-        if (value == null) {
-            return true;
-        }
-        return !value;
+        return value != null ? !value : null;
+    }
+
+    @Override
+    public String operator(Function function) {
+        return OPERATOR_ALIAS;
     }
 }

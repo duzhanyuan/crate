@@ -23,8 +23,8 @@ package io.crate.blob;
 
 import io.crate.common.Hex;
 import io.crate.test.integration.CrateUnitTest;
-import org.elasticsearch.common.io.stream.BytesStreamInput;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.is;
@@ -33,13 +33,13 @@ public class DeleteBlobRequestTest extends CrateUnitTest {
 
     @Test
     public void testDeleteBlobRequestStreaming() throws Exception {
-        byte[] digest = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
+        byte[] digest = new byte[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
         DeleteBlobRequest request = new DeleteBlobRequest("foo", digest);
         BytesStreamOutput out = new BytesStreamOutput();
         request.writeTo(out);
 
         DeleteBlobRequest fromStream = new DeleteBlobRequest();
-        BytesStreamInput in = new BytesStreamInput(out.bytes());
+        StreamInput in = out.bytes().streamInput();
         fromStream.readFrom(in);
 
         assertThat(fromStream.index(), is("foo"));

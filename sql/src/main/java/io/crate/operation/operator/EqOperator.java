@@ -21,20 +21,17 @@
 
 package io.crate.operation.operator;
 
-import com.google.common.base.Preconditions;
-import io.crate.metadata.DynamicFunctionResolver;
-import io.crate.metadata.FunctionIdent;
-import io.crate.metadata.FunctionImplementation;
-import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.core.collections.MapComparator;
+import io.crate.metadata.*;
+import io.crate.data.Input;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 public class EqOperator extends CmpOperator {
 
@@ -44,6 +41,15 @@ public class EqOperator extends CmpOperator {
 
     public static void register(OperatorModule module) {
         module.registerDynamicOperatorFunction(NAME, dynamicResolver);
+    }
+
+    private static FunctionInfo createInfo(List<DataType> dataTypes) {
+        return new FunctionInfo(new FunctionIdent(NAME, dataTypes), DataTypes.BOOLEAN);
+    }
+
+    public static Function createFunction(Symbol left, Symbol right) {
+        return new Function(createInfo(Arrays.asList(left.valueType(), right.valueType())),
+            Arrays.asList(left, right));
     }
 
     @Override
@@ -57,13 +63,13 @@ public class EqOperator extends CmpOperator {
 
     @Override
     public Boolean evaluate(Input[] args) {
-        assert args.length == 2;
+        assert args.length == 2 : "number of args must be 2";
         Object left = args[0].value();
-        if (left == null){
+        if (left == null) {
             return null;
         }
         Object right = args[1].value();
-        if (right == null){
+        if (right == null) {
             return null;
         }
         return left.equals(right);
@@ -71,7 +77,7 @@ public class EqOperator extends CmpOperator {
 
     private static class ArrayEqOperator extends CmpOperator {
 
-        protected ArrayEqOperator(FunctionInfo info) {
+        ArrayEqOperator(FunctionInfo info) {
             super(info);
         }
 
@@ -83,36 +89,59 @@ public class EqOperator extends CmpOperator {
         @Override
         public Boolean evaluate(Input[] args) {
             Object[] left = (Object[]) args[0].value();
-            if (left == null){
+            if (left == null) {
                 return null;
             }
             Object[] right = (Object[]) args[1].value();
-            if (right == null){
+            if (right == null) {
                 return null;
             }
             return Arrays.deepEquals(left, right);
         }
+    }
+
+    private static class ObjectEqOperator extends Operator<Object> {
+
+        private final FunctionInfo info;
+
+        ObjectEqOperator(FunctionInfo info) {
+            this.info = info;
+        }
 
         @Override
-        public Symbol normalizeSymbol(Function symbol) {
-            Symbol left = symbol.arguments().get(0);
-            Symbol right = symbol.arguments().get(1);
-
-            if (left.symbolType().isValueSymbol() && right.symbolType().isValueSymbol()) {
-                return Literal.newLiteral(evaluate(new Input[] {(Input)left, (Input)right}));
+        @SafeVarargs
+        public final Boolean evaluate(Input<Object>... args) {
+            Object left = args[0].value();
+            Object right = args[1].value();
+            if (left == null || right == null) {
+                return null;
             }
-            return symbol;
+            return MapComparator.compareMaps(((Map) left), ((Map) right)) == 0;
+        }
+
+        @Override
+        public FunctionInfo info() {
+            return info;
         }
     }
 
-    static class EqOperatorResolver implements DynamicFunctionResolver {
+    static class EqOperatorResolver extends BaseFunctionResolver {
+
+        EqOperatorResolver() {
+            super(Signature.numArgs(2).and(Signature.SIGNATURES_ALL_OF_SAME));
+        }
 
         @Override
-        public FunctionImplementation<Function> getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
-            Preconditions.checkArgument(dataTypes.size() == 2);
-            FunctionInfo info = new FunctionInfo(new FunctionIdent(NAME, dataTypes), DataTypes.BOOLEAN);
-            if (DataTypes.isCollectionType(dataTypes.get(0)) && DataTypes.isCollectionType(dataTypes.get(1))) {
+        public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
+            DataType leftType = dataTypes.get(0);
+            DataType rightType = dataTypes.get(1);
+
+            FunctionInfo info = createInfo(dataTypes);
+            if (DataTypes.isCollectionType(leftType) && DataTypes.isCollectionType(rightType)) {
                 return new ArrayEqOperator(info);
+            }
+            if (leftType.equals(DataTypes.OBJECT) && rightType.equals(DataTypes.OBJECT)) {
+                return new ObjectEqOperator(info);
             }
             return new EqOperator(info);
         }

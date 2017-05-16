@@ -21,8 +21,10 @@
 
 package io.crate.sql.tree;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
-import com.google.common.base.Optional;
+
+import java.util.Optional;
 
 public class Tokenizer extends AnalyzerElement {
 
@@ -59,7 +61,7 @@ public class Tokenizer extends AnalyzerElement {
 
     @Override
     public String toString() {
-        return Objects.toStringHelper(this).add("namedProperties", namedProperties).toString();
+        return MoreObjects.toStringHelper(this).add("namedProperties", namedProperties).toString();
     }
 
     @Override

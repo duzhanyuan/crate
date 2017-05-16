@@ -21,55 +21,47 @@
 
 package io.crate.operation.scalar.arithmetic;
 
-import com.google.common.collect.ImmutableList;
-import io.crate.metadata.FunctionIdent;
-import io.crate.metadata.FunctionInfo;
-import io.crate.metadata.Scalar;
-import io.crate.operation.Input;
+import com.google.common.collect.ImmutableMap;
+import io.crate.metadata.*;
+import io.crate.data.Input;
 import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 
-public abstract class RoundFunction extends Scalar<Number, Number> {
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+public abstract class RoundFunction extends SingleArgumentArithmeticFunction {
 
     public static final String NAME = "round";
 
+    RoundFunction(FunctionInfo info) {
+        super(info);
+    }
+
     public static void register(ScalarFunctionModule module) {
-        module.register(new FloatRoundFunction());
-        module.register(new DoubleRoundFunction());
-        module.register(new NoopRoundFunction(DataTypes.LONG));
-        module.register(new NoopRoundFunction(DataTypes.INTEGER));
-        module.register(new NoopRoundFunction(DataTypes.SHORT));
-        module.register(new NoopRoundFunction(DataTypes.BYTE));
-        module.register(new NoopRoundFunction(DataTypes.UNDEFINED));
+        Map<DataType, SingleArgumentArithmeticFunction> functionMap =
+            ImmutableMap.<DataType, SingleArgumentArithmeticFunction>builder()
+            .put(DataTypes.FLOAT, new FloatRoundFunction(Collections.singletonList(DataTypes.FLOAT)))
+            .put(DataTypes.INTEGER, new FloatRoundFunction(Collections.singletonList(DataTypes.INTEGER)))
+            .put(DataTypes.DOUBLE, new DoubleRoundFunction(Collections.singletonList(DataTypes.DOUBLE)))
+            .put(DataTypes.LONG, new DoubleRoundFunction(Collections.singletonList(DataTypes.LONG)))
+            .put(DataTypes.SHORT, new DoubleRoundFunction(Collections.singletonList(DataTypes.SHORT)))
+            .put(DataTypes.BYTE, new DoubleRoundFunction(Collections.singletonList(DataTypes.BYTE)))
+            .put(DataTypes.UNDEFINED, new DoubleRoundFunction(Collections.singletonList(DataTypes.UNDEFINED)))
+            .build();
+        module.register(NAME, new Resolver(NAME, functionMap));
     }
 
-    @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        Symbol argument = symbol.arguments().get(0);
+    private static class FloatRoundFunction extends RoundFunction {
 
-        if (argument.symbolType().isValueSymbol()) {
-            return Literal.newLiteral(info().returnType(), evaluate((Input) argument));
-        }
-
-        return symbol;
-    }
-
-    static class FloatRoundFunction extends RoundFunction {
-
-        private final static FunctionInfo INFO = new FunctionInfo(
-                new FunctionIdent(NAME, ImmutableList.<DataType>of(DataTypes.FLOAT)), DataTypes.INTEGER);
-
-        @Override
-        public FunctionInfo info() {
-            return INFO;
+        FloatRoundFunction(List<DataType> dataTypes) {
+            super(generateFloatFunctionInfo(NAME, dataTypes));
         }
 
         @Override
-        public Number evaluate(Input[] args) {
+        public Integer evaluate(Input[] args) {
             Object value = args[0].value();
             if (value == null) {
                 return null;
@@ -78,41 +70,19 @@ public abstract class RoundFunction extends Scalar<Number, Number> {
         }
     }
 
-    static class DoubleRoundFunction extends RoundFunction {
+    private static class DoubleRoundFunction extends RoundFunction {
 
-        private final static FunctionInfo INFO = new FunctionInfo(
-                new FunctionIdent(NAME, ImmutableList.<DataType>of(DataTypes.DOUBLE)), DataTypes.LONG);
-
-        @Override
-        public FunctionInfo info() {
-            return INFO;
+        DoubleRoundFunction(List<DataType> dataTypes) {
+            super(generateDoubleFunctionInfo(NAME, dataTypes));
         }
 
         @Override
-        public Number evaluate(Input[] args) {
+        public Long evaluate(Input[] args) {
             Object value = args[0].value();
             if (value == null) {
                 return null;
             }
             return Math.round(((Number) value).doubleValue());
-        }
-    }
-
-    private static class NoopRoundFunction extends RoundFunction {
-        private final FunctionInfo info;
-
-        public NoopRoundFunction(DataType type) {
-            info = new FunctionInfo(new FunctionIdent(NAME, ImmutableList.of(type)), type);
-        }
-
-        @Override
-        public FunctionInfo info() {
-            return info;
-        }
-
-        @Override
-        public Number evaluate(Input[] args) {
-            return (Number) args[0].value();
         }
     }
 }

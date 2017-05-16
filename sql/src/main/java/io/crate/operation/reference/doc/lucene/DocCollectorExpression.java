@@ -22,22 +22,24 @@
 package io.crate.operation.reference.doc.lucene;
 
 import com.google.common.base.Joiner;
-import io.crate.metadata.ReferenceInfo;
+import io.crate.metadata.Reference;
 import io.crate.metadata.doc.DocSysColumns;
-import io.crate.operation.collect.LuceneDocCollector;
-import io.crate.operation.reference.doc.ColumnReferenceExpression;
-import org.apache.lucene.index.AtomicReaderContext;
+import io.crate.operation.collect.collectors.CollectorFieldsVisitor;
+import org.apache.lucene.index.LeafReaderContext;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.search.lookup.SourceLookup;
 
 import java.util.Map;
 
-public class DocCollectorExpression extends
-        LuceneCollectorExpression<Map<String, Object>> implements ColumnReferenceExpression {
+public class DocCollectorExpression extends LuceneCollectorExpression<Map<String, Object>> {
 
     public static final String COLUMN_NAME = DocSysColumns.DOC.name();
 
-    private LuceneDocCollector.CollectorFieldsVisitor visitor;
+    private CollectorFieldsVisitor visitor;
+
+    public DocCollectorExpression() {
+        super(COLUMN_NAME);
+    }
 
     @Override
     public void startCollect(CollectorContext context) {
@@ -50,15 +52,16 @@ public class DocCollectorExpression extends
         return XContentHelper.convertToMap(visitor.source(), false).v2();
     }
 
-    public static LuceneCollectorExpression<?> create(final ReferenceInfo referenceInfo) {
-        assert referenceInfo.ident().columnIdent().name().equals(DocSysColumns.DOC.name());
-        if (referenceInfo.ident().columnIdent().path().size() == 0) {
+    public static LuceneCollectorExpression<?> create(final Reference reference) {
+        assert reference.ident().columnIdent().name().equals(DocSysColumns.DOC.name()) :
+            "column name must be " + DocSysColumns.DOC.name();
+        if (reference.ident().columnIdent().path().size() == 0) {
             return new DocCollectorExpression();
         }
 
-        assert referenceInfo.ident().columnIdent().path().size() > 0;
-        final String fqn = Joiner.on(".").join(referenceInfo.ident().columnIdent().path());
-        return new ChildDocCollectorExpression() {
+        assert reference.ident().columnIdent().path().size() > 0 : "column's path size must be > 0";
+        final String fqn = Joiner.on(".").join(reference.ident().columnIdent().path());
+        return new ChildDocCollectorExpression(fqn) {
 
             @Override
             public void startCollect(CollectorContext context) {
@@ -71,29 +74,34 @@ public class DocCollectorExpression extends
                 // for example:
                 //      sourceExtractor might read byte as int and
                 //      then eq(byte, byte) would get eq(byte, int) and fail
-                return referenceInfo.type().value(sourceLookup.extractValue(fqn));
+                return reference.valueType().value(sourceLookup.extractValue(fqn));
             }
         };
     }
 
     public abstract static class ChildDocCollectorExpression<ReturnType> extends
-            LuceneCollectorExpression<ReturnType> implements ColumnReferenceExpression {
+        LuceneCollectorExpression<ReturnType> {
 
         protected SourceLookup sourceLookup;
+        private LeafReaderContext context;
 
-        @Override
-        public void setNextDocId(int doc) {
-            sourceLookup.setNextDocId(doc);
+        ChildDocCollectorExpression(String columnName) {
+            super(columnName);
         }
 
         @Override
-        public void setNextReader(AtomicReaderContext context) {
-            sourceLookup.setNextReader(context);
+        public void setNextDocId(int doc) {
+            sourceLookup.setSegmentAndDocument(context, doc);
+        }
+
+        @Override
+        public void setNextReader(LeafReaderContext context) {
+            this.context = context;
         }
 
         @Override
         public void startCollect(CollectorContext context) {
-            sourceLookup = context.searchLookup().source();
+            sourceLookup = context.sourceLookup();
         }
     }
 }

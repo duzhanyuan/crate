@@ -22,32 +22,28 @@
 package io.crate.analyze.relations;
 
 import com.google.common.collect.ImmutableMap;
+import io.crate.analyze.symbol.Field;
 import io.crate.exceptions.AmbiguousColumnException;
 import io.crate.exceptions.ColumnUnknownException;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.Path;
-import io.crate.planner.symbol.Field;
+import io.crate.exceptions.RelationUnknownException;
+import io.crate.metadata.table.Operation;
 import io.crate.sql.tree.QualifiedName;
 import io.crate.test.integration.CrateUnitTest;
-import io.crate.types.DataTypes;
-import org.junit.Rule;
+import io.crate.testing.DummyRelation;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
-import java.util.*;
+import java.util.Arrays;
+import java.util.Map;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.core.Is.is;
 
 public class FieldProviderTest extends CrateUnitTest {
 
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
-
     private AnalyzedRelation dummyRelation = new DummyRelation("name");
 
     private Map<QualifiedName, AnalyzedRelation> dummySources = ImmutableMap.of(
-            newQN("dummy.t"), dummyRelation);
+        newQN("dummy.t"), dummyRelation);
 
     private static QualifiedName newQN(String dottedName) {
         return new QualifiedName(Arrays.asList(dottedName.split("\\.")));
@@ -57,41 +53,41 @@ public class FieldProviderTest extends CrateUnitTest {
     public void testInvalidSources() throws Exception {
         expectedException.expect(UnsupportedOperationException.class);
         AnalyzedRelation relation = new DummyRelation("name");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(
-                ImmutableMap.of(newQN("too.many.parts"), relation));
-        resolver.resolveField(newQN("name"), false);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(
+            ImmutableMap.of(newQN("too.many.parts"), relation));
+        resolver.resolveField(newQN("name"), Operation.READ);
     }
 
     @Test
     public void testUnknownSchema() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expect(RelationUnknownException.class);
         expectedException.expectMessage("Cannot resolve relation 'invalid.table'");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(dummySources);
-        resolver.resolveField(newQN("invalid.table.name"), false);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(dummySources);
+        resolver.resolveField(newQN("invalid.table.name"), Operation.READ);
     }
 
     @Test
     public void testUnknownTable() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("Cannot resolve relation 'invalid'");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(dummySources);
-        resolver.resolveField(newQN("dummy.invalid.name"), false);
+        expectedException.expect(RelationUnknownException.class);
+        expectedException.expectMessage("Cannot resolve relation 'dummy.invalid'");
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(dummySources);
+        resolver.resolveField(newQN("dummy.invalid.name"), Operation.READ);
     }
 
     @Test
     public void testSysColumnWithoutSourceRelation() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expect(RelationUnknownException.class);
         expectedException.expectMessage("Cannot resolve relation 'sys.nodes'");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(dummySources);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(dummySources);
 
-        resolver.resolveField(newQN("sys.nodes.name"), false);
+        resolver.resolveField(newQN("sys.nodes.name"), Operation.READ);
     }
 
     @Test
     public void testRegularColumnUnknown() throws Exception {
         expectedException.expect(ColumnUnknownException.class);
-        FieldProvider resolver = new FullQualifedNameFieldProvider(dummySources);
-        resolver.resolveField(newQN("age"), false);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(dummySources);
+        resolver.resolveField(newQN("age"), Operation.READ);
     }
 
     @Test
@@ -99,8 +95,8 @@ public class FieldProviderTest extends CrateUnitTest {
         expectedException.expect(ColumnUnknownException.class);
         expectedException.expectMessage("Column age unknown");
         AnalyzedRelation barT = new DummyRelation("name");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(newQN("bar.t"), barT));
-        resolver.resolveField(newQN("t.age"), false);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(newQN("bar.t"), barT));
+        resolver.resolveField(newQN("t.age"), Operation.READ);
     }
 
     @Test
@@ -110,19 +106,19 @@ public class FieldProviderTest extends CrateUnitTest {
         AnalyzedRelation fooA = new DummyRelation("name");
         AnalyzedRelation customT = new DummyRelation("tags");
 
-        FieldProvider resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(
-                newQN("bar.t"), barT,
-                newQN("foo.t"), fooT,
-                newQN("foo.a"), fooA,
-                newQN("custom.t"), customT));
-        Field field = resolver.resolveField(newQN("foo.t.name"), false);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(
+            newQN("bar.t"), barT,
+            newQN("foo.t"), fooT,
+            newQN("foo.a"), fooA,
+            newQN("custom.t"), customT));
+        Field field = resolver.resolveField(newQN("foo.t.name"), Operation.READ);
         assertThat(field.relation(), equalTo(fooT));
 
         // reference > dynamicReference - not ambiguous
-        Field tags = resolver.resolveField(newQN("tags"), false);
+        Field tags = resolver.resolveField(newQN("tags"), Operation.READ);
         assertThat(tags.relation(), equalTo(customT));
 
-        field = resolver.resolveField(newQN("a.name"), false);
+        field = resolver.resolveField(newQN("a.name"), Operation.READ);
         assertThat(field.relation(), equalTo(fooA));
     }
 
@@ -130,9 +126,9 @@ public class FieldProviderTest extends CrateUnitTest {
     public void testRelationOutputFromAlias() throws Exception {
         // t.name from doc.foo t
         AnalyzedRelation relation = new DummyRelation("name");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(
-                new QualifiedName(Arrays.asList("t")), relation));
-        Field field = resolver.resolveField(newQN("t.name"), false);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(
+            new QualifiedName(Arrays.asList("t")), relation));
+        Field field = resolver.resolveField(newQN("t.name"), Operation.READ);
         assertThat(field.relation(), equalTo(relation));
         assertThat(field.path().outputName(), is("name"));
     }
@@ -140,9 +136,9 @@ public class FieldProviderTest extends CrateUnitTest {
     @Test
     public void testRelationOutputFromSingleColumnName() throws Exception {
         // select name from t
-        AnalyzedRelation relation = new DummyRelation( "name");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(newQN("doc.t"), relation));
-        Field field = resolver.resolveField(newQN("name"), false);
+        AnalyzedRelation relation = new DummyRelation("name");
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(newQN("doc.t"), relation));
+        Field field = resolver.resolveField(newQN("name"), Operation.READ);
         assertThat(field.relation(), equalTo(relation));
         assertThat(field.path().outputName(), is("name"));
     }
@@ -152,8 +148,8 @@ public class FieldProviderTest extends CrateUnitTest {
         // doc.t.name from t.name
 
         AnalyzedRelation relation = new DummyRelation("name");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(newQN("doc.t"), relation));
-        Field field = resolver.resolveField(newQN("doc.t.name"), true);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(newQN("doc.t"), relation));
+        Field field = resolver.resolveField(newQN("doc.t.name"), Operation.INSERT);
         assertThat(field.relation(), equalTo(relation));
         assertThat(field.path().outputName(), is("name"));
     }
@@ -161,16 +157,16 @@ public class FieldProviderTest extends CrateUnitTest {
     @Test
     public void testTooManyParts() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
-        FieldProvider resolver = new FullQualifedNameFieldProvider(dummySources);
-        resolver.resolveField(new QualifiedName(Arrays.asList("a", "b", "c", "d")), false);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(dummySources);
+        resolver.resolveField(new QualifiedName(Arrays.asList("a", "b", "c", "d")), Operation.READ);
     }
 
     @Test
     public void testTooManyPartsNameFieldResolver() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Column reference \"a.b\" has too many parts. A column must not have a schema or a table here.");
-        FieldProvider resolver = new NameFieldProvider(dummyRelation);
-        resolver.resolveField(new QualifiedName(Arrays.asList("a", "b")), false);
+        FieldProvider<Field> resolver = new NameFieldProvider(dummyRelation);
+        resolver.resolveField(new QualifiedName(Arrays.asList("a", "b")), Operation.READ);
     }
 
     @Test
@@ -179,31 +175,31 @@ public class FieldProviderTest extends CrateUnitTest {
         expectedException.expect(AmbiguousColumnException.class);
         expectedException.expectMessage("Column \"name\" is ambiguous");
 
-        FieldProvider resolver = new FullQualifedNameFieldProvider(
-                ImmutableMap.<QualifiedName, AnalyzedRelation>of(
-                        new QualifiedName(Arrays.asList("custom", "t")), new DummyRelation("name"),
-                        new QualifiedName(Arrays.asList("doc", "t")), new DummyRelation("name"))
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(
+            ImmutableMap.<QualifiedName, AnalyzedRelation>of(
+                new QualifiedName(Arrays.asList("custom", "t")), new DummyRelation("name"),
+                new QualifiedName(Arrays.asList("doc", "t")), new DummyRelation("name"))
         );
-        resolver.resolveField(new QualifiedName(Arrays.asList("t", "name")), false);
+        resolver.resolveField(new QualifiedName(Arrays.asList("t", "name")), Operation.READ);
     }
 
     @Test
     public void testRelationFromTwoTables() throws Exception {
         // select name from doc.t, custom.t
-        FieldProvider resolver = new FullQualifedNameFieldProvider(
-                ImmutableMap.<QualifiedName, AnalyzedRelation>of(
-                        new QualifiedName(Arrays.asList("custom", "t")), new DummyRelation("address"),
-                        new QualifiedName(Arrays.asList("doc", "t")), new DummyRelation("name"))
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(
+            ImmutableMap.<QualifiedName, AnalyzedRelation>of(
+                new QualifiedName(Arrays.asList("custom", "t")), new DummyRelation("address"),
+                new QualifiedName(Arrays.asList("doc", "t")), new DummyRelation("name"))
         );
-        resolver.resolveField(new QualifiedName(Arrays.asList("t", "name")), false);
+        resolver.resolveField(new QualifiedName(Arrays.asList("t", "name")), Operation.READ);
     }
 
     @Test
     public void testSimpleFieldResolver() throws Exception {
         // select name from doc.t
         AnalyzedRelation relation = new DummyRelation("name");
-        FieldProvider resolver = new NameFieldProvider(relation);
-        Field field = resolver.resolveField(new QualifiedName(Arrays.asList("name")), false);
+        FieldProvider<Field> resolver = new NameFieldProvider(relation);
+        Field field = resolver.resolveField(new QualifiedName(Arrays.asList("name")), Operation.READ);
         assertThat(field.relation(), equalTo(relation));
     }
 
@@ -212,41 +208,47 @@ public class FieldProviderTest extends CrateUnitTest {
         expectedException.expect(ColumnUnknownException.class);
         expectedException.expectMessage("Column unknown unknown");
         AnalyzedRelation relation = new DummyRelation("name");
-        FieldProvider resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(newQN("doc.t"), relation));
-        resolver.resolveField(new QualifiedName(Arrays.asList("unknown")), false);
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(newQN("doc.t"), relation));
+        resolver.resolveField(new QualifiedName(Arrays.asList("unknown")), Operation.READ);
     }
 
-    private static class DummyRelation implements AnalyzedRelation {
+    @Test
+    public void testColumnSchemaResolver() throws Exception {
+        AnalyzedRelation barT = new DummyRelation("\"Name\"");
 
-        private final Set<String> supportedReference = new HashSet<>();
-
-        public DummyRelation( String referenceName) {
-            supportedReference.add(referenceName);
-        }
-
-        @Override
-        public <C, R> R accept(AnalyzedRelationVisitor<C, R> visitor, C context) {
-            return null;
-        }
-
-        @Override
-        public Field getField(Path path) {
-            ColumnIdent columnIdent = (ColumnIdent) path;
-            if (supportedReference.contains(columnIdent.name())) {
-                return new Field(this, columnIdent, DataTypes.STRING);
-            }
-            return null;
-        }
-
-        @Override
-        public Field getWritableField(Path path) throws UnsupportedOperationException {
-            return getField(path);
-        }
-
-        @Override
-        public List<Field> fields() {
-            return null;
-        }
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(
+            newQN("\"Bar\""), barT));
+        Field field = resolver.resolveField(newQN("\"Foo\".\"Bar\".\"Name\""), Operation.READ);
+        assertThat(field.relation(), equalTo(barT));
     }
 
+    @Test
+    public void testColumnSchemaResolverFail() throws Exception {
+        expectedException.expect(ColumnUnknownException.class);
+        expectedException.expectMessage("Column name unknown");
+        AnalyzedRelation barT = new DummyRelation("\"Name\"");
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(
+            newQN("bar"), barT));
+        resolver.resolveField(newQN("bar.name"), Operation.READ);
+    }
+
+    @Test
+    public void testAliasRelationNameResolver() throws Exception {
+        AnalyzedRelation barT = new DummyRelation("name");
+
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(
+            newQN("\"Bar\""), barT));
+        Field field = resolver.resolveField(newQN("\"Bar\".name"), Operation.READ);
+        assertThat(field.relation(), equalTo(barT));
+    }
+
+    @Test
+    public void testAliasRelationNameResolverFail() throws Exception {
+        expectedException.expect(RelationUnknownException.class);
+        expectedException.expectMessage("Cannot resolve relation '\"Bar\"'");
+        AnalyzedRelation barT = new DummyRelation("name");
+        FieldProvider<Field> resolver = new FullQualifedNameFieldProvider(ImmutableMap.of(
+            newQN("bar"), barT));
+        resolver.resolveField(newQN("\"Bar\".name"), Operation.READ);
+    }
 }

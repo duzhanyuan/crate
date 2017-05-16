@@ -21,39 +21,39 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.ReferenceInfos;
+import io.crate.data.Row;
+import io.crate.metadata.Schemas;
+import io.crate.metadata.TableIdent;
+import io.crate.metadata.blob.BlobSchemaInfo;
+import io.crate.metadata.blob.BlobTableInfo;
+import io.crate.operation.user.User;
 import io.crate.sql.tree.AlterBlobTable;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
 
-@Singleton
-public class AlterBlobTableAnalyzer extends BlobTableAnalyzer<AlterBlobTableAnalyzedStatement> {
+import static io.crate.analyze.BlobTableAnalyzer.tableToIdent;
 
-    private static final TablePropertiesAnalyzer TABLE_PROPERTIES_ANALYZER = new TablePropertiesAnalyzer();
-    private final ReferenceInfos referenceInfos;
+class AlterBlobTableAnalyzer {
 
-    @Inject
-    public AlterBlobTableAnalyzer(ReferenceInfos referenceInfos) {
-        this.referenceInfos = referenceInfos;
+    private final Schemas schemas;
+
+    AlterBlobTableAnalyzer(Schemas schemas) {
+        this.schemas = schemas;
     }
 
-    @Override
-    public AlterBlobTableAnalyzedStatement visitAlterBlobTable(AlterBlobTable node, Analysis analysis) {
-        AlterBlobTableAnalyzedStatement statement = new AlterBlobTableAnalyzedStatement(referenceInfos);
-
-        statement.table(tableToIdent(node.table()));
-
+    public AlterBlobTableAnalyzedStatement analyze(AlterBlobTable node, Row parameters, User user) {
+        TableIdent tableIdent = tableToIdent(node.table());
+        assert BlobSchemaInfo.NAME.equals(tableIdent.schema()) : "schema name must be 'blob'";
+        BlobTableInfo tableInfo = schemas.getTableInfo(tableIdent, user);
+        TableParameter tableParameter = new TableParameter();
         if (node.genericProperties().isPresent()) {
-            TABLE_PROPERTIES_ANALYZER.analyze(
-                    statement.tableParameter(), statement.table().tableParameterInfo(),
-                    node.genericProperties(), analysis.parameterContext().parameters());
+            TablePropertiesAnalyzer.analyze(
+                tableParameter,
+                tableInfo.tableParameterInfo(),
+                node.genericProperties(),
+                parameters
+            );
         } else if (!node.resetProperties().isEmpty()) {
-            TABLE_PROPERTIES_ANALYZER.analyze(
-                    statement.tableParameter(), statement.table().tableParameterInfo(),
-                    node.resetProperties());
+            TablePropertiesAnalyzer.analyze(tableParameter, tableInfo.tableParameterInfo(), node.resetProperties());
         }
-
-        return statement;
+        return new AlterBlobTableAnalyzedStatement(tableInfo, tableParameter);
     }
-
 }

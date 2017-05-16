@@ -21,18 +21,26 @@
 
 package io.crate.planner.projection;
 
+import org.elasticsearch.common.io.stream.StreamInput;
+
+import java.io.IOException;
+
 public enum ProjectionType {
 
-    TOPN(TopNProjection.FACTORY),
-    GROUP(GroupProjection.FACTORY),
-    AGGREGATION(AggregationProjection.FACTORY),
-    FILTER(FilterProjection.FACTORY),
-    WRITER(WriterProjection.FACTORY),
-    INDEX_WRITER(SourceIndexWriterProjection.FACTORY),
-    COLUMN_INDEX_WRITER(ColumnIndexWriterProjection.FACTORY),
-    UPDATE(UpdateProjection.FACTORY),
-    FETCH(FetchProjection.FACTORY),
-    MERGE(MergeProjection.FACTORY);
+    TOPN(TopNProjection::new),
+    GROUP(GroupProjection::new),
+    AGGREGATION(AggregationProjection::new),
+    MERGE_COUNT_AGGREGATION(i -> MergeCountProjection.INSTANCE),
+    FILTER(FilterProjection::new),
+    WRITER(WriterProjection::new),
+    INDEX_WRITER(SourceIndexWriterProjection::new),
+    COLUMN_INDEX_WRITER(ColumnIndexWriterProjection::new),
+    UPDATE(UpdateProjection::new),
+    SYS_UPDATE(SysUpdateProjection::new),
+    DELETE(DeleteProjection::new),
+    FETCH(null),
+    TOPN_ORDERED(OrderedTopNProjection::new),
+    EVAL(EvalProjection::new);
 
     private final Projection.ProjectionFactory factory;
 
@@ -40,8 +48,7 @@ public enum ProjectionType {
         this.factory = factory;
     }
 
-    public Projection newInstance() {
-        return factory.newInstance();
+    public Projection newInstance(StreamInput in) throws IOException {
+        return factory.newInstance(in);
     }
-
 }

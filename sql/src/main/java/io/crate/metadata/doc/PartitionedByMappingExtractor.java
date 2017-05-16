@@ -41,7 +41,7 @@ public class PartitionedByMappingExtractor {
         @Override
         public Tuple<ColumnIdent, DataType> apply(List<String> partitioned) {
             ColumnIdent ident = ColumnIdent.fromPath(partitioned.get(0));
-            assert ident != null;
+            assert ident != null : "ident must not be null";
             DataType type = DocIndexMetaData.getColumnDataType(new MapBuilder<String, Object>().put("type", partitioned.get(1)).map());
             return new Tuple<>(ident, type);
         }
@@ -49,11 +49,11 @@ public class PartitionedByMappingExtractor {
 
     @SuppressWarnings("unchecked")
     public static Iterable<Tuple<ColumnIdent, DataType>> extractPartitionedByColumns(Map<String, Object> mapping) {
-        Map<String, Object> metaMap = (Map<String, Object>)mapping.get("_meta");
+        Map<String, Object> metaMap = (Map<String, Object>) mapping.get("_meta");
         if (metaMap != null) {
             Object partitionedByColumnsMaybe = metaMap.get("partitioned_by");
             if (partitionedByColumnsMaybe != null && partitionedByColumnsMaybe instanceof List) {
-                List<List<String>> partitionedByColumns = (List<List<String>>)partitionedByColumnsMaybe;
+                List<List<String>> partitionedByColumns = (List<List<String>>) partitionedByColumnsMaybe;
                 return extractPartitionedByColumns(partitionedByColumns);
             }
         }

@@ -21,36 +21,46 @@
 
 package io.crate.analyze;
 
-import io.crate.sql.tree.*;
+import io.crate.data.Row;
+import io.crate.sql.tree.AstVisitor;
+import io.crate.sql.tree.Node;
+import io.crate.sql.tree.ParameterExpression;
+import io.crate.sql.tree.StringLiteral;
+import org.apache.lucene.util.BytesRef;
 
 import javax.annotation.Nullable;
 import java.util.Locale;
 
-public class SafeExpressionToStringVisitor extends AstVisitor<String, Object[]> {
+public class SafeExpressionToStringVisitor extends AstVisitor<String, Row> {
 
     private final static SafeExpressionToStringVisitor INSTANCE = new SafeExpressionToStringVisitor();
-    private SafeExpressionToStringVisitor() {}
 
-    public static String convert(Node node, @Nullable Object[] context) {
+    private SafeExpressionToStringVisitor() {
+    }
+
+    public static String convert(Node node, @Nullable Row context) {
         return INSTANCE.process(node, context);
     }
 
     @Override
-    protected String visitStringLiteral(StringLiteral node, Object[] parameters) {
+    protected String visitStringLiteral(StringLiteral node, Row parameters) {
         return node.getValue();
     }
 
     @Override
-    public String visitParameterExpression(ParameterExpression node, Object[] parameters) {
-        Object value = parameters[node.index()];
+    public String visitParameterExpression(ParameterExpression node, Row parameters) {
+        Object value = parameters.get(node.index());
+        if (value instanceof BytesRef) {
+            return ((BytesRef) value).utf8ToString();
+        }
         if (!(value instanceof String)) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH, "Parameter %s not a string value, can't handle this.", value));
         }
-        return (String)value;
+        return (String) value;
     }
 
     @Override
-    protected String visitNode(Node node, Object[] context) {
+    protected String visitNode(Node node, Row context) {
         throw new IllegalArgumentException(String.format(Locale.ENGLISH, "Can't handle %s.", node));
     }
 }

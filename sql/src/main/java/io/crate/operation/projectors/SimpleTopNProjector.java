@@ -22,101 +22,49 @@
 package io.crate.operation.projectors;
 
 import com.google.common.base.Preconditions;
-import io.crate.Constants;
-import io.crate.core.collections.Row;
-import io.crate.operation.*;
+import io.crate.data.*;
+import io.crate.operation.aggregation.RowTransformingBatchIterator;
 import io.crate.operation.collect.CollectExpression;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
-public class SimpleTopNProjector implements Projector, RowUpstream, RowDownstreamHandle {
+public class SimpleTopNProjector implements Projector {
 
-    private final CollectExpression<?>[] collectExpressions;
-    private final InputRow inputRow;
-    private AtomicInteger remainingUpstreams = new AtomicInteger(0);
-    private RowDownstreamHandle downstream;
-
-    private int remainingOffset;
-    private int toCollect;
-    private AtomicReference<Throwable> failure = new AtomicReference<>(null);
+    private final List<Input<?>> inputs;
+    private final Iterable<? extends CollectExpression<Row, ?>> collectExpressions;
+    private final int offset;
+    private final int limit;
 
     public SimpleTopNProjector(List<Input<?>> inputs,
-                               CollectExpression<?>[] collectExpressions,
+                               Iterable<? extends CollectExpression<Row, ?>> collectExpressions,
                                int limit,
                                int offset) {
-        Preconditions.checkArgument(limit >= TopN.NO_LIMIT, "invalid limit");
-        Preconditions.checkArgument(offset>=0, "invalid offset");
-        this.inputRow = new InputRow(inputs);
+        Preconditions.checkArgument(limit >= 0, "Invalid LIMIT: value must be >= 0; got: " + limit);
+        Preconditions.checkArgument(offset >= 0, "Invalid OFFSET: value must be >= 0; got: " + offset);
+
+        this.inputs = inputs;
         this.collectExpressions = collectExpressions;
-        if (limit == TopN.NO_LIMIT) {
-            limit = Constants.DEFAULT_SELECT_LIMIT;
-        }
-        this.remainingOffset = offset;
-        this.toCollect = limit;
-
+        this.limit = limit;
+        this.offset = offset;
     }
 
     @Override
-    public void downstream(RowDownstream downstream) {
-        this.downstream = downstream.registerUpstream(this);
+    public BatchIterator apply(BatchIterator batchIterator) {
+        if (batchIterator == null) {
+            return null;
+        }
+        if (offset > 0) {
+            batchIterator = new SkippingBatchIterator(batchIterator, offset);
+        }
+        return new RowTransformingBatchIterator(
+            LimitingBatchIterator.newInstance(batchIterator, limit),
+            inputs,
+            collectExpressions
+        );
     }
 
     @Override
-    public void startProjection() {
-        assert remainingUpstreams.get()>0;
-    }
-
-    @Override
-    public synchronized boolean setNextRow(Row row) {
-        if (toCollect<1){
-            return false;
-        }
-        if (remainingOffset > 0) {
-            remainingOffset--;
-            return true;
-        }
-        assert downstream != null;
-        for (CollectExpression<?> collectExpression : collectExpressions) {
-            collectExpression.setNextRow(row);
-        }
-        if (!downstream.setNextRow(this.inputRow)) {
-            toCollect = -1;
-        }
-        toCollect--;
-        return toCollect > 0 && failure.get() == null;
-    }
-
-    @Override
-    public RowDownstreamHandle registerUpstream(RowUpstream upstream) {
-        remainingUpstreams.incrementAndGet();
-        return this;
-    }
-
-    @Override
-    public void finish() {
-        if (remainingUpstreams.decrementAndGet() > 0) {
-            return;
-        }
-        if (downstream != null) {
-            Throwable throwable = failure.get();
-            if (throwable == null) {
-                downstream.finish();
-            } else {
-                downstream.fail(throwable);
-            }
-        }
-    }
-
-    @Override
-    public void fail(Throwable throwable) {
-        if (remainingUpstreams.decrementAndGet() <= 0) {
-            if (downstream != null) {
-                downstream.fail(throwable);
-            }
-            return;
-        }
-        failure.set(throwable);
+    public boolean providesIndependentScroll() {
+        return false;
     }
 }

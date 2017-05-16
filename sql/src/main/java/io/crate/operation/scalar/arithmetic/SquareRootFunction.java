@@ -22,35 +22,26 @@
 package io.crate.operation.scalar.arithmetic;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableSet;
 import io.crate.metadata.*;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 
+import javax.annotation.Nullable;
 import java.util.List;
-import java.util.Set;
 
 public abstract class SquareRootFunction extends Scalar<Number, Number> {
 
     public static final String NAME = "sqrt";
-    private static final Set<DataType> ALLOWED_TYPES = ImmutableSet.<DataType>builder()
-            .addAll(DataTypes.NUMERIC_PRIMITIVE_TYPES)
-            .add(DataTypes.UNDEFINED)
-            .build();
 
-    private final FunctionInfo info;
-
-
-    public static void register(ScalarFunctionModule module){
+    public static void register(ScalarFunctionModule module) {
         module.register(NAME, new Resolver());
     }
 
-    public SquareRootFunction(FunctionInfo info){
+    private final FunctionInfo info;
+
+    SquareRootFunction(FunctionInfo info) {
         this.info = info;
     }
 
@@ -59,25 +50,16 @@ public abstract class SquareRootFunction extends Scalar<Number, Number> {
         return info;
     }
 
-    @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        Symbol argument = symbol.arguments().get(0);
-        if (argument.symbolType().isValueSymbol()) {
-            return Literal.newLiteral(info().returnType(), evaluate((Input) argument));
-        }
-        return symbol;
-    }
-
     static class DoubleSquareRootFunction extends SquareRootFunction {
 
-        public DoubleSquareRootFunction(FunctionInfo info){
+        DoubleSquareRootFunction(FunctionInfo info) {
             super(info);
         }
 
         @Override
         public Double evaluate(Input[] args) {
-            Number value = (Number)args[0].value();
-            if(value==null){
+            Number value = (Number) args[0].value();
+            if (value == null) {
                 return null;
             }
             Preconditions.checkArgument(value.doubleValue() >= 0, "cannot take square root of a negative number");
@@ -86,17 +68,17 @@ public abstract class SquareRootFunction extends Scalar<Number, Number> {
 
     }
 
-    private static class Resolver implements DynamicFunctionResolver {
+    private static class Resolver implements FunctionResolver {
 
         @Override
-        public FunctionImplementation<Function> getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
-            Preconditions.checkArgument(dataTypes.size() == 1,
-                    "invalid size of arguments, 1 expected");
-            Preconditions.checkArgument(ALLOWED_TYPES.contains(dataTypes.get(0)),
-                    "invalid datatype for %s function", NAME);
+        public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
             return new DoubleSquareRootFunction(new FunctionInfo(new FunctionIdent(NAME, dataTypes), DataTypes.DOUBLE));
         }
+
+        @Nullable
+        @Override
+        public List<DataType> getSignature(List<DataType> dataTypes) {
+            return Signature.SIGNATURES_SINGLE_NUMERIC.apply(dataTypes);
+        }
     }
-
-
 }

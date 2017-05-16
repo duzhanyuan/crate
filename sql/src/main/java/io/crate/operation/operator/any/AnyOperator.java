@@ -21,38 +21,40 @@
 
 package io.crate.operation.operator.any;
 
-import com.google.common.base.Preconditions;
+import io.crate.analyze.symbol.Function;
 import io.crate.core.collections.MapComparator;
 import io.crate.metadata.*;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.operator.Operator;
-import io.crate.planner.symbol.*;
 import io.crate.types.BooleanType;
 import io.crate.types.CollectionType;
 import io.crate.types.DataType;
-import io.crate.types.DataTypes;
 
 import java.util.*;
 
-public abstract class AnyOperator<Op extends AnyOperator<?>> extends Operator<Object> {
+import static com.google.common.base.Preconditions.checkArgument;
+
+public abstract class AnyOperator extends Operator<Object> {
+
     public static final String OPERATOR_PREFIX = "any_";
 
     /**
-     * called inside {@link #normalizeSymbol(io.crate.planner.symbol.Function)}
+     * called inside {@link #normalizeSymbol(Function, TransactionContext)}
      * in order to interpret the result of compareTo
-     *
+     * <p>
      * subclass has to implement this to evaluate the -1, 0, 1 to boolean
      * e.g. for Lt  -1 is true, 0 and 1 is false.
      *
      * @param comparisonResult the result of someLiteral.compareTo(otherLiteral)
      * @return true/false
-     * @see {@linkplain io.crate.operation.operator.CmpOperator#compare(int)}
+     * @see io.crate.operation.operator.CmpOperator#compare(int)
      */
     protected abstract boolean compare(int comparisonResult);
 
     protected FunctionInfo functionInfo;
 
-    protected AnyOperator() {}
+    protected AnyOperator() {
+    }
 
     protected AnyOperator(FunctionInfo functionInfo) {
         this.functionInfo = functionInfo;
@@ -63,44 +65,16 @@ public abstract class AnyOperator<Op extends AnyOperator<?>> extends Operator<Ob
         return functionInfo;
     }
 
-    @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        assert (symbol != null);
-        assert (symbol.arguments().size() == 2);
-
-        Symbol left = symbol.arguments().get(0);
-        Symbol right = symbol.arguments().get(1);
-
-        if (containsNull(left, right)) {
-            return Literal.NULL;
-        }
-        if (left instanceof Literal && right instanceof Literal) {
-            Literal collLiteral = (Literal) right;
-            Object leftValue = ((Literal) left).value();
-            if (!DataTypes.isCollectionType(collLiteral.valueType())) {
-                throw new IllegalArgumentException("invalid array expression");
-            }
-            Iterable<?> collectionIterable = collectionValueToIterable(collLiteral.value());
-            Boolean result = doEvaluate(leftValue, collectionIterable);
-            if (result == null) {
-                return Literal.NULL;
-            } else {
-                return Literal.newLiteral(result);
-            }
-        }
-        return symbol;
-    }
-
     @SuppressWarnings("unchecked")
     protected Boolean doEvaluate(Object left, Iterable<?> rightIterable) {
-
+        boolean anyNulls = false;
         if (left instanceof Comparable) {
             for (Object elem : rightIterable) {
                 if (elem == null) {
-                    // ignore null values
+                    anyNulls = true;
                     continue;
                 }
-                assert (left.getClass().equals(elem.getClass()));
+                assert left.getClass().equals(elem.getClass()) : "class of left must be equal to the class of right";
 
                 if (compare(((Comparable) left).compareTo(elem))) {
                     return true;
@@ -112,16 +86,15 @@ public abstract class AnyOperator<Op extends AnyOperator<?>> extends Operator<Ob
                     return true;
                 }
             }
-
         }
-        return false;
+        return anyNulls ? null : false;
     }
 
     @Override
     public Boolean evaluate(Input<Object>... args) {
-        assert (args != null);
-        assert (args.length == 2);
-        assert args[0] != null;
+        assert args != null : "args must not be null";
+        assert args.length == 2 : "number of args must be 2";
+        assert args[0] != null : "1st argument must not be null";
 
         Object value = args[0].value();
         Object collectionReference = args[1].value();
@@ -131,7 +104,7 @@ public abstract class AnyOperator<Op extends AnyOperator<?>> extends Operator<Ob
         }
         Iterable<?> rightIterable;
         try {
-           rightIterable = collectionValueToIterable(collectionReference);
+            rightIterable = collectionValueToIterable(collectionReference);
         } catch (IllegalArgumentException e) {
             return false;
         }
@@ -140,28 +113,29 @@ public abstract class AnyOperator<Op extends AnyOperator<?>> extends Operator<Ob
 
     public static Iterable<?> collectionValueToIterable(Object collectionRef) throws IllegalArgumentException {
         if (collectionRef instanceof Object[]) {
-            return Arrays.asList((Object[])collectionRef);
+            return Arrays.asList((Object[]) collectionRef);
         } else if (collectionRef instanceof Collection) {
-            return (Collection<?>)collectionRef;
+            return (Collection<?>) collectionRef;
         } else {
             throw new IllegalArgumentException(
-                    String.format(Locale.ENGLISH, "cannot cast %s to Iterable", collectionRef));
+                String.format(Locale.ENGLISH, "cannot cast %s to Iterable", collectionRef));
         }
     }
 
-    public abstract static class AnyResolver implements DynamicFunctionResolver {
+    public abstract static class AnyResolver extends BaseFunctionResolver {
 
-        public abstract FunctionImplementation<Function> newInstance(FunctionInfo info);
+        AnyResolver() {
+            super(Signature.of(Signature.ArgMatcher.ANY, Signature.ArgMatcher.ANY_COLLECTION));
+        }
+
+        public abstract FunctionImplementation newInstance(FunctionInfo info);
 
         public abstract String name();
 
         @Override
-        public FunctionImplementation<Function> getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
-            Preconditions.checkArgument(
-                    dataTypes.size() == 2 &&
-                            DataTypes.isCollectionType(dataTypes.get(1)) &&
-                            ((CollectionType)dataTypes.get(1)).innerType().equals(dataTypes.get(0))
-            );
+        public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
+            checkArgument(((CollectionType) dataTypes.get(1)).innerType().equals(dataTypes.get(0)),
+                "The inner type of the array/set passed to ANY must match its left expression");
             return newInstance(new FunctionInfo(new FunctionIdent(name(), dataTypes), BooleanType.INSTANCE));
         }
     }

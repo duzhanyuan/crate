@@ -21,13 +21,14 @@
 
 package io.crate.integrationtests;
 
-import io.crate.test.integration.CrateIntegrationTest;
 import io.crate.testing.TestingHelpers;
+import io.crate.testing.UseJdbc;
+import org.elasticsearch.action.admin.indices.exists.indices.IndicesExistsRequest;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.is;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
+@UseJdbc
 public class CustomSchemaIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -36,11 +37,11 @@ public class CustomSchemaIntegrationTest extends SQLTransportIntegrationTest {
         execute("create table foobar (id int primary key) with (number_of_replicas = 0)");
         execute("create table foo.bar (id int primary key) with (number_of_replicas = 0)");
 
-        execute("select schema_name, table_name from information_schema.tables " +
-                "where table_name like 'foo%' or schema_name = 'foo' order by table_name");
+        execute("select table_schema, table_name from information_schema.tables " +
+                "where table_name like 'foo%' or table_schema = 'foo' order by table_name");
         assertThat(TestingHelpers.printedTable(response.rows()), is("" +
-                "foo| bar\n" +
-                "doc| foobar\n"));
+                                                                    "foo| bar\n" +
+                                                                    "doc| foobar\n"));
     }
 
     @Test
@@ -51,19 +52,21 @@ public class CustomSchemaIntegrationTest extends SQLTransportIntegrationTest {
         refresh();
 
         execute("select count(*) from custom.t");
-        assertThat((Long)response.rows()[0][0], is(4L));
+        assertThat((Long) response.rows()[0][0], is(4L));
 
         execute("delete from custom.t where id=1");
-        assertThat(response.rowCount(), is(-1L));
+        assertThat(response.rowCount(), is(1L));
+        refresh();
 
         execute("select * from custom.t");
         assertThat(response.rowCount(), is(3L));
 
         execute("delete from custom.t");
-        assertThat(response.rowCount(), is(-1L));
+        assertThat(response.rowCount(), is(3L));
+        refresh();
 
         execute("select count(*) from custom.t");
-        assertThat((Long)response.rows()[0][0], is(0L));
+        assertThat((Long) response.rows()[0][0], is(0L));
     }
 
     @Test
@@ -92,6 +95,28 @@ public class CustomSchemaIntegrationTest extends SQLTransportIntegrationTest {
 
         execute("select id from custom.t where id in (2,4) order by id");
         assertThat(TestingHelpers.printedTable(response.rows()), is("2\n4\n"));
-
     }
+
+    @Test
+    public void testSelectFromDroppedTableWithMoreThanOneTableInSchema() throws Exception {
+        execute("create table custom.foo (id integer)");
+        execute("create table custom.bar (id integer)");
+        ensureYellow();
+
+        assertThat(client().admin().indices().exists(new IndicesExistsRequest("custom.foo")).actionGet().isExists(), is(true));
+        execute("drop table custom.foo");
+        assertThat(client().admin().indices().exists(new IndicesExistsRequest("custom.foo")).actionGet().isExists(), is(false));
+
+        assertBusy(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    execute("select * from custom.foo");
+                    fail("should wait for cache invalidation");
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
 }

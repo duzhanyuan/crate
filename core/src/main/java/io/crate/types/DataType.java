@@ -21,23 +21,17 @@
 
 package io.crate.types;
 
-import com.google.common.base.Function;
 import io.crate.Streamer;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Streamable;
 
 import java.io.IOException;
+import java.util.Comparator;
+import java.util.Objects;
+import java.util.Set;
 
 public abstract class DataType<T> implements Comparable, Streamable {
-
-    public static final Function<DataType, Streamer<?>> STREAMER_FUNCTION = new Function<DataType, Streamer<?>>() {
-
-        @Override
-        public Streamer<?> apply(DataType input) {
-            return input.streamer();
-        }
-    };
 
     public abstract int id();
 
@@ -56,7 +50,28 @@ public abstract class DataType<T> implements Comparable, Streamable {
      * @return true or false
      */
     public boolean isConvertableTo(DataType other) {
-        return this.equals(other) || DataTypes.ALLOWED_CONVERSIONS.get(id()).contains(other);
+        if (this.equals(other)) {
+            return true;
+        }
+        Set<DataType> possibleConversions = DataTypes.ALLOWED_CONVERSIONS.get(id());
+        //noinspection SimplifiableIfStatement
+        if (possibleConversions == null) {
+            return false;
+        }
+        return possibleConversions.contains(other);
+    }
+
+    static <T> int nullSafeCompareValueTo(T val1, T val2, Comparator<T> cmp) {
+        if (val1 == null) {
+            if (val2 == null) {
+                return 0;
+            }
+            return -1;
+        }
+        if (val2 == null) {
+            return 1;
+        }
+        return Objects.compare(val1, val2, cmp);
     }
 
     public int hashCode() {

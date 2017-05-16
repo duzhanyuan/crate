@@ -1,389 +1,370 @@
 /*
- * Licensed to CRATE Technology GmbH ("Crate") under one or more contributor
- * license agreements.  See the NOTICE file distributed with this work for
- * additional information regarding copyright ownership.  Crate licenses
- * this file to you under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.  You may
+ * Licensed to Crate under one or more contributor license agreements.
+ * See the NOTICE file distributed with this work for additional
+ * information regarding copyright ownership.  Crate licenses this file
+ * to you under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.  You may
  * obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
- * License for the specific language governing permissions and limitations
- * under the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
  *
  * However, if you have executed another commercial license agreement
  * with Crate these terms will supersede the license and you may use the
- * software solely pursuant to the terms of the relevant commercial agreement.
+ * software solely pursuant to the terms of the relevant commercial
+ * agreement.
  */
 
 package io.crate.executor.transport;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.util.concurrent.ListenableFuture;
+import io.crate.action.job.ContextPreparer;
 import io.crate.action.sql.DDLStatementDispatcher;
-import io.crate.breaker.CrateCircuitBreakerService;
-import io.crate.executor.*;
+import io.crate.action.sql.ShowStatementDispatcher;
+import io.crate.analyze.EvaluatingNormalizer;
+import io.crate.analyze.symbol.SelectSymbol;
+import io.crate.data.BatchConsumer;
+import io.crate.data.CollectingBatchConsumer;
+import io.crate.data.Row;
+import io.crate.executor.Executor;
+import io.crate.executor.Task;
 import io.crate.executor.task.DDLTask;
-import io.crate.executor.task.LocalCollectTask;
-import io.crate.executor.task.LocalMergeTask;
+import io.crate.executor.task.ExplainTask;
 import io.crate.executor.task.NoopTask;
+import io.crate.executor.task.SetSessionTask;
+import io.crate.executor.transport.executionphases.ExecutionPhasesTask;
 import io.crate.executor.transport.task.*;
 import io.crate.executor.transport.task.elasticsearch.*;
+import io.crate.jobs.JobContextService;
 import io.crate.metadata.Functions;
-import io.crate.metadata.ReferenceResolver;
-import io.crate.operation.ImplementationSymbolVisitor;
-import io.crate.operation.PageDownstreamFactory;
-import io.crate.operation.collect.HandlerSideDataCollectOperation;
-import io.crate.operation.collect.StatsTables;
+import io.crate.metadata.ReplaceMode;
+import io.crate.operation.InputFactory;
+import io.crate.operation.NodeOperationTree;
+import io.crate.operation.collect.sources.SystemCollectSource;
 import io.crate.operation.projectors.ProjectionToProjectorVisitor;
 import io.crate.planner.*;
-import io.crate.planner.node.PlanNode;
-import io.crate.planner.node.PlanNodeVisitor;
 import io.crate.planner.node.ddl.*;
-import io.crate.planner.node.dml.*;
-import io.crate.planner.node.dql.*;
-import org.elasticsearch.action.bulk.BulkRetryCoordinator;
+import io.crate.planner.node.dml.ESDelete;
+import io.crate.planner.node.dml.Upsert;
+import io.crate.planner.node.dml.UpsertById;
+import io.crate.planner.node.dql.ESGet;
+import io.crate.planner.node.dql.QueryThenFetch;
+import io.crate.planner.node.dql.join.NestedLoop;
+import io.crate.planner.node.management.ExplainPlan;
+import io.crate.planner.node.management.GenericShowPlan;
+import io.crate.planner.node.management.KillPlan;
+import io.crate.planner.statement.SetSessionPlan;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.bulk.BulkRetryCoordinatorPool;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.breaker.CircuitBreaker;
+import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Provider;
+import org.elasticsearch.common.inject.Singleton;
+import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.indices.IndicesService;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
-import java.util.UUID;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
-public class TransportExecutor implements Executor, TaskExecutor {
+@Singleton
+public class TransportExecutor implements Executor {
 
+    private static final Logger LOGGER = Loggers.getLogger(TransportExecutor.class);
+
+    private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final Functions functions;
-    private final TaskCollectingVisitor planVisitor;
-    private Provider<DDLStatementDispatcher> ddlAnalysisDispatcherProvider;
-    private final StatsTables statsTables;
-    private final NodeVisitor nodeVisitor;
-    private final ThreadPool threadPool;
+    private final TaskCollectingVisitor plan2TaskVisitor;
+    private DDLStatementDispatcher ddlAnalysisDispatcherProvider;
+    private ShowStatementDispatcher showStatementDispatcherProvider;
 
-    private final Settings settings;
     private final ClusterService clusterService;
+    private final JobContextService jobContextService;
+    private final ContextPreparer contextPreparer;
     private final TransportActionProvider transportActionProvider;
+    private final IndicesService indicesService;
     private final BulkRetryCoordinatorPool bulkRetryCoordinatorPool;
 
-    private final ImplementationSymbolVisitor globalImplementationSymbolVisitor;
     private final ProjectionToProjectorVisitor globalProjectionToProjectionVisitor;
+    private final MultiPhaseExecutor multiPhaseExecutor = new MultiPhaseExecutor();
 
-    // operation for handler side collecting
-    private final HandlerSideDataCollectOperation handlerSideDataCollectOperation;
-    private final CircuitBreaker circuitBreaker;
+    private final static BulkNodeOperationTreeGenerator BULK_NODE_OPERATION_VISITOR = new BulkNodeOperationTreeGenerator();
 
-    private final PageDownstreamFactory pageDownstreamFactory;
 
     @Inject
     public TransportExecutor(Settings settings,
+                             JobContextService jobContextService,
+                             ContextPreparer contextPreparer,
                              TransportActionProvider transportActionProvider,
+                             IndexNameExpressionResolver indexNameExpressionResolver,
                              ThreadPool threadPool,
                              Functions functions,
-                             ReferenceResolver referenceResolver,
-                             HandlerSideDataCollectOperation handlerSideDataCollectOperation,
-                             PageDownstreamFactory pageDownstreamFactory,
-                             Provider<DDLStatementDispatcher> ddlAnalysisDispatcherProvider,
-                             StatsTables statsTables,
+                             DDLStatementDispatcher ddlAnalysisDispatcherProvider,
+                             ShowStatementDispatcher showStatementDispatcherProvider,
                              ClusterService clusterService,
-                             CrateCircuitBreakerService breakerService,
-                             BulkRetryCoordinatorPool bulkRetryCoordinatorPool) {
-        this.settings = settings;
+                             IndicesService indicesService,
+                             BulkRetryCoordinatorPool bulkRetryCoordinatorPool,
+                             SystemCollectSource systemCollectSource) {
+        this.jobContextService = jobContextService;
+        this.contextPreparer = contextPreparer;
         this.transportActionProvider = transportActionProvider;
-        this.handlerSideDataCollectOperation = handlerSideDataCollectOperation;
-        this.pageDownstreamFactory = pageDownstreamFactory;
-        this.threadPool = threadPool;
+        this.indexNameExpressionResolver = indexNameExpressionResolver;
         this.functions = functions;
         this.ddlAnalysisDispatcherProvider = ddlAnalysisDispatcherProvider;
-        this.statsTables = statsTables;
+        this.showStatementDispatcherProvider = showStatementDispatcherProvider;
         this.clusterService = clusterService;
+        this.indicesService = indicesService;
         this.bulkRetryCoordinatorPool = bulkRetryCoordinatorPool;
-        this.nodeVisitor = new NodeVisitor();
-        this.planVisitor = new TaskCollectingVisitor();
-        this.circuitBreaker = breakerService.getBreaker(CrateCircuitBreakerService.QUERY_BREAKER);
-        this.globalImplementationSymbolVisitor = new ImplementationSymbolVisitor(
-                referenceResolver, functions, RowGranularity.CLUSTER);
-        this.globalProjectionToProjectionVisitor = new ProjectionToProjectorVisitor(
+        plan2TaskVisitor = new TaskCollectingVisitor();
+        EvaluatingNormalizer normalizer = EvaluatingNormalizer.functionOnlyNormalizer(functions, ReplaceMode.COPY);
+        globalProjectionToProjectionVisitor = new ProjectionToProjectorVisitor(
+            clusterService,
+            functions,
+            indexNameExpressionResolver,
+            threadPool,
+            settings,
+            transportActionProvider,
+            bulkRetryCoordinatorPool,
+            new InputFactory(functions),
+            normalizer,
+            systemCollectSource::getRowUpdater
+            );
+    }
+
+    @Override
+    public void execute(Plan plan, BatchConsumer consumer, Row parameters) {
+        CompletableFuture<Plan> planFuture = multiPhaseExecutor.process(plan, null);
+        planFuture
+            .thenAccept(p -> plan2TaskVisitor.process(p, null).execute(consumer, parameters))
+            .exceptionally(t -> { consumer.accept(null, t); return null; });
+    }
+
+    @Override
+    public List<CompletableFuture<Long>> executeBulk(Plan plan) {
+        Task task = plan2TaskVisitor.process(plan, null);
+        return task.executeBulk();
+    }
+
+    private class TaskCollectingVisitor extends PlanVisitor<Void, Task> {
+
+        @Override
+        public Task visitNoopPlan(NoopPlan plan, Void context) {
+            return NoopTask.INSTANCE;
+        }
+
+        @Override
+        public Task visitSetSessionPlan(SetSessionPlan plan, Void context) {
+            return new SetSessionTask(plan.jobId(), plan.settings(), plan.sessionContext());
+        }
+
+        @Override
+        public Task visitExplainPlan(ExplainPlan explainPlan, Void context) {
+            return new ExplainTask(explainPlan);
+        }
+
+        @Override
+        protected Task visitPlan(Plan plan, Void context) {
+            return executionPhasesTask(plan);
+        }
+
+        private ExecutionPhasesTask executionPhasesTask(Plan plan) {
+            List<NodeOperationTree> nodeOperationTrees = BULK_NODE_OPERATION_VISITOR.createNodeOperationTrees(
+                plan, clusterService.localNode().getId());
+            LOGGER.debug("Created NodeOperationTrees from Plan: {}", nodeOperationTrees);
+            return new ExecutionPhasesTask(
+                plan.jobId(),
                 clusterService,
-                threadPool,
-                settings,
-                transportActionProvider,
-                bulkRetryCoordinatorPool,
-                globalImplementationSymbolVisitor);
-    }
-
-    @Override
-    public Job newJob(Plan plan) {
-        final Job job = new Job();
-        planVisitor.process(plan, job);
-        return job;
-    }
-
-    @Override
-    public List<ListenableFuture<TaskResult>> execute(Job job) {
-        assert job.tasks().size() > 0;
-        return execute(job.tasks());
-
-    }
-
-    @Override
-    public List<Task> newTasks(PlanNode planNode, UUID jobId) {
-        return planNode.accept(nodeVisitor, jobId);
-    }
-
-    @Override
-    public List<ListenableFuture<TaskResult>> execute(Collection<Task> tasks) {
-        Task lastTask = null;
-        for (Task task : tasks) {
-            // chaining tasks
-            if (lastTask != null) {
-                task.upstreamResult(lastTask.result());
-            }
-            task.start();
-            lastTask = task;
-        }
-        return lastTask.result();
-    }
-
-    class TaskCollectingVisitor extends PlanVisitor<Job, Void> {
-
-        @Override
-        public Void visitIterablePlan(IterablePlan plan, Job job) {
-            for (PlanNode planNode : plan) {
-                job.addTasks(planNode.accept(nodeVisitor, job.id()));
-            }
-            return null;
-        }
-
-        @Override
-        public Void visitNoopPlan(NoopPlan plan, Job job) {
-            job.addTask(NoopTask.INSTANCE);
-            return null;
-        }
-
-        @Override
-        public Void visitGlobalAggregate(GlobalAggregate plan, Job job) {
-            job.addTasks(nodeVisitor.visitCollectNode(plan.collectNode(), job.id()));
-            job.addTasks(nodeVisitor.visitMergeNode(plan.mergeNode(), job.id()));
-            return null;
-        }
-
-        @Override
-        public Void visitQueryAndFetch(QueryAndFetch plan, Job job) {
-            job.addTasks(nodeVisitor.visitCollectNode(plan.collectNode(), job.id()));
-            job.addTasks(nodeVisitor.visitMergeNode(plan.localMergeNode(), job.id()));
-            return null;
-        }
-
-        @Override
-        public Void visitNonDistributedGroupBy(NonDistributedGroupBy plan, Job job) {
-            job.addTasks(nodeVisitor.visitCollectNode(plan.collectNode(), job.id()));
-            job.addTasks(nodeVisitor.visitMergeNode(plan.localMergeNode(), job.id()));
-            return null;
-        }
-
-        @Override
-        public Void visitUpsert(Upsert plan, Job job) {
-            ImmutableList.Builder<Task> taskBuilder = ImmutableList.builder();
-            for (List<DQLPlanNode> childNodes : plan.nodes()) {
-                List<Task> subTasks = new ArrayList<>(childNodes.size());
-                for (DQLPlanNode childNode : childNodes) {
-                    subTasks.addAll(childNode.accept(nodeVisitor, job.id()));
-                }
-                UpsertTask upsertTask = new UpsertTask(TransportExecutor.this, job.id(), subTasks);
-                taskBuilder.add(upsertTask);
-            }
-            job.addTasks(taskBuilder.build());
-            return null;
-        }
-
-        @Override
-        public Void visitDistributedGroupBy(DistributedGroupBy plan, Job job) {
-            job.addTasks(nodeVisitor.visitCollectNode(plan.collectNode(), job.id()));
-            job.addTasks(nodeVisitor.visitMergeNode(plan.reducerMergeNode(), job.id()));
-            job.addTasks(nodeVisitor.visitMergeNode(plan.localMergeNode(), job.id()));
-            return null;
-        }
-
-        @Override
-        public Void visitInsertByQuery(InsertFromSubQuery node, Job job) {
-            this.process(node.innerPlan(), job);
-            if(node.handlerMergeNode().isPresent()) {
-                job.addTasks(nodeVisitor.visitMergeNode(node.handlerMergeNode().get(), job.id()));
-            }
-            return null;
-        }
-
-        @Override
-        public Void visitQueryThenFetch(QueryThenFetch plan, Job job) {
-            job.addTasks(nodeVisitor.visitCollectNode(plan.collectNode(), job.id()));
-            job.addTasks(nodeVisitor.visitMergeNode(plan.mergeNode(), job.id()));
-            return null;
-        }
-    }
-
-    class NodeVisitor extends PlanNodeVisitor<UUID, ImmutableList<Task>> {
-
-        private ImmutableList<Task> singleTask(Task task) {
-            return ImmutableList.of(task);
-        }
-
-        @Override
-        public ImmutableList<Task> visitCollectNode(CollectNode node, UUID jobId) {
-            node.jobId(jobId); // add jobId to collectNode
-            if (node.isRouted()) {
-                return singleTask(new RemoteCollectTask(
-                        jobId,
-                        node,
-                        transportActionProvider.transportCollectNodeAction(),
-                        transportActionProvider.transportCloseContextNodeAction(),
-                        handlerSideDataCollectOperation,
-                        statsTables,
-                        circuitBreaker));
-            } else {
-                return singleTask(new LocalCollectTask(
-                        jobId,
-                        handlerSideDataCollectOperation,
-                        node,
-                        circuitBreaker));
-            }
-
-        }
-
-        @Override
-        public ImmutableList<Task> visitGenericDDLNode(GenericDDLNode node, UUID jobId) {
-            return singleTask(new DDLTask(jobId, ddlAnalysisDispatcherProvider.get(), node));
-        }
-
-        @Override
-        public ImmutableList<Task> visitMergeNode(@Nullable MergeNode node, UUID jobId) {
-            if (node == null) {
-               return ImmutableList.of();
-            }
-            node.jobId(jobId);
-            if (node.executionNodes().isEmpty()) {
-                return singleTask(new LocalMergeTask(
-                        jobId,
-                        pageDownstreamFactory,
-                        node,
-                        statsTables,
-                        circuitBreaker, threadPool));
-            } else {
-                return singleTask(new DistributedMergeTask(
-                        jobId,
-                        transportActionProvider.transportMergeNodeAction(), node));
-            }
-        }
-
-        @Override
-        public ImmutableList<Task> visitESGetNode(ESGetNode node, UUID jobId) {
-            return singleTask(new ESGetTask(
-                    jobId,
-                    functions,
-                    globalProjectionToProjectionVisitor,
-                    transportActionProvider.transportMultiGetAction(),
-                    transportActionProvider.transportGetAction(),
-                    node));
-        }
-
-        @Override
-        public ImmutableList<Task> visitESDeleteByQueryNode(ESDeleteByQueryNode node, UUID jobId) {
-            return singleTask(new ESDeleteByQueryTask(
-                    jobId,
-                    node,
-                    transportActionProvider.transportDeleteByQueryAction()));
-        }
-
-        @Override
-        public ImmutableList<Task> visitESDeleteNode(ESDeleteNode node, UUID jobId) {
-            return singleTask(new ESDeleteTask(
-                    jobId,
-                    node,
-                    transportActionProvider.transportDeleteAction()));
-        }
-
-        @Override
-        public ImmutableList<Task> visitCreateTableNode(CreateTableNode node, UUID jobId) {
-            return singleTask(new CreateTableTask(
-                            jobId,
-                            clusterService,
-                            transportActionProvider.transportCreateIndexAction(),
-                            transportActionProvider.transportDeleteIndexAction(),
-                            transportActionProvider.transportPutIndexTemplateAction(),
-                            node)
+                contextPreparer,
+                jobContextService,
+                indicesService,
+                transportActionProvider.transportJobInitAction(),
+                transportActionProvider.transportKillJobsNodeAction(),
+                nodeOperationTrees
             );
         }
 
         @Override
-        public ImmutableList<Task> visitESCreateTemplateNode(ESCreateTemplateNode node, UUID jobId) {
-            return singleTask(new ESCreateTemplateTask(jobId,
-                    node,
-                    transportActionProvider.transportPutIndexTemplateAction()));
+        public Task visitGetPlan(ESGet plan, Void context) {
+            return new ESGetTask(
+                functions,
+                globalProjectionToProjectionVisitor,
+                transportActionProvider,
+                plan,
+                jobContextService);
         }
 
         @Override
-        public ImmutableList<Task> visitESCountNode(ESCountNode node, UUID jobId) {
-            return singleTask(new ESCountTask(jobId, node,
-                    transportActionProvider.transportCountAction()));
+        public Task visitDropTablePlan(DropTablePlan plan, Void context) {
+            return new DropTableTask(plan,
+                transportActionProvider.transportDeleteIndexTemplateAction(),
+                transportActionProvider.transportDeleteIndexAction());
         }
 
         @Override
-        public ImmutableList<Task> visitSymbolBasedUpsertByIdNode(SymbolBasedUpsertByIdNode node, UUID jobId) {
-            return singleTask(new SymbolBasedUpsertByIdTask(jobId,
-                    clusterService,
-                    settings,
-                    transportActionProvider.symbolBasedTransportShardUpsertActionDelegate(),
-                    transportActionProvider.transportCreateIndexAction(),
-                    bulkRetryCoordinatorPool,
-                    node));
+        public Task visitKillPlan(KillPlan killPlan, Void context) {
+            return killPlan.jobToKill().isPresent() ?
+                new KillJobTask(transportActionProvider.transportKillJobsNodeAction(),
+                    killPlan.jobId(),
+                    killPlan.jobToKill().get()) :
+                new KillTask(transportActionProvider.transportKillAllNodeAction(), killPlan.jobId());
         }
 
         @Override
-        public ImmutableList<Task> visitUpsertByIdNode(UpsertByIdNode node, UUID jobId) {
-            return singleTask(new UpsertByIdTask(jobId,
-                    clusterService,
-                    settings,
-                    transportActionProvider.transportShardUpsertActionDelegate(),
-                    transportActionProvider.transportCreateIndexAction(),
-                    bulkRetryCoordinatorPool,
-                    node));
+        public Task visitGenericShowPlan(GenericShowPlan genericShowPlan, Void context) {
+            return new GenericShowTask(genericShowPlan.jobId(), showStatementDispatcherProvider, genericShowPlan.statement());
         }
 
         @Override
-        public ImmutableList<Task> visitDropTableNode(DropTableNode node, UUID jobId) {
-            return singleTask(new DropTableTask(jobId,
-                    transportActionProvider.transportDeleteIndexTemplateAction(),
-                    transportActionProvider.transportDeleteIndexAction(),
-                    node));
+        public Task visitGenericDDLPLan(GenericDDLPlan genericDDLPlan, Void context) {
+            return new DDLTask(genericDDLPlan.jobId(), ddlAnalysisDispatcherProvider, genericDDLPlan.statement());
         }
 
         @Override
-        public ImmutableList<Task> visitESDeleteIndexNode(ESDeleteIndexNode node, UUID jobId) {
-            return singleTask(new ESDeleteIndexTask(jobId,
-                    transportActionProvider.transportDeleteIndexAction(),
-                    node));
+        public Task visitESClusterUpdateSettingsPlan(ESClusterUpdateSettingsPlan plan, Void context) {
+            return new ESClusterUpdateSettingsTask(plan, transportActionProvider.transportClusterUpdateSettingsAction());
         }
 
         @Override
-        public ImmutableList<Task> visitESClusterUpdateSettingsNode(ESClusterUpdateSettingsNode node, UUID jobId) {
-            return singleTask(new ESClusterUpdateSettingsTask(
-                    jobId,
-                    transportActionProvider.transportClusterUpdateSettingsAction(),
-                    node));
+        public Task visitCreateAnalyzerPlan(CreateAnalyzerPlan plan, Void context) {
+            return new CreateAnalyzerTask(plan, transportActionProvider.transportClusterUpdateSettingsAction());
         }
 
         @Override
-        protected ImmutableList<Task> visitPlanNode(PlanNode node, UUID jobId) {
-            throw new UnsupportedOperationException(
-                    String.format("Can't generate job/task for planNode %s", node));
+        public Task visitESDelete(ESDelete plan, Void context) {
+            return new ESDeleteTask(plan, transportActionProvider.transportDeleteAction(), jobContextService);
+        }
+
+        @Override
+        public Task visitUpsertById(UpsertById plan, Void context) {
+            return new UpsertByIdTask(
+                plan,
+                clusterService,
+                indexNameExpressionResolver,
+                clusterService.state().metaData().settings(),
+                transportActionProvider.transportShardUpsertAction()::execute,
+                transportActionProvider.transportCreateIndexAction(),
+                transportActionProvider.transportBulkCreateIndicesAction(),
+                bulkRetryCoordinatorPool,
+                jobContextService);
+        }
+
+        @Override
+        public Task visitESDeletePartition(ESDeletePartition plan, Void context) {
+            return new ESDeletePartitionTask(plan, transportActionProvider.transportDeleteIndexAction());
+        }
+
+        @Override
+        public Task visitMultiPhasePlan(MultiPhasePlan multiPhasePlan, final Void context) {
+            throw new UnsupportedOperationException("MultiPhasePlan should have been processed by MultiPhaseExecutor");
         }
     }
+
+    /**
+     * Executor that triggers the execution of MultiPhasePlans.
+     * E.g.:
+     *
+     * processing a Plan that looks as follows:
+     * <pre>
+     *     QTF
+     *      |
+     *      +-- MultiPhasePlan
+     *              root: Collect3
+     *              deps: [Collect1, Collect2]
+     * </pre>
+     *
+     * Executions will be triggered for collect1 and collect2, and if those are completed, Collect3 will be returned
+     * as future which encapsulated the execution
+     */
+    private class MultiPhaseExecutor extends PlanVisitor<Void, CompletableFuture<Plan>> {
+
+        @Override
+        protected CompletableFuture<Plan> visitPlan(Plan plan, Void context) {
+            return CompletableFuture.completedFuture(plan);
+        }
+
+        @Override
+        public CompletableFuture<Plan> visitMerge(Merge merge, Void context) {
+            return process(merge.subPlan(), context).thenApply(p -> merge);
+        }
+
+        @Override
+        public CompletableFuture<Plan> visitNestedLoop(NestedLoop plan, Void context) {
+            CompletableFuture<Plan> fLeft = process(plan.left(), context);
+            CompletableFuture<Plan> fRight = process(plan.right(), context);
+            return CompletableFuture.allOf(fLeft, fRight).thenApply(x -> plan);
+        }
+
+        @Override
+        public CompletableFuture<Plan> visitQueryThenFetch(QueryThenFetch qtf, Void context) {
+            return process(qtf.subPlan(), context).thenApply(x -> qtf);
+        }
+
+        @Override
+        public CompletableFuture<Plan> visitMultiPhasePlan(MultiPhasePlan multiPhasePlan, Void context) {
+            Map<Plan, SelectSymbol> dependencies = multiPhasePlan.dependencies();
+            List<CompletableFuture<?>> dependencyFutures = new ArrayList<>();
+            Plan rootPlan = multiPhasePlan.rootPlan();
+            for (Map.Entry<Plan, SelectSymbol> entry : dependencies.entrySet()) {
+                Plan plan = entry.getKey();
+
+                SubSelectSymbolReplacer replacer = new SubSelectSymbolReplacer(rootPlan, entry.getValue());
+                CollectingBatchConsumer<Object[], Object> consumer = SingleRowSingleValueConsumer.create();
+
+                CompletableFuture<Plan> planFuture = process(plan, context);
+                planFuture.whenComplete((p, e) -> {
+                    if (e == null) {
+                        // must use plan2TaskVisitor instead of calling execute
+                        // to avoid triggering MultiPhasePlans inside p again (they're already processed).
+                        // since plan's are not mutated to remove them they're still part of the plan tree
+                        plan2TaskVisitor.process(p, null).execute(consumer, Row.EMPTY);
+                    } else {
+                        consumer.accept(null, e);
+                    }
+                });
+                dependencyFutures.add(consumer.resultFuture().thenAccept(replacer::onSuccess));
+            }
+            CompletableFuture[] cfs = dependencyFutures.toArray(new CompletableFuture[0]);
+            return CompletableFuture.allOf(cfs).thenCompose(x -> process(rootPlan, context));
+        }
+    }
+
+    static class BulkNodeOperationTreeGenerator extends PlanVisitor<BulkNodeOperationTreeGenerator.Context, Void> {
+
+        List<NodeOperationTree> createNodeOperationTrees(Plan plan, String localNodeId) {
+            Context context = new Context(localNodeId);
+            process(plan, context);
+            return context.nodeOperationTrees;
+        }
+
+        @Override
+        public Void visitUpsert(Upsert node, Context context) {
+            for (Plan plan : node.nodes()) {
+                context.nodeOperationTrees.add(NodeOperationTreeGenerator.fromPlan(plan, context.localNodeId));
+            }
+            return null;
+        }
+
+        @Override
+        protected Void visitPlan(Plan plan, Context context) {
+            context.nodeOperationTrees.add(NodeOperationTreeGenerator.fromPlan(plan, context.localNodeId));
+            return null;
+        }
+
+        static class Context {
+            private final List<NodeOperationTree> nodeOperationTrees = new ArrayList<>();
+            private final String localNodeId;
+
+            public Context(String localNodeId) {
+                this.localNodeId = localNodeId;
+            }
+        }
+    }
+
 }

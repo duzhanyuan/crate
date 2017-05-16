@@ -24,6 +24,7 @@ package io.crate.sql.tree;
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableMap;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -38,13 +39,11 @@ import java.util.Map;
  * or {@linkplain #get(String)}.
  * <p>
  * Example GenericProperties:
- *  <code>
- *  a='b',
- *  c=1.78
- *  d=[1, 2, 3, 'abc']
- *  </code>
- *
- *
+ * <code>
+ * a='b',
+ * c=1.78
+ * d=[1, 2, 3, 'abc']
+ * </code>
  */
 public class GenericProperties extends Node {
 
@@ -61,7 +60,7 @@ public class GenericProperties extends Node {
     }
 
     public Map<String, Expression> properties() {
-        return properties;
+        return Collections.unmodifiableMap(properties);
     }
 
     public Expression get(String key) {
@@ -70,10 +69,15 @@ public class GenericProperties extends Node {
 
     /**
      * merge the given {@linkplain io.crate.sql.tree.GenericProperty} into the contained map.
+     *
      * @param property
      */
     public void add(GenericProperty property) {
         properties.put(property.key(), property.value());
+    }
+
+    public boolean isEmpty() {
+        return properties.isEmpty();
     }
 
     @Override
@@ -95,11 +99,15 @@ public class GenericProperties extends Node {
 
     @Override
     public String toString() {
-        return null;
+        return properties.toString();
     }
 
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitGenericProperties(this, context);
+    }
+
+    public int size() {
+        return properties.size();
     }
 }

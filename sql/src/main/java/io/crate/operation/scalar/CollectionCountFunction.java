@@ -22,13 +22,9 @@
 package io.crate.operation.scalar;
 
 import io.crate.metadata.*;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Symbol;
-import io.crate.types.ArrayType;
+import io.crate.data.Input;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
-import io.crate.types.SetType;
 
 import java.util.Collection;
 import java.util.List;
@@ -38,23 +34,24 @@ public class CollectionCountFunction extends Scalar<Long, Collection<DataType>> 
     public static final String NAME = "collection_count";
     private final FunctionInfo info;
 
-    private static final DynamicFunctionResolver collectionCountResolver = new CollectionCountResolver();
+    private static final FunctionResolver collectionCountResolver = new CollectionCountResolver();
 
     public static void register(ScalarFunctionModule mod) {
         mod.register(NAME, collectionCountResolver);
     }
 
-    public CollectionCountFunction(FunctionInfo info) {
+    CollectionCountFunction(FunctionInfo info) {
         this.info = info;
     }
 
     @Override
     public Long evaluate(Input<Collection<DataType>>... args) {
         // TODO: eliminate Integer.MAX_VALUE limitation of Set.size()
-        if (args[0].value() == null) {
+        Collection<DataType> arg0Value = args[0].value();
+        if (arg0Value == null) {
             return null;
         }
-        return ((Integer)((args[0].value()).size())).longValue();
+        return ((Integer) (arg0Value.size())).longValue();
     }
 
     @Override
@@ -62,31 +59,17 @@ public class CollectionCountFunction extends Scalar<Long, Collection<DataType>> 
         return info;
     }
 
-    @Override
-    public Symbol normalizeSymbol(Function function) {
-        return function;
-    }
+    static class CollectionCountResolver extends BaseFunctionResolver {
 
-    static class CollectionCountResolver implements DynamicFunctionResolver {
-
-        private static boolean isCollectionType(DataType dataType) {
-            return dataType.id() == ArrayType.ID || dataType.id() == SetType.ID;
+        CollectionCountResolver() {
+            super(Signature.of(Signature.ArgMatcher.ANY_SET));
         }
 
         @Override
-        public FunctionImplementation<Function> getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
-            for (DataType dataType : dataTypes) {
-                if (!isCollectionType(dataType)) {
-                    throw new IllegalArgumentException(String.format(
-                            "Function \"%s\" got an invalid argument of type \"%s\"",
-                            NAME,
-                            dataType.getName()));
-                }
-            }
-
+        public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
             return new CollectionCountFunction(new FunctionInfo(
-                    new FunctionIdent(NAME, dataTypes),
-                    DataTypes.LONG
+                new FunctionIdent(NAME, dataTypes),
+                DataTypes.LONG
             ));
         }
     }

@@ -21,177 +21,121 @@
 
 package io.crate.operation.scalar.geo;
 
-import io.crate.metadata.FunctionIdent;
-import io.crate.metadata.Functions;
-import io.crate.operation.Input;
-import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
-import io.crate.planner.symbol.Symbols;
-import io.crate.types.DataType;
+import com.google.common.collect.ImmutableMap;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolType;
+import io.crate.operation.scalar.AbstractScalarFunctionsTest;
 import io.crate.types.DataTypes;
-import org.elasticsearch.common.inject.Injector;
-import org.elasticsearch.common.inject.ModulesBuilder;
-import org.hamcrest.Matchers;
-import org.junit.Before;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
-import java.util.Arrays;
-import java.util.List;
-
-import static io.crate.testing.TestingHelpers.assertLiteralSymbol;
+import static io.crate.testing.SymbolMatchers.isFunction;
+import static io.crate.testing.SymbolMatchers.isLiteral;
 import static io.crate.testing.TestingHelpers.createReference;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsEqual.equalTo;
-import static org.junit.Assert.*;
 
-public class WithinFunctionTest {
+public class WithinFunctionTest extends AbstractScalarFunctionsTest {
 
-    private Functions functions;
+    private static final String FNAME = WithinFunction.NAME;
 
-    private WithinFunction functionFromArgs(List<? extends Symbol> args) {
-        return getFunction(Symbols.extractTypes(args));
-    }
-
-    private WithinFunction getFunction(List<DataType> types) {
-        WithinFunction withinFunction = (WithinFunction) functions.get(
-                new FunctionIdent(WithinFunction.NAME, types));
-        assertNotNull(withinFunction);
-        return withinFunction;
-    }
-
-    private Boolean evaluate(List<Symbol> symbols) {
-        Input[] args = new Input[symbols.size()];
-        int idx = 0;
-        for (Symbol symbol : symbols) {
-            args[idx] = (Input) symbol;
-            idx++;
-        }
-        return functionFromArgs(symbols).evaluate(args);
-    }
-
-    private Boolean evaluate(Symbol... symbols) {
-        Input[] args = new Input[symbols.length];
-        for (int i = 0; i < args.length; i++) {
-            args[i] = (Input) symbols[i];
-        }
-        return functionFromArgs(Arrays.asList(symbols)).evaluate(args);
-    }
-
-    private Symbol normalize(Symbol... arguments) {
-        return normalize(Arrays.asList(arguments));
-    }
-
-    private Symbol normalize(List<Symbol> arguments) {
-        WithinFunction withinFunction = functionFromArgs(arguments);
-        return withinFunction.normalizeSymbol(new Function(withinFunction.info(), arguments));
-    }
-
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
-
-    @Before
-    public void setUp() throws Exception {
-        ModulesBuilder modules = new ModulesBuilder();
-        modules.add(new ScalarFunctionModule());
-        Injector injector = modules.createInjector();
-        functions = injector.getInstance(Functions.class);
+    @Test
+    public void testEvaluateWithNullArgs() throws Exception {
+        assertEvaluate("within(geopoint, geoshape)", null, Literal.newGeoPoint(null), Literal.newGeoShape("POINT (10 10)"));
+        assertEvaluate("within(geopoint, geoshape)", null, Literal.newGeoPoint("POINT (10 10)"), Literal.newGeoShape(null));
     }
 
     @Test
-    public void testEvaluateWithFirstArgNull() throws Exception {
-        assertNull(evaluate(Literal.newGeoShape(null), Literal.newGeoShape("POINT (10 10)")));
-        assertNull(evaluate(Literal.newGeoShape("POINT (10 10)"), Literal.newGeoShape(null)));
+    public void testEvaluatePointLiteralWithinPolygonLiteral() {
+        assertEvaluate("within(geopoint, geoshape)", true,
+            Literal.of(DataTypes.GEO_SHAPE, DataTypes.GEO_SHAPE.value("POINT (10 10)")),
+            Literal.of(DataTypes.GEO_SHAPE, DataTypes.GEO_SHAPE.value("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"))
+        );
     }
 
     @Test
-    public void testEvaluatePointLiteralWithinPolygonLiteral() throws Exception {
-        boolean isWithin = evaluate(Arrays.<Symbol>asList(
-                Literal.newLiteral(DataTypes.GEO_POINT, DataTypes.GEO_POINT.value("POINT (10 10)")),
-                Literal.newLiteral(DataTypes.GEO_SHAPE, DataTypes.GEO_SHAPE.value(
-                        "POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"))));
-        assertTrue(isWithin);
+    public void testEvaluateShapeWithinShape() {
+        assertEvaluate("within(geoshape, geoshape)", true,
+            Literal.of(DataTypes.GEO_SHAPE, DataTypes.GEO_SHAPE.value("LINESTRING (8 15, 13 24)")),
+            Literal.of(DataTypes.GEO_SHAPE, DataTypes.GEO_SHAPE.value("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"))
+        );
     }
 
     @Test
-    public void testEvaluateShapeLiteralWithinShapeLiteral() throws Exception {
-        boolean isWithin = evaluate(Arrays.<Symbol>asList(
-                Literal.newGeoShape("POLYGON ((10 10, 11 10, 11 11, 10 11, 10 10))"),
-                Literal.newGeoShape("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))")));
-        assertTrue(isWithin);
+    public void testEvaluateShapeIsNotWithinShape() {
+        assertEvaluate("within(geoshape, geoshape)", false,
+            Literal.of(DataTypes.GEO_SHAPE, DataTypes.GEO_SHAPE.value("LINESTRING (8 15, 40 74)")),
+            Literal.of(DataTypes.GEO_SHAPE, DataTypes.GEO_SHAPE.value("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"))
+        );
+    }
+
+    @Test
+    public void testEvaluateObjectWithinShape() {
+        assertEvaluate("within(geopoint, geoshape)", true,
+            Literal.of(ImmutableMap.<String, Object>of("type", "Point", "coordinates", new double[]{10.0, 10.0})),
+            Literal.of(DataTypes.GEO_SHAPE, DataTypes.GEO_SHAPE.value("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"))
+        );
     }
 
     @Test
     public void testNormalizeWithReferenceAndLiteral() throws Exception {
-        List<Symbol> arguments = Arrays.<Symbol>asList(
-                createReference("foo", DataTypes.GEO_POINT),
-                Literal.newGeoShape("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"));
-        WithinFunction withinFunction = functionFromArgs(arguments);
-        Symbol function = new Function(withinFunction.info(), arguments);
-        Symbol normalizedSymbol = withinFunction.normalizeSymbol((Function) function);
-        assertThat(normalizedSymbol, Matchers.sameInstance(function));
-    }
-
-    @Test
-    public void testNormalizeWithTwoLiterals() throws Exception {
-        Symbol normalized = normalize(Arrays.<Symbol>asList(
-                Literal.newGeoShape("POLYGON ((10 10, 11 10, 11 11, 10 11, 10 10))"),
-                Literal.newGeoShape("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))")));
-        assertLiteralSymbol(normalized, true);
+        Symbol normalizedSymbol = normalize(FNAME, createReference("foo", DataTypes.GEO_POINT),
+            Literal.newGeoShape("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"));
+        assertThat(normalizedSymbol, isFunction(FNAME));
     }
 
     @Test
     public void testNormalizeWithTwoStringLiterals() throws Exception {
-        Symbol normalized = normalize(
-                Literal.newLiteral("POINT (10 10)"),
-                Literal.newLiteral("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"));
-        assertLiteralSymbol(normalized, true);
+        assertNormalize("within('POINT (10 10)', 'POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))')", isLiteral(true));
     }
 
     @Test
     public void testNormalizeWithStringLiteralAndReference() throws Exception {
-        Symbol normalized = normalize(
-                createReference("point", DataTypes.GEO_POINT),
-                Literal.newLiteral("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"));
-        assertThat(normalized, Matchers.instanceOf(Function.class));
+        Symbol normalized = normalize(FNAME,
+            createReference("point", DataTypes.GEO_POINT),
+            Literal.of("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"));
+        assertThat(normalized, instanceOf(Function.class));
         Function function = (Function) normalized;
         Symbol symbol = function.arguments().get(1);
-        assertThat(symbol.valueType(), equalTo((DataType) DataTypes.GEO_SHAPE));
+        assertThat(symbol.valueType(), equalTo(DataTypes.GEO_SHAPE));
     }
 
     @Test
     public void testNormalizeWithFirstArgAsStringReference() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("\"within\" doesn't support references of type \"string\"");
-        normalize(Arrays.<Symbol>asList(
-                createReference("location", DataTypes.STRING),
-                Literal.newGeoShape("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))")));
+        Symbol normalized = normalize(FNAME,
+            createReference("location", DataTypes.STRING),
+            Literal.newGeoShape("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"));
+        assertThat(normalized.symbolType(), is(SymbolType.FUNCTION));
     }
 
     @Test
     public void testNormalizeWithSecondArgAsStringReference() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("\"within\" doesn't support references of type \"string\"");
-        normalize(Arrays.<Symbol>asList(
-                Literal.newGeoShape("POLYGON ((5 5, 20 5, 30 30, 5 30, 5 5))"),
-                createReference("location", DataTypes.STRING)));
+        Symbol normalized = normalize(FNAME,
+            Literal.of(DataTypes.GEO_POINT, new Double[]{0.0d, 0.0d}),
+            createReference("location", DataTypes.STRING));
+        assertThat(normalized.symbolType(), is(SymbolType.FUNCTION));
+        assertThat(((Function) normalized).info().ident().name(), is(WithinFunction.NAME));
     }
 
     @Test
     public void testFirstArgumentWithInvalidType() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage(
-                "within doesn't take an argument of type \"long\" as first argument");
-        getFunction(Arrays.<DataType>asList(DataTypes.LONG, DataTypes.GEO_POINT));
+        assertThat(getFunction(FNAME, DataTypes.LONG, DataTypes.GEO_POINT), is(nullValue()));
     }
 
     @Test
     public void testSecondArgumentWithInvalidType() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage(
-                "within doesn't take an argument of type \"long\" as second argument");
-        getFunction(Arrays.<DataType>asList(DataTypes.GEO_POINT, DataTypes.LONG));
+        assertThat(getFunction(FNAME, DataTypes.GEO_POINT, DataTypes.LONG), is(nullValue()));
+    }
+
+    @Test
+    public void testNormalizeFromObject() throws Exception {
+        Symbol normalized = normalize(FNAME,
+            Literal.of("POINT (1.0 0.0)"),
+            Literal.of(ImmutableMap.<String, Object>of("type", "Point", "coordinates", new double[]{0.0, 1.0})));
+        assertThat(normalized.symbolType(), is(SymbolType.LITERAL));
+        assertThat(((Literal) normalized).value(), is(Boolean.FALSE));
     }
 }

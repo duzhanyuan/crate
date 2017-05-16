@@ -27,23 +27,15 @@ import java.util.Comparator;
 
 public class RowPriorityQueue<T> extends PriorityQueue<T> {
 
-    private final Comparator[] comparators;
+    private final Comparator<T> comparator;
 
-    public RowPriorityQueue(int maxSize, Comparator[] comparators) {
+    public RowPriorityQueue(int maxSize, Comparator<T> comparator) {
         super(maxSize);
-        this.comparators = comparators;
+        this.comparator = comparator;
     }
 
     @Override
     public boolean lessThan(T a, T b) {
-        for (Comparator c : comparators) {
-            //noinspection unchecked
-            int compared = c.compare(a, b);
-
-            if (compared < 0) return true;
-            if (compared == 0) continue;
-            if (compared > 0) return false;
-        }
-        return false;
+        return comparator.compare(a, b) < 0;
     }
 }

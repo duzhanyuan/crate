@@ -22,13 +22,16 @@
 package io.crate.operation.aggregation.impl;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.metadata.FunctionIdent;
+import io.crate.Streamer;
 import io.crate.operation.aggregation.AggregationTest;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
+import org.elasticsearch.common.io.stream.BytesStreamOutput;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.junit.Test;
 
-import static org.junit.Assert.assertEquals;
+import static io.crate.testing.SymbolMatchers.isLiteral;
+
 
 public class CountAggregationTest extends AggregationTest {
 
@@ -38,9 +41,9 @@ public class CountAggregationTest extends AggregationTest {
 
     @Test
     public void testReturnType() throws Exception {
-        FunctionIdent fi = new FunctionIdent("count", ImmutableList.<DataType>of(DataTypes.INTEGER));
         // Return type is fixed to Long
-        assertEquals(DataTypes.LONG, functions.get(fi).info().returnType());
+        assertEquals(DataTypes.LONG,
+            functions.getBuiltin("count", ImmutableList.of(DataTypes.INTEGER)).info().returnType());
     }
 
     @Test
@@ -86,10 +89,26 @@ public class CountAggregationTest extends AggregationTest {
     }
 
     @Test
+    public void testNormalizeWithNullLiteral() {
+        assertThat(normalize("count", null, DataTypes.STRING), isLiteral(0L));
+        assertThat(normalize("count", null, DataTypes.UNDEFINED), isLiteral(0L));
+    }
+
+    @Test
     public void testNoInput() throws Exception {
         // aka. COUNT(*)
         Object[][] result = executeAggregation(null, new Object[][]{{}, {}});
         assertEquals(2L, result[0][0]);
     }
 
+    @Test
+    public void testStreaming() throws Exception {
+        CountAggregation.LongState l1 = new CountAggregation.LongState(12345L);
+        BytesStreamOutput out = new BytesStreamOutput();
+        Streamer streamer = CountAggregation.LongStateType.INSTANCE.streamer();
+        streamer.writeValueTo(out, l1);
+        StreamInput in = out.bytes().streamInput();
+        CountAggregation.LongState l2 = (CountAggregation.LongState) streamer.readValueFrom(in);
+        assertEquals(l1.value, l2.value);
+    }
 }

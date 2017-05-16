@@ -21,15 +21,16 @@
 
 package io.crate.analyze.relations;
 
-import io.crate.planner.symbol.Field;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.metadata.table.Operation;
 import io.crate.sql.tree.QualifiedName;
 
 import javax.annotation.Nullable;
 import java.util.List;
 
-public interface FieldProvider {
+public interface FieldProvider<T extends Symbol> {
 
-    public Field resolveField(QualifiedName qualifiedName, boolean forWrite);
+    T resolveField(QualifiedName qualifiedName, Operation operation);
 
-    public Field resolveField(QualifiedName qualifiedName, @Nullable List<String> path, boolean forWrite);
+    T resolveField(QualifiedName qualifiedName, @Nullable List<String> path, Operation operation);
 }

@@ -21,28 +21,17 @@
 
 package io.crate.metadata;
 
-import io.crate.operation.Input;
+public abstract class RowContextCollectorExpression<TRow, TReturnValue> implements RowCollectExpression<TRow, TReturnValue> {
 
-public abstract class RowContextCollectorExpression<R, T> implements ReferenceImplementation, Input<T> {
-
-    protected final ReferenceInfo info;
-    protected R row;
-
-    public RowContextCollectorExpression(ReferenceInfo info) {
-        this.info = info;
-    }
-
-    @Deprecated
-    public ReferenceInfo info() {
-        return info;
-    }
+    protected TRow row;
 
     @Override
     public ReferenceImplementation getChildImplementation(String name) {
         return null;
     }
 
-    public void setNextRow(R row) {
+    @Override
+    public void setNextRow(TRow row) {
         this.row = row;
     }
 }

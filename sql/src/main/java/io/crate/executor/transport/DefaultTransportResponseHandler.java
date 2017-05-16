@@ -22,19 +22,36 @@
 package io.crate.executor.transport;
 
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.transport.BaseTransportResponseHandler;
 import org.elasticsearch.transport.TransportException;
 import org.elasticsearch.transport.TransportResponse;
+import org.elasticsearch.transport.TransportResponseHandler;
 
-public abstract class DefaultTransportResponseHandler<TResponse extends TransportResponse>
-        extends BaseTransportResponseHandler<TResponse> {
+import java.util.function.Supplier;
+
+public final class DefaultTransportResponseHandler<TResponse extends TransportResponse>
+    implements TransportResponseHandler<TResponse> {
 
     private final ActionListener<TResponse> listener;
+    private final Supplier<? extends TResponse> responseSupplier;
     private final String executor;
 
-    protected DefaultTransportResponseHandler(ActionListener<TResponse> listener, String executor) {
+    /**
+     * Creates a ResponseHandler that passes the response or exception to the given listener.
+     * onResponse/onFailure will be executed using the given executor or SAME if the executor is null.
+     *
+     * If the operation run onResponse is cheap, use {@link org.elasticsearch.action.ActionListenerResponseHandler} instead.
+     */
+    public DefaultTransportResponseHandler(ActionListener<TResponse> listener,
+                                           Supplier<? extends TResponse> responseSupplier,
+                                           String executor) {
         this.listener = listener;
+        this.responseSupplier = responseSupplier;
         this.executor = executor;
+    }
+
+    @Override
+    public TResponse newInstance() {
+        return responseSupplier.get();
     }
 
     @Override

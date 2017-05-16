@@ -21,6 +21,7 @@
 
 package io.crate.analyze;
 
+import io.crate.data.Row;
 import io.crate.sql.tree.Expression;
 
 import java.util.Locale;
@@ -38,7 +39,7 @@ public abstract class MappingsApplier {
         this.defaultValue = defaultValue;
     }
 
-    public abstract void apply(Map<String, Object> mappings, Object[] parameters, Expression expression);
+    public abstract void apply(Map<String, Object> mappings, Row parameters, Expression expression);
 
     public void applyValue(Map<String, Object> mappings, Object value) {
         try {
@@ -58,11 +59,16 @@ public abstract class MappingsApplier {
 
     public IllegalArgumentException invalidException(Exception cause) {
         return new IllegalArgumentException(
-                String.format(Locale.ENGLISH, "Invalid value for argument '%s'", publicName), cause);
+            String.format(Locale.ENGLISH, "Invalid value for argument '%s'", publicName), cause);
     }
 
     public IllegalArgumentException invalidException() {
         return new IllegalArgumentException(
-                String.format(Locale.ENGLISH, "Invalid value for argument '%s'", publicName));
+            String.format(Locale.ENGLISH, "Invalid value for argument '%s'", publicName));
+    }
+
+    @Override
+    public String toString() {
+        return "MappingsApplier{" + publicName + '}';
     }
 }

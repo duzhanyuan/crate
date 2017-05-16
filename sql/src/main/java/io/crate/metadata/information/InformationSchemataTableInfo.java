@@ -22,14 +22,11 @@
 package io.crate.metadata.information;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.ReferenceIdent;
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.TableIdent;
-import io.crate.planner.RowGranularity;
+import com.google.common.collect.ImmutableSortedMap;
+import io.crate.metadata.*;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
+import org.elasticsearch.cluster.service.ClusterService;
 
 public class InformationSchemataTableInfo extends InformationTableInfo {
 
@@ -40,19 +37,20 @@ public class InformationSchemataTableInfo extends InformationTableInfo {
         public static final ColumnIdent SCHEMA_NAME = new ColumnIdent("schema_name");
     }
 
-    public static class ReferenceInfos {
-        public static final ReferenceInfo SCHEMA_NAME = info(Columns.SCHEMA_NAME, DataTypes.STRING);
+    public static class References {
+        public static final Reference SCHEMA_NAME = info(Columns.SCHEMA_NAME, DataTypes.STRING);
     }
 
-    private static ReferenceInfo info(ColumnIdent columnIdent, DataType dataType) {
-        return new ReferenceInfo(new ReferenceIdent(IDENT, columnIdent), RowGranularity.DOC, dataType);
+    private static Reference info(ColumnIdent columnIdent, DataType dataType) {
+        return new Reference(new ReferenceIdent(IDENT, columnIdent), RowGranularity.DOC, dataType);
     }
 
-    protected InformationSchemataTableInfo(InformationSchemaInfo schemaInfo) {
-        super(schemaInfo, IDENT,
-                ImmutableList.of(Columns.SCHEMA_NAME),
-                ImmutableMap.of(Columns.SCHEMA_NAME, ReferenceInfos.SCHEMA_NAME),
-                ImmutableList.of(ReferenceInfos.SCHEMA_NAME)
+    protected InformationSchemataTableInfo(ClusterService clusterService) {
+        super(clusterService, IDENT,
+            ImmutableList.of(Columns.SCHEMA_NAME),
+            ImmutableSortedMap.<ColumnIdent, Reference>naturalOrder()
+                .put(Columns.SCHEMA_NAME, References.SCHEMA_NAME)
+                .build()
         );
     }
 }

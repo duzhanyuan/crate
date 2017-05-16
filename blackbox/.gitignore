@@ -1,0 +1,11 @@
+*.pyc
+*.pyo
+/tmp/
+parts/
+.installed.cfg
+develop-eggs/
+eggs/
+.venv27
+.venv
+get-pip.py
+sqllogic.log

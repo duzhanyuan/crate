@@ -21,57 +21,47 @@
 
 package io.crate.operation.reference.doc.lucene;
 
-import io.crate.operation.collect.LuceneDocCollector;
-import org.elasticsearch.search.internal.SearchContext;
-import org.elasticsearch.search.lookup.SearchLookup;
+import io.crate.operation.collect.collectors.CollectorFieldsVisitor;
+import org.elasticsearch.index.fielddata.IndexFieldDataService;
+import org.elasticsearch.search.lookup.SourceLookup;
 
 public class CollectorContext {
 
-    private SearchContext searchContext;
-    private SearchLookup searchLookup;
-    private LuceneDocCollector.CollectorFieldsVisitor fieldsVisitor;
-    private int jobSearchContextId;
+    private final IndexFieldDataService fieldData;
+    private final CollectorFieldsVisitor fieldsVisitor;
+    private final int jobSearchContextId;
 
-    public CollectorContext() {
+    private SourceLookup sourceLookup;
+
+    public CollectorContext(IndexFieldDataService fieldData,
+                            CollectorFieldsVisitor visitor) {
+        this(fieldData, visitor, -1);
     }
 
-    public SearchContext searchContext() {
-        return searchContext;
-    }
-
-    public CollectorContext searchContext(SearchContext searchContext) {
-        this.searchContext = searchContext;
-        return this;
-    }
-
-    public CollectorContext visitor(LuceneDocCollector.CollectorFieldsVisitor visitor) {
+    public CollectorContext(IndexFieldDataService fieldData,
+                            CollectorFieldsVisitor visitor,
+                            int jobSearchContextId) {
+        this.fieldData = fieldData;
         fieldsVisitor = visitor;
-        return this;
-    }
-
-    public LuceneDocCollector.CollectorFieldsVisitor visitor(){
-        return fieldsVisitor;
-    }
-
-
-    public CollectorContext jobSearchContextId(int jobSearchContextId) {
         this.jobSearchContextId = jobSearchContextId;
-        return this;
+    }
+
+    public CollectorFieldsVisitor visitor() {
+        return fieldsVisitor;
     }
 
     public int jobSearchContextId() {
         return jobSearchContextId;
     }
 
-    public CollectorContext searchLookup(SearchLookup searchLookup) {
-        this.searchLookup = searchLookup;
-        return this;
+    public IndexFieldDataService fieldData() {
+        return fieldData;
     }
 
-    public SearchLookup searchLookup() {
-        if (searchLookup == null) {
-            return searchContext.lookup();
+    public SourceLookup sourceLookup() {
+        if (sourceLookup == null) {
+            sourceLookup = new SourceLookup();
         }
-        return searchLookup;
+        return sourceLookup;
     }
 }

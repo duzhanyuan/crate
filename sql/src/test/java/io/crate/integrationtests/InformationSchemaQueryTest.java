@@ -21,27 +21,103 @@
 
 package io.crate.integrationtests;
 
-import io.crate.test.integration.CrateIntegrationTest;
+import io.crate.testing.SQLResponse;
+import io.crate.testing.UseJdbc;
 import org.elasticsearch.action.admin.indices.close.CloseIndexRequest;
+import org.hamcrest.Matchers;
 import org.junit.Test;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
+
+@UseJdbc
 public class InformationSchemaQueryTest extends SQLTransportIntegrationTest {
 
     @Test
-    public void testIgnoreClosedTables() throws Exception {
-        execute("create table t3 (col1 integer, col2 string) with (number_of_replicas=8)");
-        execute("create table t1 (col1 integer, col2 string) with (number_of_replicas=0)");
+    public void testDoNotIgnoreClosedTables() throws Exception {
+        execute("create table t3 (col1 integer, col2 string) " +
+                "clustered into 5 shards " +
+                "with (number_of_replicas=8)");
+        execute("create table t1 (col1 integer, col2 string) " +
+                "clustered into 5 shards " +
+                "with (number_of_replicas=0)");
 
-        client().admin().indices().close(new CloseIndexRequest("t3"));
-        ensureGreen();
+        ensureYellow();
+        client().admin().indices().close(new CloseIndexRequest("t3")).actionGet();
 
-        execute("select * from information_schema.tables where schema_name = 'doc'");
-        assertEquals(1L, response.rowCount());
+        execute("select * from information_schema.tables where table_schema = 'doc'");
+        assertEquals(2L, response.rowCount());
         execute("select * from information_schema.columns where table_name = 't3'");
-        assertEquals(0, response.rowCount());
+        assertEquals(2, response.rowCount());
 
         execute("select * from sys.shards");
-        assertEquals(5L, response.rowCount()); // t3 isn't included
+        assertEquals(5L, response.rowCount()); // t3 isn't included, as it is closed.
+    }
+
+    @Test
+    public void testConcurrentInformationSchemaQueries() throws Exception {
+        final SQLResponse response = execute("select * from information_schema.columns " +
+                                             "order by table_schema, table_name, column_name");
+        final CountDownLatch latch = new CountDownLatch(40);
+        final AtomicReference<AssertionError> lastAssertionError = new AtomicReference<>();
+
+        for (int i = 0; i < 40; i++) {
+            final Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    SQLResponse resp = execute("select * from information_schema.columns " +
+                                               "order by table_schema, table_name, column_name");
+                    try {
+                        assertThat(resp.rows(), Matchers.equalTo(response.rows()));
+                    } catch (AssertionError e) {
+                        lastAssertionError.set(e);
+                    }
+                    latch.countDown();
+                }
+            });
+            t.start();
+        }
+
+        latch.await();
+        AssertionError assertionError = lastAssertionError.get();
+        if (assertionError != null) {
+            throw assertionError;
+        }
+    }
+
+    @Test
+    public void testConcurrentUnassignedShardsReferenceResolver() throws Exception {
+        internalCluster().ensureAtMostNumDataNodes(1);
+        execute("create table t1 (col1 integer) " +
+                "clustered into 1 shards " +
+                "with (number_of_replicas=8)");
+        execute("create table t2 (col1 integer) " +
+                "clustered into 1 shards " +
+                "with (number_of_replicas=8)");
+        ensureYellow();
+
+        final SQLResponse response = execute("select * from sys.shards where table_name in ('t1', 't2') and state='UNASSIGNED' order by schema_name, table_name, id");
+        final CountDownLatch latch = new CountDownLatch(40);
+        final AtomicReference<AssertionError> lastAssertionError = new AtomicReference<>();
+        for (int i = 0; i < 40; i++) {
+            final Thread t = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    SQLResponse resp = execute("select * from sys.shards where table_name in ('t1', 't2') and state='UNASSIGNED' order by schema_name, table_name, id");
+                    try {
+                        assertThat(resp.rows(), Matchers.equalTo(response.rows()));
+                    } catch (AssertionError e) {
+                        lastAssertionError.set(e);
+                    }
+                    latch.countDown();
+                }
+            });
+            t.start();
+        }
+        latch.await();
+        AssertionError assertionError = lastAssertionError.get();
+        if (assertionError != null) {
+            throw assertionError;
+        }
     }
 }

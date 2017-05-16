@@ -24,44 +24,34 @@ package io.crate.operation.reference.doc;
 import io.crate.operation.reference.doc.lucene.LongColumnReference;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
-import org.apache.lucene.document.LongField;
+import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
-import org.elasticsearch.index.fielddata.FieldDataType;
-import org.elasticsearch.index.mapper.FieldMapper;
 import org.junit.Test;
 
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 
 public class LongColumnReferenceTest extends DocLevelExpressionsTest {
+
+    private String column = "l";
+
     @Override
     protected void insertValues(IndexWriter writer) throws Exception {
-        for (long l = Long.MIN_VALUE; l< Long.MIN_VALUE + 10; l++) {
+        for (long l = Long.MIN_VALUE; l < Long.MIN_VALUE + 10; l++) {
             Document doc = new Document();
             doc.add(new StringField("_id", Long.toString(l), Field.Store.NO));
-            doc.add(new LongField(fieldName().name(), l, Field.Store.NO));
+            doc.add(new NumericDocValuesField(column, l));
             writer.addDocument(doc);
         }
     }
 
-    @Override
-    protected FieldMapper.Names fieldName() {
-        return new FieldMapper.Names("l");
-    }
-
-    @Override
-    protected FieldDataType fieldType() {
-        return new FieldDataType("long");
-    }
-
     @Test
-    public void testFieldCacheExpression() throws Exception {
-        LongColumnReference longColumn = new LongColumnReference(fieldName().name());
+    public void testLongExpression() throws Exception {
+        LongColumnReference longColumn = new LongColumnReference(column);
         longColumn.startCollect(ctx);
         longColumn.setNextReader(readerContext);
         IndexSearcher searcher = new IndexSearcher(readerContext.reader());

@@ -21,213 +21,224 @@
 
 package io.crate.operation.fetch;
 
-import com.carrotsearch.hppc.IntArrayList;
-import com.carrotsearch.hppc.IntObjectOpenHashMap;
-import com.carrotsearch.hppc.LongArrayList;
+import com.carrotsearch.hppc.IntContainer;
+import com.carrotsearch.hppc.IntObjectHashMap;
+import com.carrotsearch.hppc.IntObjectMap;
 import com.carrotsearch.hppc.cursors.IntObjectCursor;
-import com.carrotsearch.hppc.cursors.LongCursor;
-import com.google.common.base.Function;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-import com.google.common.util.concurrent.ListenableFuture;
-import io.crate.breaker.RamAccountingContext;
-import io.crate.core.collections.Bucket;
-import io.crate.metadata.Functions;
-import io.crate.operation.Input;
-import io.crate.operation.RowDownstream;
-import io.crate.operation.ThreadPools;
-import io.crate.operation.collect.*;
-import io.crate.operation.projectors.Projector;
-import io.crate.operation.reference.DocLevelReferenceResolver;
-import io.crate.operation.reference.doc.lucene.LuceneDocLevelReferenceResolver;
-import io.crate.planner.projection.Projection;
-import io.crate.planner.symbol.Reference;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
+import io.crate.Streamer;
+import io.crate.analyze.symbol.Symbols;
+import io.crate.exceptions.SQLExceptions;
+import io.crate.executor.transport.StreamBucket;
+import io.crate.jobs.JobContextService;
+import io.crate.jobs.JobExecutionContext;
+import io.crate.metadata.Reference;
+import io.crate.metadata.TableIdent;
+import io.crate.operation.collect.stats.JobsLogs;
+import io.crate.operation.reference.doc.lucene.LuceneCollectorExpression;
+import io.crate.operation.reference.doc.lucene.LuceneReferenceResolver;
+import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
+import org.elasticsearch.index.IndexService;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import javax.annotation.Nullable;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.UUID;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class NodeFetchOperation {
 
-    private final UUID jobId;
-    private final List<Reference> toFetchReferences;
-    private final boolean closeContext;
-    private final IntObjectOpenHashMap<ShardDocIdsBucket> shardBuckets = new IntObjectOpenHashMap();
+    private final Executor executor;
+    private final JobsLogs jobsLogs;
+    private final JobContextService jobContextService;
 
-    private final CollectContextService collectContextService;
-    private final RamAccountingContext ramAccountingContext;
-    private final CollectInputSymbolVisitor<?> docInputSymbolVisitor;
-    private final ThreadPoolExecutor executor;
-    private final int poolSize;
+    private static class TableFetchInfo {
 
-    private int inputCursor = 0;
+        private final Streamer<?>[] streamers;
+        private final Collection<Reference> refs;
+        private final FetchContext fetchContext;
 
-    private static final ESLogger LOGGER = Loggers.getLogger(NodeFetchOperation.class);
+        TableFetchInfo(Collection<Reference> refs, FetchContext fetchContext) {
+            this.refs = refs;
+            this.fetchContext = fetchContext;
+            this.streamers = Symbols.streamerArray(refs);
+        }
 
-    public NodeFetchOperation(UUID jobId,
-                              LongArrayList jobSearchContextDocIds,
-                              List<Reference> toFetchReferences,
-                              boolean closeContext,
-                              CollectContextService collectContextService,
-                              ThreadPool threadPool,
-                              Functions functions,
-                              RamAccountingContext ramAccountingContext) {
-        this.jobId = jobId;
-        this.toFetchReferences = toFetchReferences;
-        this.closeContext = closeContext;
-        this.collectContextService = collectContextService;
-        this.ramAccountingContext = ramAccountingContext;
-        executor = (ThreadPoolExecutor) threadPool.executor(ThreadPool.Names.SEARCH);
-        poolSize = executor.getCorePoolSize();
-
-        DocLevelReferenceResolver<? extends Input<?>> resolver = new LuceneDocLevelReferenceResolver(null);
-        this.docInputSymbolVisitor = new CollectInputSymbolVisitor<>(
-                functions,
-                resolver
-        );
-
-        createShardBuckets(jobSearchContextDocIds);
-    }
-
-    private void createShardBuckets(LongArrayList jobSearchContextDocIds) {
-        for (LongCursor jobSearchContextDocIdCursor : jobSearchContextDocIds) {
-            // unpack jobSearchContextId and docId integers from jobSearchContextDocId long
-            long jobSearchContextDocId = jobSearchContextDocIdCursor.value;
-            int jobSearchContextId = (int)(jobSearchContextDocId >> 32);
-            int docId = (int)jobSearchContextDocId;
-
-            ShardDocIdsBucket shardDocIdsBucket = shardBuckets.get(jobSearchContextId);
-            if (shardDocIdsBucket == null) {
-                shardDocIdsBucket = new ShardDocIdsBucket();
-                shardBuckets.put(jobSearchContextId, shardDocIdsBucket);
+        FetchCollector createCollector(int readerId) {
+            IndexService indexService = fetchContext.indexService(readerId);
+            LuceneReferenceResolver resolver = new LuceneReferenceResolver(
+                indexService.mapperService()::fullName, indexService.getIndexSettings());
+            ArrayList<LuceneCollectorExpression<?>> exprs = new ArrayList<>(refs.size());
+            for (Reference reference : refs) {
+                exprs.add(resolver.getImplementation(reference));
             }
-            shardDocIdsBucket.add(inputCursor++, docId);
+            return new FetchCollector(
+                exprs,
+                streamers,
+                fetchContext.searcher(readerId),
+                indexService.fieldData(),
+                readerId
+            );
         }
     }
 
-    public ListenableFuture<Bucket> fetch() throws Exception {
-        int numShards = shardBuckets.size();
-        ShardProjectorChain projectorChain = new ShardProjectorChain(numShards,
-                ImmutableList.<Projection>of(), null, ramAccountingContext);
+    public NodeFetchOperation(ThreadPool threadPool, JobsLogs jobsLogs, JobContextService jobContextService) {
+        executor = threadPool.executor(ThreadPool.Names.SEARCH);
+        this.jobsLogs = jobsLogs;
+        this.jobContextService = jobContextService;
+    }
 
-        final ShardCollectFuture result = new MapSideDataCollectOperation.SimpleShardCollectFuture(
-                numShards, projectorChain.resultProvider().result(), collectContextService, jobId);
+    public CompletableFuture<IntObjectMap<StreamBucket>> fetch(UUID jobId,
+                                                               int phaseId,
+                                                               @Nullable IntObjectMap<? extends IntContainer> docIdsToFetch,
+                                                               boolean closeContextOnFinish) {
+        CompletableFuture<IntObjectMap<StreamBucket>> resultFuture = new CompletableFuture<>();
+        logStartAndSetupLogFinished(jobId, phaseId, resultFuture);
 
-        JobCollectContext jobCollectContext = collectContextService.acquireContext(jobId, false);
-        if (jobCollectContext == null) {
-            String errorMsg = String.format(Locale.ENGLISH, "No jobCollectContext found for job '%s'", jobId);
-            LOGGER.error(errorMsg);
-            throw new IllegalArgumentException(errorMsg);
-        }
-
-        Projector downstream = projectorChain.newShardDownstreamProjector(null);
-        RowDownstream upstreamsRowMerger = new PositionalRowMerger(downstream, toFetchReferences.size());
-
-        List<LuceneDocFetcher> shardFetchers = new ArrayList<>(numShards);
-        for (IntObjectCursor<ShardDocIdsBucket> entry : shardBuckets) {
-            LuceneDocCollector docCollector = jobCollectContext.findCollector(entry.key);
-            if (docCollector == null) {
-                String errorMsg = String.format(Locale.ENGLISH, "No lucene collector found for job search context id '%s'", entry.key);
-                LOGGER.error(errorMsg);
-                throw new IllegalArgumentException(errorMsg);
+        if (docIdsToFetch == null) {
+            if (closeContextOnFinish) {
+                tryCloseContext(jobId, phaseId);
             }
-            // create new collect expression for every shard (collect expressions are not thread-safe)
-            CollectInputSymbolVisitor.Context docCtx = docInputSymbolVisitor.process(toFetchReferences);
-            shardFetchers.add(
-                    new LuceneDocFetcher(
-                            docCtx.topLevelInputs(),
-                            docCtx.docLevelExpressions(),
-                            upstreamsRowMerger,
-                            entry.value,
-                            jobCollectContext,
-                            docCollector.searchContext(),
-                            entry.key,
-                            closeContext));
+            return CompletableFuture.completedFuture(new IntObjectHashMap<>(0));
         }
 
-
-        // start the projection
-        projectorChain.startProjections();
+        JobExecutionContext context = jobContextService.getContext(jobId);
+        FetchContext fetchContext = context.getSubContext(phaseId);
         try {
-            runFetchThreaded(result, shardFetchers, ramAccountingContext);
-        } catch (RejectedExecutionException e) {
-            result.shardFailure(e);
+            doFetch(fetchContext, resultFuture, docIdsToFetch);
+        } catch (Throwable t) {
+            resultFuture.completeExceptionally(t);
         }
-
-        if (LOGGER.isTraceEnabled()) {
-            LOGGER.trace("started {} shardFetchers", numShards);
+        if (closeContextOnFinish) {
+            return resultFuture.whenComplete(new CloseContextCallback(fetchContext));
         }
+        return resultFuture;
+    }
 
+    private void logStartAndSetupLogFinished(final UUID jobId, final int phaseId, CompletableFuture<?> resultFuture) {
+        jobsLogs.operationStarted(phaseId, jobId, "fetch");
+        resultFuture.whenComplete((r, t) -> {
+            if (t == null) {
+                jobsLogs.operationFinished(phaseId, jobId, null, 0);
+            } else {
+                jobsLogs.operationFinished(phaseId, jobId, SQLExceptions.messageOf(t), 0);
+            }
+        });
+    }
+
+    private void tryCloseContext(UUID jobId, int phaseId) {
+        JobExecutionContext ctx = jobContextService.getContextOrNull(jobId);
+        if (ctx != null) {
+            FetchContext fetchContext = ctx.getSubContextOrNull(phaseId);
+            if (fetchContext != null) {
+                fetchContext.close();
+            }
+        }
+    }
+
+    private HashMap<TableIdent, TableFetchInfo> getTableFetchInfos(FetchContext fetchContext) {
+        HashMap<TableIdent, TableFetchInfo> result = new HashMap<>(fetchContext.toFetch().size());
+        for (Map.Entry<TableIdent, Collection<Reference>> entry : fetchContext.toFetch().entrySet()) {
+            TableFetchInfo tableFetchInfo = new TableFetchInfo(entry.getValue(), fetchContext);
+            result.put(entry.getKey(), tableFetchInfo);
+        }
         return result;
     }
 
-    private void runFetchThreaded(final ShardCollectFuture result,
-                                  final List<LuceneDocFetcher> shardFetchers,
-                                  final RamAccountingContext ramAccountingContext) throws RejectedExecutionException {
+    private void doFetch(FetchContext fetchContext,
+                         CompletableFuture<IntObjectMap<StreamBucket>> resultFuture,
+                         IntObjectMap<? extends IntContainer> toFetch) throws Exception {
 
-        ThreadPools.runWithAvailableThreads(
-                executor,
-                poolSize,
-                Lists.transform(shardFetchers, new Function<LuceneDocFetcher, Runnable>() {
+        final IntObjectHashMap<StreamBucket> fetched = new IntObjectHashMap<>(toFetch.size());
+        HashMap<TableIdent, TableFetchInfo> tableFetchInfos = getTableFetchInfos(fetchContext);
+        final AtomicReference<Throwable> lastThrowable = new AtomicReference<>(null);
+        final AtomicInteger threadLatch = new AtomicInteger(toFetch.size());
 
-                    @Nullable
-                    @Override
-                    public Runnable apply(final LuceneDocFetcher input) {
-                        return new Runnable() {
-                            @Override
-                            public void run() {
-                                doFetch(result, input, ramAccountingContext);
-                            }
-                        };
+        for (IntObjectCursor<? extends IntContainer> toFetchCursor : toFetch) {
+            final int readerId = toFetchCursor.key;
+            final IntContainer docIds = toFetchCursor.value;
+
+            TableIdent ident = fetchContext.tableIdent(readerId);
+            final TableFetchInfo tfi = tableFetchInfos.get(ident);
+            assert tfi != null : "tfi must not be null";
+
+            CollectRunnable runnable = new CollectRunnable(
+                tfi.createCollector(readerId),
+                docIds,
+                fetched,
+                readerId,
+                lastThrowable,
+                threadLatch,
+                resultFuture,
+                fetchContext.isKilled()
+            );
+            try {
+                executor.execute(runnable);
+            } catch (EsRejectedExecutionException | RejectedExecutionException e) {
+                runnable.run();
+            }
+        }
+    }
+
+    private static class CollectRunnable implements Runnable {
+        private final FetchCollector collector;
+        private final IntContainer docIds;
+        private final IntObjectHashMap<StreamBucket> fetched;
+        private final int readerId;
+        private final AtomicReference<Throwable> lastThrowable;
+        private final AtomicInteger threadLatch;
+        private final CompletableFuture<IntObjectMap<StreamBucket>> resultFuture;
+        private final AtomicBoolean contextKilledRef;
+
+        CollectRunnable(FetchCollector collector,
+                        IntContainer docIds,
+                        IntObjectHashMap<StreamBucket> fetched,
+                        int readerId,
+                        AtomicReference<Throwable> lastThrowable,
+                        AtomicInteger threadLatch,
+                        CompletableFuture<IntObjectMap<StreamBucket>> resultFuture,
+                        AtomicBoolean contextKilledRef) {
+            this.collector = collector;
+            this.docIds = docIds;
+            this.fetched = fetched;
+            this.readerId = readerId;
+            this.lastThrowable = lastThrowable;
+            this.threadLatch = threadLatch;
+            this.resultFuture = resultFuture;
+            this.contextKilledRef = contextKilledRef;
+        }
+
+        @Override
+        public void run() {
+            try {
+                StreamBucket bucket = collector.collect(docIds);
+                synchronized (fetched) {
+                    fetched.put(readerId, bucket);
+                }
+            } catch (Exception e) {
+                lastThrowable.set(e);
+            } finally {
+                if (threadLatch.decrementAndGet() == 0) {
+                    Throwable throwable = lastThrowable.get();
+                    if (throwable == null) {
+                        resultFuture.complete(fetched);
+                    } else {
+                        /* If the context gets killed the operation might fail due to the release of the underlying searchers.
+                         * Only a InterruptedException is sent to the fetch-client.
+                         * Otherwise the original exception which caused the kill could be overwritten by some
+                         * side-effect-exception that happened because of the kill.
+                         */
+                        if (contextKilledRef.get()) {
+                            resultFuture.completeExceptionally(new InterruptedException());
+                        } else {
+                            resultFuture.completeExceptionally(throwable);
+                        }
                     }
-                })
-        );
-    }
-
-
-    private void doFetch(ShardCollectFuture result, LuceneDocFetcher fetcher,
-                         RamAccountingContext ramAccountingContext) {
-        try {
-            fetcher.doFetch(ramAccountingContext);
-            result.shardFinished();
-        } catch (FetchAbortedException ex) {
-            // ignore
-        } catch (Exception ex) {
-            result.shardFailure(ex);
-        }
-        if (LOGGER.isTraceEnabled()) {
-            LOGGER.trace("shard finished fetch, {} to go", result.numShards());
-        }
-    }
-
-
-    static class ShardDocIdsBucket {
-
-        private final IntArrayList positions = new IntArrayList();
-        private final IntArrayList docIds = new IntArrayList();
-
-        public void add(int position, int docId) {
-            positions.add(position);
-            docIds.add(docId);
-        }
-
-        public int docId(int index) {
-            return docIds.get(index);
-        }
-
-        public int size() {
-            return docIds.size();
-        }
-
-        public int position(int idx) {
-            return positions.get(idx);
+                }
+            }
         }
     }
 

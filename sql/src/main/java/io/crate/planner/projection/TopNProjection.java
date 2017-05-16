@@ -21,65 +21,43 @@
 
 package io.crate.planner.projection;
 
-import com.google.common.base.MoreObjects;
-import com.google.common.collect.ImmutableList;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolVisitors;
+import io.crate.analyze.symbol.Symbols;
+import io.crate.collections.Lists2;
+import io.crate.operation.projectors.TopN;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
-import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
+import java.util.function.Function;
 
 public class TopNProjection extends Projection {
 
-    public static final ProjectionFactory<TopNProjection> FACTORY = new ProjectionFactory<TopNProjection>() {
-        @Override
-        public TopNProjection newInstance() {
-            return new TopNProjection();
-        }
-    };
+    private final int limit;
+    private final int offset;
+    private final List<Symbol> outputs;
 
+    public TopNProjection(int limit, int offset, List<Symbol> outputs) {
+        assert outputs.stream().noneMatch(s -> SymbolVisitors.any(Symbols.IS_COLUMN, s))
+            : "TopNProjection doesn't support Field or Reference symbols";
+        assert limit > TopN.NO_LIMIT : "limit of TopNProjection must not be negative/unlimited";
 
-    private int limit;
-    private int offset;
-
-    List<Symbol> outputs = ImmutableList.of();
-
-    @Nullable
-    List<Symbol> orderBy;
-    @Nullable
-    boolean[] reverseFlags;
-    @Nullable
-    private Boolean[] nullsFirst;
-
-    public TopNProjection() {
-        super();
-    }
-
-    public TopNProjection(int limit, int offset) {
         this.limit = limit;
         this.offset = offset;
+        this.outputs = outputs;
     }
 
-    public TopNProjection(int limit, int offset, @Nullable List<Symbol> orderBy, @Nullable boolean[] reverseFlags, @Nullable Boolean[] nullsFirst) {
-        this(limit, offset);
-        this.orderBy = MoreObjects.firstNonNull(orderBy, ImmutableList.<Symbol>of());
-        this.reverseFlags = MoreObjects.firstNonNull(reverseFlags, new boolean[0]);
-        this.nullsFirst = MoreObjects.firstNonNull(nullsFirst, new Boolean[0]);
-        assert this.orderBy.size() == this.reverseFlags.length : "reverse flags length does not match orderBy items count";
-        assert this.nullsFirst.length == this.reverseFlags.length;
+    public TopNProjection(StreamInput in) throws IOException {
+        offset = in.readVInt();
+        limit = in.readVInt();
+        outputs = Symbols.listFromStream(in);
     }
 
     @Override
     public List<Symbol> outputs() {
         return outputs;
-    }
-
-    public void outputs(List<Symbol> outputs) {
-        this.outputs = outputs;
     }
 
     public int limit() {
@@ -90,25 +68,10 @@ public class TopNProjection extends Projection {
         return offset;
     }
 
-    @Nullable
-    public List<Symbol> orderBy() {
-        return orderBy;
+    @Override
+    public void replaceSymbols(Function<Symbol, Symbol> replaceFunction) {
+        Lists2.replaceItems(outputs, replaceFunction);
     }
-
-    @Nullable
-    public boolean[] reverseFlags() {
-        return reverseFlags;
-    }
-
-    @Nullable
-    public Boolean[] nullsFirst() {
-        return nullsFirst;
-    }
-
-    public boolean isOrdered() {
-        return reverseFlags != null && reverseFlags.length > 0;
-    }
-
 
     @Override
     public ProjectionType projectionType() {
@@ -121,59 +84,10 @@ public class TopNProjection extends Projection {
     }
 
     @Override
-    public void readFrom(StreamInput in) throws IOException {
-        offset = in.readVInt();
-        limit = in.readVInt();
-
-        int numOutputs = in.readVInt();
-        outputs = new ArrayList<>(numOutputs);
-        for (int i = 0; i < numOutputs; i++) {
-            outputs.add(Symbol.fromStream(in));
-        }
-
-        int numOrderBy = in.readVInt();
-
-        if (numOrderBy > 0) {
-            reverseFlags = new boolean[numOrderBy];
-
-            for (int i = 0; i < reverseFlags.length; i++) {
-                reverseFlags[i] = in.readBoolean();
-            }
-
-            orderBy = new ArrayList<>(numOrderBy);
-            for (int i = 0; i < reverseFlags.length; i++) {
-                orderBy.add(Symbol.fromStream(in));
-            }
-
-            nullsFirst = new Boolean[numOrderBy];
-            for (int i = 0; i < numOrderBy; i++) {
-                nullsFirst[i] = in.readOptionalBoolean();
-            }
-        }
-    }
-
-    @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeVInt(offset);
         out.writeVInt(limit);
-        out.writeVInt(outputs.size());
-        for (Symbol symbol : outputs) {
-            Symbol.toStream(symbol, out);
-        }
-        if (isOrdered()) {
-            out.writeVInt(reverseFlags.length);
-            for (boolean reverseFlag : reverseFlags) {
-                out.writeBoolean(reverseFlag);
-            }
-            for (Symbol symbol : orderBy) {
-                Symbol.toStream(symbol, out);
-            }
-            for (Boolean nullFirst : nullsFirst) {
-                out.writeOptionalBoolean(nullFirst);
-            }
-        } else {
-            out.writeVInt(0);
-        }
+        Symbols.toStream(outputs, out);
     }
 
     @Override
@@ -185,11 +99,7 @@ public class TopNProjection extends Projection {
 
         if (limit != that.limit) return false;
         if (offset != that.offset) return false;
-        if (!orderBy.equals(that.orderBy)) return false;
         if (!outputs.equals(that.outputs)) return false;
-        if (!Arrays.equals(reverseFlags, that.reverseFlags)) return false;
-        if (!Arrays.equals(nullsFirst, that.nullsFirst)) return false;
-
         return true;
     }
 
@@ -198,21 +108,16 @@ public class TopNProjection extends Projection {
         int result = limit;
         result = 31 * result + offset;
         result = 31 * result + outputs.hashCode();
-        result = 31 * result + orderBy.hashCode();
-        result = 31 * result + Arrays.hashCode(reverseFlags);
-        result = 31 * result + Arrays.hashCode(nullsFirst);
         return result;
     }
 
     @Override
     public String toString() {
         return "TopNProjection{" +
-                "outputs=" + outputs +
-                ", limit=" + limit +
-                ", offset=" + offset +
-                ", orderBy=" + orderBy +
-                ", reverseFlags=" + Arrays.toString(reverseFlags) +
-                ", nullsFirst=" + Arrays.toString(nullsFirst) +
-                '}';
+               "outputs=" + outputs +
+               ", limit=" + limit +
+               ", offset=" + offset +
+               '}';
     }
+
 }

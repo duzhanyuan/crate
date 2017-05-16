@@ -21,24 +21,28 @@
 
 package io.crate.operation.reference.sys.shard;
 
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.index.shard.service.IndexShard;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
+import io.crate.metadata.ReferenceImplementation;
+import org.elasticsearch.index.shard.IndexShard;
 
-public class ShardSizeExpression extends SysShardExpression<Long> {
+import java.util.concurrent.TimeUnit;
 
-    public static final String NAME = "size";
+public class ShardSizeExpression implements ReferenceImplementation<Long> {
 
-    private final IndexShard indexShard;
+    private final Supplier<Long> sizeSupplier;
 
-    @Inject
-    public ShardSizeExpression(IndexShard indexShard) {
-        super(NAME);
-        this.indexShard = indexShard;
+    public ShardSizeExpression(final IndexShard indexShard) {
+        sizeSupplier = Suppliers.memoizeWithExpiration(new Supplier<Long>() {
+            @Override
+            public Long get() {
+                return indexShard.storeStats().getSizeInBytes();
+            }
+        }, 10, TimeUnit.SECONDS);
     }
 
     @Override
     public Long value() {
-        return indexShard.storeStats().getSizeInBytes();
+        return sizeSupplier.get();
     }
-
 }

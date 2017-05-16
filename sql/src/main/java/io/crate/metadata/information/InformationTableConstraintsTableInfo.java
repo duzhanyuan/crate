@@ -22,15 +22,12 @@
 package io.crate.metadata.information;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.ReferenceIdent;
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.TableIdent;
-import io.crate.planner.RowGranularity;
+import com.google.common.collect.ImmutableSortedMap;
+import io.crate.metadata.*;
 import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
+import org.elasticsearch.cluster.service.ClusterService;
 
 public class InformationTableConstraintsTableInfo extends InformationTableInfo {
 
@@ -38,39 +35,33 @@ public class InformationTableConstraintsTableInfo extends InformationTableInfo {
     public static final TableIdent IDENT = new TableIdent(InformationSchemaInfo.NAME, NAME);
 
     public static class Columns {
-        public static final ColumnIdent SCHEMA_NAME = new ColumnIdent("schema_name");
+        public static final ColumnIdent TABLE_SCHEMA = new ColumnIdent("table_schema");
         public static final ColumnIdent TABLE_NAME = new ColumnIdent("table_name");
         public static final ColumnIdent CONSTRAINT_NAME = new ColumnIdent("constraint_name");
         public static final ColumnIdent CONSTRAINT_TYPE = new ColumnIdent("constraint_type");
     }
 
-    public static class ReferenceInfos {
-        public static final ReferenceInfo SCHEMA_NAME = info(Columns.SCHEMA_NAME, DataTypes.STRING);
-        public static final ReferenceInfo TABLE_NAME = info(Columns.TABLE_NAME, DataTypes.STRING);
-        public static final ReferenceInfo CONSTRAINT_NAME = info(Columns.CONSTRAINT_NAME, new ArrayType(DataTypes.STRING));
-        public static final ReferenceInfo CONSTRAINT_TYPE = info(Columns.CONSTRAINT_TYPE, DataTypes.STRING);
+    public static class References {
+        public static final Reference TABLE_SCHEMA = createRef(Columns.TABLE_SCHEMA, DataTypes.STRING);
+        public static final Reference TABLE_NAME = createRef(Columns.TABLE_NAME, DataTypes.STRING);
+        public static final Reference CONSTRAINT_NAME = createRef(Columns.CONSTRAINT_NAME, new ArrayType(DataTypes.STRING));
+        public static final Reference CONSTRAINT_TYPE = createRef(Columns.CONSTRAINT_TYPE, DataTypes.STRING);
     }
 
-    private static ReferenceInfo info(ColumnIdent columnIdent, DataType dataType) {
-        return new ReferenceInfo(new ReferenceIdent(IDENT, columnIdent), RowGranularity.DOC, dataType);
+    private static Reference createRef(ColumnIdent columnIdent, DataType dataType) {
+        return new Reference(new ReferenceIdent(IDENT, columnIdent), RowGranularity.DOC, dataType);
     }
 
-    protected InformationTableConstraintsTableInfo(InformationSchemaInfo schemaInfo) {
-        super(schemaInfo,
-                IDENT,
-                ImmutableList.<ColumnIdent>of(),
-                ImmutableMap.<ColumnIdent, ReferenceInfo>builder()
-                        .put(Columns.SCHEMA_NAME, ReferenceInfos.SCHEMA_NAME)
-                        .put(Columns.TABLE_NAME, ReferenceInfos.TABLE_NAME)
-                        .put(Columns.CONSTRAINT_NAME, ReferenceInfos.CONSTRAINT_NAME)
-                        .put(Columns.CONSTRAINT_TYPE, ReferenceInfos.CONSTRAINT_TYPE)
-                        .build(),
-                ImmutableList.<ReferenceInfo>builder()
-                        .add(ReferenceInfos.SCHEMA_NAME)
-                        .add(ReferenceInfos.TABLE_NAME)
-                        .add(ReferenceInfos.CONSTRAINT_NAME)
-                        .add(ReferenceInfos.CONSTRAINT_TYPE)
-                        .build()
+    protected InformationTableConstraintsTableInfo(ClusterService clusterService) {
+        super(clusterService,
+            IDENT,
+            ImmutableList.<ColumnIdent>of(),
+            ImmutableSortedMap.<ColumnIdent, Reference>naturalOrder()
+                .put(Columns.TABLE_SCHEMA, References.TABLE_SCHEMA)
+                .put(Columns.TABLE_NAME, References.TABLE_NAME)
+                .put(Columns.CONSTRAINT_NAME, References.CONSTRAINT_NAME)
+                .put(Columns.CONSTRAINT_TYPE, References.CONSTRAINT_TYPE)
+                .build()
         );
     }
 }

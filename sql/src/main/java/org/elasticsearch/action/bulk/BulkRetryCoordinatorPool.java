@@ -21,60 +21,60 @@
 
 package org.elasticsearch.action.bulk;
 
-import io.crate.executor.transport.TransportActionProvider;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.cluster.ClusterChangedEvent;
-import org.elasticsearch.cluster.ClusterService;
 import org.elasticsearch.cluster.ClusterStateListener;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.routing.IndexRoutingTable;
 import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.inject.Singleton;
-import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.index.IndexShardMissingException;
+import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.shard.ShardId;
-import org.elasticsearch.indices.IndexMissingException;
+import org.elasticsearch.index.shard.ShardNotFoundException;
+import org.elasticsearch.threadpool.ThreadPool;
 
 import java.util.HashMap;
 import java.util.Map;
 
 @Singleton
-public class BulkRetryCoordinatorPool extends AbstractLifecycleComponent<BulkRetryCoordinatorPool> implements ClusterStateListener {
+public class BulkRetryCoordinatorPool extends AbstractLifecycleComponent implements ClusterStateListener {
 
-    private static final ESLogger LOGGER = Loggers.getLogger(BulkRetryCoordinatorPool.class);
+    private static final Logger LOGGER = Loggers.getLogger(BulkRetryCoordinatorPool.class);
 
     private final Map<String, BulkRetryCoordinator> coordinatorsByNodeId;
     private final Map<ShardId, BulkRetryCoordinator> coordinatorsByShardId;
     private final ClusterService clusterService;
-    private final TransportActionProvider transportActionProvider;
+    private final ThreadPool threadPool;
 
     @Inject
     public BulkRetryCoordinatorPool(Settings settings,
                                     ClusterService clusterService,
-                                    TransportActionProvider transportActionProvider) {
+                                    ThreadPool threadPool) {
         super(settings);
-        this.transportActionProvider = transportActionProvider;
+        this.threadPool = threadPool;
         this.coordinatorsByShardId = new HashMap<>();
         this.coordinatorsByNodeId = new HashMap<>();
         this.clusterService = clusterService;
     }
 
-    public BulkRetryCoordinator coordinator(ShardId shardId) throws IndexMissingException, IndexShardMissingException {
+    public BulkRetryCoordinator coordinator(ShardId shardId) throws IndexNotFoundException, ShardNotFoundException {
         synchronized (coordinatorsByShardId) {
             BulkRetryCoordinator coordinator = coordinatorsByShardId.get(shardId);
             if (coordinator == null) {
                 IndexRoutingTable indexRoutingTable = clusterService.state().routingTable()
-                        .index(shardId.getIndex());
+                    .index(shardId.getIndex());
                 if (indexRoutingTable == null) {
-                    throw new IndexMissingException(shardId.index());
+                    throw new IndexNotFoundException(shardId.getIndex());
                 }
                 IndexShardRoutingTable shardRoutingTable = indexRoutingTable.shard(shardId.id());
                 if (shardRoutingTable == null) {
-                    throw new IndexShardMissingException(shardId);
+                    throw new ShardNotFoundException(shardId);
                 }
                 String nodeId = shardRoutingTable.primaryShard().currentNodeId();
                 // for currently unassigned shards the nodeId will be null
@@ -86,8 +86,8 @@ public class BulkRetryCoordinatorPool extends AbstractLifecycleComponent<BulkRet
                 synchronized (coordinatorsByNodeId) {
                     coordinator = coordinatorsByNodeId.get(nodeId);
                     if (coordinator == null) {
-                        LOGGER.trace("create new coordinator for node {} and shard {}", nodeId, shardId);
-                        coordinator = new BulkRetryCoordinator(settings, transportActionProvider);
+                        LOGGER.debug("create new coordinator for node {} and shard {}", nodeId, shardId);
+                        coordinator = new BulkRetryCoordinator(threadPool);
                         coordinatorsByNodeId.put(nodeId, coordinator);
                     }
                 }
@@ -105,22 +105,12 @@ public class BulkRetryCoordinatorPool extends AbstractLifecycleComponent<BulkRet
     @Override
     protected void doStop() throws ElasticsearchException {
         clusterService.remove(this);
-        synchronized (coordinatorsByNodeId) {
-            for (BulkRetryCoordinator bulkRetryCoordinator : coordinatorsByNodeId.values()) {
-                bulkRetryCoordinator.close();
-            }
-        }
         coordinatorsByShardId.clear();
     }
 
     @Override
     protected void doClose() throws ElasticsearchException {
         doStop();
-        synchronized (coordinatorsByNodeId) {
-            for (BulkRetryCoordinator bulkRetryCoordinator : coordinatorsByNodeId.values()) {
-                bulkRetryCoordinator.shutdown();
-            }
-        }
         coordinatorsByNodeId.clear();
     }
 
@@ -130,13 +120,10 @@ public class BulkRetryCoordinatorPool extends AbstractLifecycleComponent<BulkRet
             coordinatorsByShardId.clear();
         }
         if (event.nodesRemoved()) {
-            // stop retrycoordinators of removed nodes
+            // remove retrycoordinators of removed nodes
             synchronized (coordinatorsByNodeId) {
                 for (DiscoveryNode node : event.nodesDelta().removedNodes()) {
-                    BulkRetryCoordinator oldCoordinator = coordinatorsByNodeId.remove(node.id());
-                    if (oldCoordinator != null) {
-                        oldCoordinator.close();
-                    }
+                    coordinatorsByNodeId.remove(node.getId());
                 }
             }
         }

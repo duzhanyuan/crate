@@ -21,6 +21,7 @@
 
 package io.crate.sql.tree;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.collect.ImmutableList;
 
@@ -30,13 +31,11 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 public class With
-        extends Node
-{
+    extends Node {
     private final boolean recursive;
     private final List<WithQuery> queries;
 
-    public With(boolean recursive, List<WithQuery> queries)
-    {
+    public With(boolean recursive, List<WithQuery> queries) {
         checkNotNull(queries, "queries is null");
         checkArgument(!queries.isEmpty(), "queries is empty");
 
@@ -44,25 +43,21 @@ public class With
         this.queries = ImmutableList.copyOf(queries);
     }
 
-    public boolean isRecursive()
-    {
+    public boolean isRecursive() {
         return recursive;
     }
 
-    public List<WithQuery> getQueries()
-    {
+    public List<WithQuery> getQueries() {
         return queries;
     }
 
     @Override
-    public <R, C> R accept(AstVisitor<R, C> visitor, C context)
-    {
+    public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitWith(this, context);
     }
 
     @Override
-    public boolean equals(Object obj)
-    {
+    public boolean equals(Object obj) {
         if (this == obj) {
             return true;
         }
@@ -71,21 +66,19 @@ public class With
         }
         With o = (With) obj;
         return Objects.equal(recursive, o.recursive) &&
-                Objects.equal(queries, o.queries);
+               Objects.equal(queries, o.queries);
     }
 
     @Override
-    public int hashCode()
-    {
+    public int hashCode() {
         return Objects.hashCode(recursive, queries);
     }
 
     @Override
-    public String toString()
-    {
-        return Objects.toStringHelper(this)
-                .add("recursive", recursive)
-                .add("queries", queries)
-                .toString();
+    public String toString() {
+        return MoreObjects.toStringHelper(this)
+            .add("recursive", recursive)
+            .add("queries", queries)
+            .toString();
     }
 }

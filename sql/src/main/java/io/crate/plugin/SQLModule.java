@@ -22,8 +22,17 @@
 package io.crate.plugin;
 
 import io.crate.action.sql.DDLStatementDispatcher;
+import io.crate.action.sql.SQLOperations;
 import io.crate.metadata.FulltextAnalyzerResolver;
-import io.crate.service.SQLService;
+import io.crate.operation.auth.AuthenticationProvider;
+import io.crate.operation.udf.TransportCreateUserDefinedFunctionAction;
+import io.crate.operation.udf.TransportDropUserDefinedFunctionAction;
+import io.crate.operation.udf.UserDefinedFunctionService;
+import io.crate.operation.user.UserManagerProvider;
+import io.crate.planner.Planner;
+import io.crate.planner.TableStats;
+import io.crate.planner.TableStatsService;
+import io.crate.protocols.postgres.PostgresNetty;
 import org.elasticsearch.common.inject.AbstractModule;
 
 
@@ -31,8 +40,17 @@ public class SQLModule extends AbstractModule {
 
     @Override
     protected void configure() {
-        bind(SQLService.class).asEagerSingleton();
         bind(DDLStatementDispatcher.class).asEagerSingleton();
         bind(FulltextAnalyzerResolver.class).asEagerSingleton();
+        bind(PostgresNetty.class).asEagerSingleton();
+        bind(SQLOperations.class).asEagerSingleton();
+        bind(Planner.class).asEagerSingleton();
+        bind(TableStats.class).asEagerSingleton();
+        bind(TableStatsService.class).asEagerSingleton();
+        bind(UserDefinedFunctionService.class).asEagerSingleton();
+        bind(TransportCreateUserDefinedFunctionAction.class).asEagerSingleton();
+        bind(TransportDropUserDefinedFunctionAction.class).asEagerSingleton();
+        bind(AuthenticationProvider.class).asEagerSingleton();
+        bind(UserManagerProvider.class).asEagerSingleton();
     }
 }

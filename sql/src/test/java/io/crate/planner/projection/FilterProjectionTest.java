@@ -21,32 +21,31 @@
 
 package io.crate.planner.projection;
 
-import com.google.common.collect.ImmutableList;
-import io.crate.operation.operator.AndOperator;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.symbol.InputColumn;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.analyze.symbol.InputColumn;
+import io.crate.metadata.RowGranularity;
+import io.crate.operation.operator.EqOperator;
 import io.crate.test.integration.CrateUnitTest;
-import io.crate.testing.TestingHelpers;
 import io.crate.types.DataTypes;
-import org.elasticsearch.common.io.stream.BytesStreamInput;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.junit.Test;
+
+import java.util.Collections;
 
 public class FilterProjectionTest extends CrateUnitTest {
 
     @Test
     public void testStreaming() throws Exception {
-        FilterProjection p = new FilterProjection();
-        p.outputs(ImmutableList.<Symbol>of(new InputColumn(1)));
+        FilterProjection p = new FilterProjection(
+            EqOperator.createFunction(new InputColumn(0, DataTypes.INTEGER), new InputColumn(1, DataTypes.INTEGER)),
+            Collections.singletonList(new InputColumn(0))
+        );
         p.requiredGranularity(RowGranularity.SHARD);
-        p.query(TestingHelpers.createFunction(AndOperator.NAME, DataTypes.BOOLEAN, Literal.newLiteral(true), Literal.newLiteral(false)));
 
         BytesStreamOutput out = new BytesStreamOutput();
         Projection.toStream(p, out);
 
-        BytesStreamInput in = new BytesStreamInput(out.bytes());
+        StreamInput in = out.bytes().streamInput();
         FilterProjection p2 = (FilterProjection) Projection.fromStream(in);
 
         assertEquals(p, p2);

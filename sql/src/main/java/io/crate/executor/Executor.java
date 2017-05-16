@@ -21,15 +21,19 @@
 
 package io.crate.executor;
 
-import com.google.common.util.concurrent.ListenableFuture;
+import io.crate.data.BatchConsumer;
+import io.crate.data.Row;
 import io.crate.planner.Plan;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 public interface Executor {
 
-    public Job newJob(Plan plan);
+    long ROWCOUNT_ERROR = -2L;
+    long ROWCOUNT_UNKNOWN = -1L;
 
-    public List<ListenableFuture<TaskResult>> execute(Job job);
+    void execute(Plan plan, BatchConsumer consumer, Row parameters);
 
+    List<CompletableFuture<Long>> executeBulk(Plan plan);
 }

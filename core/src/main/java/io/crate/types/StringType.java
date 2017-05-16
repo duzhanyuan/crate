@@ -26,6 +26,7 @@ import io.crate.Streamer;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.unit.TimeValue;
 
 import java.io.IOException;
 import java.util.Locale;
@@ -35,7 +36,11 @@ public class StringType extends DataType<BytesRef> implements DataTypeFactory, S
 
     public static final int ID = 4;
     public static final StringType INSTANCE = new StringType();
-    protected StringType() {}
+    public static final BytesRef T = new BytesRef("t");
+    public static final BytesRef F = new BytesRef("f");
+
+    protected StringType() {
+    }
 
     @Override
     public int id() {
@@ -58,21 +63,24 @@ public class StringType extends DataType<BytesRef> implements DataTypeFactory, S
             return null;
         }
         if (value instanceof BytesRef) {
-            return (BytesRef)value;
+            return (BytesRef) value;
         }
         if (value instanceof String) {
-            return new BytesRef((String)value);
+            return new BytesRef((String) value);
         }
         if (value instanceof Boolean) {
-            if ((boolean)value) {
-                return new BytesRef("t");
+            if ((boolean) value) {
+                return T;
             } else {
-                return new BytesRef("f");
+                return F;
             }
         }
         if (value instanceof Map || value.getClass().isArray()) {
             throw new IllegalArgumentException(
-                    String.format(Locale.ENGLISH, "cannot cast %s to string", value));
+                String.format(Locale.ENGLISH, "Cannot cast %s to type string", value));
+        }
+        if (value instanceof TimeValue) {
+            return new BytesRef(((TimeValue) value).getStringRep());
         }
         return new BytesRef(value.toString());
     }
@@ -89,7 +97,7 @@ public class StringType extends DataType<BytesRef> implements DataTypeFactory, S
 
     @Override
     public BytesRef readValueFrom(StreamInput in) throws IOException {
-        int length = in.readVInt() -1 ;
+        int length = in.readVInt() - 1;
         if (length == -1) {
             return null;
         }

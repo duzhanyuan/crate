@@ -3,11 +3,15 @@ package io.crate.analyze.where;
 
 import com.google.common.collect.ImmutableSet;
 import io.crate.analyze.WhereClause;
+import io.crate.analyze.symbol.Field;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolVisitor;
+import io.crate.metadata.Reference;
 import io.crate.operation.operator.EqOperator;
 import io.crate.operation.operator.GteOperator;
 import io.crate.operation.operator.any.AnyEqOperator;
 import io.crate.operation.predicate.NotPredicate;
-import io.crate.planner.symbol.*;
 import io.crate.sql.tree.ComparisonExpression;
 
 import java.util.Locale;
@@ -19,20 +23,18 @@ public abstract class WhereClauseValidator {
     private static final Visitor visitor = new Visitor();
 
     public static void validate(WhereClause whereClause) {
-        if (whereClause.hasQuery()){
-            visitor.process(whereClause.query(), new Visitor.Context(whereClause));
+        if (whereClause.hasQuery()) {
+            visitor.process(whereClause.query(), new Visitor.Context());
         }
     }
 
     private static class Visitor extends SymbolVisitor<Visitor.Context, Symbol> {
 
-        public static class Context {
+        static class Context {
 
-            public final Stack<Function> functions = new Stack<>();
-            private final WhereClause whereClause;
+            private final Stack<Function> functions = new Stack<>();
 
-            public Context(WhereClause whereClause) {
-                this.whereClause = whereClause;
+            private Context() {
             }
         }
 
@@ -45,8 +47,8 @@ public abstract class WhereClauseValidator {
         private static final String VERSION_ERROR = "Filtering \"_version\" in WHERE clause only works using the \"=\" operator, checking for a numeric value";
 
         private static final String SCORE_ERROR = String.format(Locale.ENGLISH,
-                "System column '%s' can only be used within a '%s' comparison without any surrounded predicate",
-                _SCORE, ComparisonExpression.Type.GREATER_THAN_OR_EQUAL.getValue());
+            "System column '%s' can only be used within a '%s' comparison without any surrounded predicate",
+            _SCORE, ComparisonExpression.Type.GREATER_THAN_OR_EQUAL.getValue());
 
         @Override
         public Symbol visitField(Field field, Context context) {
@@ -61,7 +63,7 @@ public abstract class WhereClauseValidator {
         }
 
         @Override
-        public Symbol visitFunction(Function function, Context context){
+        public Symbol visitFunction(Function function, Context context) {
             context.functions.push(function);
             continueTraversal(function, context);
             context.functions.pop();
@@ -75,9 +77,9 @@ public abstract class WhereClauseValidator {
             return symbol;
         }
 
-        private boolean insideNotPredicate(Context context){
-            for(Function function : context.functions){
-                if(function.info().ident().name().equals(NotPredicate.NAME)){
+        private boolean insideNotPredicate(Context context) {
+            for (Function function : context.functions) {
+                if (function.info().ident().name().equals(NotPredicate.NAME)) {
                     return true;
                 }
             }
@@ -93,17 +95,17 @@ public abstract class WhereClauseValidator {
         }
 
         private void validateSysReference(Context context, Set<String> requiredFunctionNames, String error) {
-            if(context.functions.isEmpty()){
+            if (context.functions.isEmpty()) {
                 throw new UnsupportedOperationException(error);
             }
             Function function = context.functions.lastElement();
-            if(!requiredFunctionNames.contains(function.info().ident().name().toLowerCase())
-                    || insideNotPredicate(context)) {
+            if (!requiredFunctionNames.contains(function.info().ident().name().toLowerCase(Locale.ENGLISH))
+                || insideNotPredicate(context)) {
                 throw new UnsupportedOperationException(error);
             }
-            assert function.arguments().size() == 2;
+            assert function.arguments().size() == 2 : "function's number of arguments must be 2";
             Symbol right = function.arguments().get(1);
-            if(!right.symbolType().isValueSymbol()){
+            if (!right.symbolType().isValueSymbol()) {
                 throw new UnsupportedOperationException(error);
             }
         }

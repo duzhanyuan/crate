@@ -21,52 +21,37 @@
 
 package io.crate.analyze;
 
-import io.crate.exceptions.SchemaUnknownException;
-import io.crate.exceptions.TableUnknownException;
-import io.crate.metadata.ReferenceInfos;
 import io.crate.metadata.TableIdent;
 import io.crate.metadata.table.TableInfo;
 
-public abstract class AbstractDropTableAnalyzedStatement extends AbstractDDLAnalyzedStatement {
+public abstract class AbstractDropTableAnalyzedStatement<T extends TableInfo> implements DDLStatement {
 
-    protected final ReferenceInfos referenceInfos;
-    protected final boolean dropIfExists;
+    private final boolean dropIfExists;
+    private final boolean isNoop;
+    private final T tableInfo;
 
-    protected TableInfo tableInfo;
-    protected boolean noop;
-
-    public AbstractDropTableAnalyzedStatement(ReferenceInfos referenceInfos, boolean dropIfExists) {
-        this.referenceInfos = referenceInfos;
+    AbstractDropTableAnalyzedStatement(T tableInfo, boolean isNoop, boolean dropIfExists) {
+        this.tableInfo = tableInfo;
         this.dropIfExists = dropIfExists;
+        this.isNoop = isNoop;
     }
 
     public String index() {
-        return tableIdent().esName();
+        return tableIdent().indexName();
     }
 
-    public TableInfo table() {
+    public T table() {
         return tableInfo;
     }
 
-    public TableIdent tableIdent(){
+    public TableIdent tableIdent() {
         return tableInfo.ident();
     }
 
-    public void table(TableIdent tableIdent) {
-        try {
-            tableInfo = referenceInfos.getWritableTable(tableIdent);
-        } catch (SchemaUnknownException | TableUnknownException e) {
-            if (dropIfExists) {
-                noop = true;
-            } else {
-                throw e;
-            }
-        }
+    public boolean noop() {
+        return isNoop;
     }
 
-    public boolean noop(){
-        return noop;
-    }
     public boolean dropIfExists() {
         return dropIfExists;
     }

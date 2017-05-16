@@ -24,43 +24,34 @@ package io.crate.operation.reference.doc;
 import io.crate.operation.reference.doc.lucene.ByteColumnReference;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
-import org.apache.lucene.document.IntField;
+import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
-import org.elasticsearch.index.fielddata.FieldDataType;
-import org.elasticsearch.index.mapper.FieldMapper;
 import org.junit.Test;
 
 import static org.hamcrest.core.Is.is;
 
 public class ByteColumnReferenceTest extends DocLevelExpressionsTest {
+
+    private String column = "b";
+
     @Override
     protected void insertValues(IndexWriter writer) throws Exception {
-        for (byte b = -10; b<10; b++) {
+        for (byte b = -10; b < 10; b++) {
             Document doc = new Document();
             doc.add(new StringField("_id", Byte.toString(b), Field.Store.NO));
-            doc.add(new IntField(fieldName().name(), b, Field.Store.NO));
+            doc.add(new NumericDocValuesField(column, b));
             writer.addDocument(doc);
         }
     }
 
-    @Override
-    protected FieldMapper.Names fieldName() {
-        return new FieldMapper.Names("b");
-    }
-
-    @Override
-    protected FieldDataType fieldType() {
-        return new FieldDataType("byte");
-    }
-
     @Test
-    public void testFieldCacheExpression() throws Exception {
-        ByteColumnReference byteColumn = new ByteColumnReference(fieldName().name());
+    public void testByteExpression() throws Exception {
+        ByteColumnReference byteColumn = new ByteColumnReference(column);
         byteColumn.startCollect(ctx);
         byteColumn.setNextReader(readerContext);
         IndexSearcher searcher = new IndexSearcher(readerContext.reader());

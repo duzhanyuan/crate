@@ -21,18 +21,15 @@
 
 package io.crate.operation.reference.sys.shard;
 
+import io.crate.metadata.ReferenceImplementation;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.index.shard.service.IndexShard;
+import org.elasticsearch.index.shard.IndexShard;
 
-public class ShardStateExpression extends SysShardExpression<BytesRef> {
+public class ShardStateExpression implements ReferenceImplementation<BytesRef> {
 
-    public static final String NAME = "state";
     private final IndexShard indexShard;
 
-    @Inject
     public ShardStateExpression(IndexShard indexShard) {
-        super(NAME);
         this.indexShard = indexShard;
     }
 

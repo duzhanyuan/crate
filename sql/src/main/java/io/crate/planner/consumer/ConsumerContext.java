@@ -22,40 +22,51 @@
 package io.crate.planner.consumer;
 
 
-import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.exceptions.ValidationException;
 import io.crate.planner.Planner;
 import org.elasticsearch.common.Nullable;
 
 public class ConsumerContext {
 
-    private AnalyzedRelation rootRelation;
-    private ValidationException validationException;
-    private Planner.Context plannerContext;
+    private final Planner.Context plannerContext;
 
-    public ConsumerContext(AnalyzedRelation rootRelation, Planner.Context plannerContext) {
-        this.rootRelation = rootRelation;
+    private ValidationException validationException;
+    private FetchMode fetchMode = FetchMode.NO_PROPAGATION;
+    private Integer requiredPageSize;
+
+    public ConsumerContext(Planner.Context plannerContext) {
         this.plannerContext = plannerContext;
     }
 
-    public void rootRelation(AnalyzedRelation relation) {
-        this.rootRelation = relation;
-    }
-
-    public AnalyzedRelation rootRelation() {
-        return rootRelation;
-    }
-
-    public void validationException(ValidationException validationException){
+    public void validationException(ValidationException validationException) {
         this.validationException = validationException;
     }
 
     @Nullable
-    public ValidationException validationException(){
+    public ValidationException validationException() {
         return validationException;
     }
 
     public Planner.Context plannerContext() {
         return plannerContext;
+    }
+
+    public void setFetchMode(FetchMode fetchMode) {
+        this.fetchMode = fetchMode;
+    }
+
+    FetchMode fetchMode() {
+        return fetchMode;
+    }
+
+    void requiredPageSize(Integer requiredPageSize) {
+        this.requiredPageSize = requiredPageSize;
+    }
+
+    /**
+     * required pageSize that a parent relation might have specified.
+     */
+    Integer requiredPageSize() {
+        return requiredPageSize;
     }
 }

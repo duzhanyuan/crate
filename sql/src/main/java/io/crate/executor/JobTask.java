@@ -21,7 +21,9 @@
 
 package io.crate.executor;
 
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 public abstract class JobTask implements Task {
 
@@ -33,6 +35,12 @@ public abstract class JobTask implements Task {
 
     public UUID jobId() {
         return this.jobId;
+    }
+
+    @Override
+    public List<CompletableFuture<Long>> executeBulk() {
+        throw new UnsupportedOperationException(
+            this.getClass().getSimpleName() + " cannot be executed as bulk operation");
     }
 
 }

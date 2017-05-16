@@ -29,7 +29,7 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import java.io.IOException;
 
 public class
-        LongType extends DataType<Long> implements FixedWidthType, Streamer<Long>, DataTypeFactory {
+LongType extends DataType<Long> implements FixedWidthType, Streamer<Long>, DataTypeFactory {
 
     public static final LongType INSTANCE = new LongType();
     public static final int ID = 10;
@@ -58,19 +58,19 @@ public class
             return (Long) value;
         }
         if (value instanceof String) {
-            return Long.valueOf((String)value);
+            return Long.valueOf((String) value);
         }
         if (value instanceof BytesRef) {
             return parseLong((BytesRef) value);
         }
-        return ((Number)value).longValue();
+        return ((Number) value).longValue();
     }
 
     /**
      * parses the utf-8 encoded bytesRef argument as signed decimal {@code long}.
      * All characters in the string must be decimal digits, except the first which may be an ASCII minus sign to indicate
      * a negative value or or a plus sign to indicate a positive value.
-     *
+     * <p>
      * mostly copied from {@link Long#parseLong(String s, int radix)}
      */
     private long parseLong(BytesRef value) {
@@ -78,7 +78,7 @@ public class
         boolean negative = false;
         long result = 0;
 
-        int i = 0;
+        int i = value.offset;
         int len = value.length;
         int radix = 10;
         long limit = -Long.MAX_VALUE;
@@ -102,11 +102,10 @@ public class
             if (len == 1) { // lone '+' or '-'
                 throw new NumberFormatException(value.utf8ToString());
             }
-
-            i++;;
+            i++;
         }
         multmin = limit / radix;
-        while (i < len) {
+        while (i < len + value.offset) {
             digit = Character.digit((char) bytes[i], radix);
             i++;
             if (digit < 0) {
@@ -126,7 +125,7 @@ public class
 
     @Override
     public int compareValueTo(Long val1, Long val2) {
-        return Long.compare(val1, val2);
+        return nullSafeCompareValueTo(val1, val2, Long::compare);
     }
 
     @Override

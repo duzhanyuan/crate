@@ -23,16 +23,15 @@ package io.crate.integrationtests;
 
 import io.crate.Constants;
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLRequest;
-import io.crate.action.sql.SQLResponse;
-import io.crate.core.collections.ArrayBucket;
-import io.crate.test.integration.CrateIntegrationTest;
+import io.crate.data.ArrayBucket;
+import io.crate.operation.Paging;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.TestingHelpers;
+import io.crate.testing.UseJdbc;
+import org.elasticsearch.test.ESIntegTestCase;
 import org.hamcrest.core.Is;
 import org.junit.Before;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
 import java.util.HashMap;
 
@@ -40,17 +39,11 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.Matchers.closeTo;
 import static org.hamcrest.Matchers.isIn;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
+@ESIntegTestCase.ClusterScope(numDataNodes = 2, numClientNodes = 0, supportsDedicatedMasters = false)
+@UseJdbc
 public class GroupByAggregateTest extends SQLTransportIntegrationTest {
 
-    static {
-        ClassLoader.getSystemClassLoader().setDefaultAssertionStatus(true);
-    }
-
     private Setup setup = new Setup(sqlExecutor);
-
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
 
     @Before
     public void initTestData() {
@@ -71,35 +64,56 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         assertEquals(34, response.rows()[1][0]);
     }
 
+    @Test
+    public void testSelectDistinctWithPaging() throws Exception {
+        Paging.PAGE_SIZE = 2;
+        execute("create table t (name string) with (number_of_replicas = 0)");
+        ensureYellow();
+        execute("insert into t (name) values ('Marvin'), ('Trillian'), ('Ford'), ('Arthur')");
+        execute("refresh table t");
+        execute("select distinct name from t");
+    }
+
+    @Test
+    public void testNonDistributedGroupByWithManyKeysNoOrderByAndLimit() throws Exception {
+        execute("create table t (name string, x int) clustered by (name) with (number_of_replicas = 0)");
+        ensureYellow();
+
+        execute("insert into t (name, x) values ('Marvin', 1), ('Trillian', 1), ('Ford', 1), ('Arthur', 1)");
+        execute("refresh table t");
+
+        execute("select count(*), name from t group by name, x limit 2");
+        assertThat(response.rowCount(), is(2L));
+    }
 
     @Test
     public void testGroupByOnClusteredByColumnPartOfPrimaryKey() throws Exception {
         execute("CREATE TABLE tickets ( " +
-        " pk1 long, " +
-        " pk2 integer, " +
-        " pk3 timestamp," +
-        " value string," +
-        " primary key(pk1, pk2, pk3)) " +
-        "CLUSTERED BY (pk2) INTO 3 SHARDS " +
-        "PARTITIONED BY (pk3) " +
-        "WITH (column_policy = 'strict', number_of_replicas=0)");
+                " pk1 long, " +
+                " pk2 integer, " +
+                " pk3 timestamp," +
+                " value string," +
+                " primary key(pk1, pk2, pk3)) " +
+                "CLUSTERED BY (pk2) INTO 3 SHARDS " +
+                "PARTITIONED BY (pk3) " +
+                "WITH (column_policy = 'strict', number_of_replicas=0)");
         ensureYellow();
         execute("insert into tickets (pk1, pk2, pk3, value) values (?, ?, ?, ?)",
-        new Object[][]{
-                         {1L, 42, 1425168000000L, "foo"},
-                                {2L, 43, 0L, "bar"},
-                                {3L, 44, 1425168000000L, "baz"},
-                                {4L, 45, 499651200000L, null},
-                                {5L, 42, 0L, "foo"}
-                        });
+            new Object[][]{
+                {1L, 42, 1425168000000L, "foo"},
+                {2L, 43, 0L, "bar"},
+                {3L, 44, 1425168000000L, "baz"},
+                {4L, 45, 499651200000L, null},
+                {5L, 42, 0L, "foo"}
+            });
         ensureYellow();
         refresh();
         execute("select pk2, count(pk2) from tickets group by pk2 order by pk2 limit 100");
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-                "42| 2\n" + // assert that different partitions have been merged
-                "43| 1\n" +
-                "44| 1\n" +
-                "45| 1\n"));
+            "42| 2\n" + // assert that different partitions have been merged
+            "43| 1\n" +
+            "44| 1\n" +
+            "45| 1\n"));
 
         execute("create table tickets_export (c2 int, c long) with (number_of_replicas = 0)");
         ensureYellow();
@@ -108,10 +122,10 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
 
         execute("select c2, c from tickets_export order by 1");
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-                "42| 2\n" + // assert that different partitions have been merged
-                        "43| 1\n" +
-                        "44| 1\n" +
-                        "45| 1\n"));
+            "42| 2\n" + // assert that different partitions have been merged
+            "43| 1\n" +
+            "44| 1\n" +
+            "45| 1\n"));
     }
 
     @Test
@@ -437,7 +451,6 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         execute("select avg(income), mean(income), department from employees group by department order by department asc");
         assertEquals(4, response.rowCount());
 
-
         assertEquals(500000000.245d, response.rows()[0][0]);
         assertEquals(500000000.245d, response.rows()[0][1]);
         assertEquals("HR", response.rows()[0][2]);
@@ -488,21 +501,21 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
 
         assertEquals("Android", arbitrary_response.rows()[0][1]);
         assertEquals(1,
-                execute("select name from characters where race=? AND name=? ",
-                        new Object[]{"Android", arbitrary_response.rows()[0][0]})
-                        .rowCount()
+            execute("select name from characters where race=? AND name=? ",
+                new Object[]{"Android", arbitrary_response.rows()[0][0]})
+                .rowCount()
         );
         assertEquals("Human", arbitrary_response.rows()[1][1]);
         assertEquals(1,
-                execute("select name from characters where race=? AND name=? ",
-                        new Object[]{"Human", arbitrary_response.rows()[1][0]})
-                        .rowCount()
+            execute("select name from characters where race=? AND name=? ",
+                new Object[]{"Human", arbitrary_response.rows()[1][0]})
+                .rowCount()
         );
         assertEquals("Vogon", arbitrary_response.rows()[2][1]);
         assertEquals(1,
-                execute("select name from characters where race=? AND name=? ",
-                        new Object[]{"Vogon", arbitrary_response.rows()[2][0]})
-                        .rowCount()
+            execute("select name from characters where race=? AND name=? ",
+                new Object[]{"Vogon", arbitrary_response.rows()[2][0]})
+                .rowCount()
         );
 
     }
@@ -514,9 +527,9 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         execute("select arbitrary(age) from characters where age is not null");
         assertEquals(1, response.rowCount());
         assertEquals(1,
-                execute("select count(*) from characters where age=?",
-                        new Object[]{response.rows()[0][0]})
-                        .rowCount()
+            execute("select count(*) from characters where age=?",
+                new Object[]{response.rows()[0][0]})
+                .rowCount()
         );
     }
 
@@ -656,6 +669,15 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    public void testGroupByUnknownResultColumnWithAlias() throws Exception {
+        this.setup.groupBySetup();
+        expectedException.expect(SQLActionException.class);
+        expectedException.expectMessage("column 'col2' must appear in the GROUP BY clause or " +
+                                        "be used in an aggregation function");
+        execute("select max(1), 2 as col2");
+    }
+
+    @Test
     public void testGroupByUnknownGroupByColumn() throws Exception {
         this.setup.groupBySetup();
         expectedException.expect(SQLActionException.class);
@@ -677,8 +699,7 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
                 " race string" +
                 ") clustered into 1 shards");
         ensureYellow();
-        SQLRequest request = new SQLRequest("select race from characters where details_ignored['lol']='funky' group by race");
-        SQLResponse response = sqlExecutor.execute(request).actionGet(1000);
+        execute("select race from characters where details_ignored['lol']='funky' group by race");
         assertEquals(0, response.rowCount());
     }
 
@@ -693,9 +714,10 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
     @Test
     public void testAggregateNonExistingColumn() throws Exception {
         this.setup.groupBySetup();
-        expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("unknown function: max(null)"); // TODO: better exception
-        execute("select max(details_ignored['lol']), race from characters group by race");
+        execute("select max(details_ignored['lol']), race from characters group by race order by race");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("NULL| Android\n" +
+                                                                    "NULL| Human\n" +
+                                                                    "NULL| Vogon\n"));
     }
 
     @Test
@@ -714,6 +736,15 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         execute("select age from characters group by age having age > 40 order by age");
         assertEquals(2L, response.rowCount());
         assertEquals(43, response.rows()[0][0]);
+    }
+
+    @Test
+    public void testHavingGroupByOnScalar() throws Exception {
+        this.setup.groupBySetup("integer");
+        execute("select date_trunc('week', birthdate) from characters group by 1" +
+                " having date_trunc('week', birthdate) > 0" +
+                " order by date_trunc('week', birthdate)");
+        assertEquals(2L, response.rowCount());
     }
 
     @Test
@@ -749,12 +780,12 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         ensureYellow();
 
         execute("insert into foo (id, name, country) values (?, ?, ?)", new Object[][]{
-                new Object[] { 1, "Arthur", "Austria" },
-                new Object[] { 2, "Trillian", "Austria" },
-                new Object[] { 3, "Marvin", "Austria" },
-                new Object[] { 4, "Jeltz", "German" },
-                new Object[] { 5, "Ford", "German" },
-                new Object[] { 6, "Slartibardfast", "Italy" },
+            new Object[]{1, "Arthur", "Austria"},
+            new Object[]{2, "Trillian", "Austria"},
+            new Object[]{3, "Marvin", "Austria"},
+            new Object[]{4, "Jeltz", "German"},
+            new Object[]{5, "Ford", "German"},
+            new Object[]{6, "Slartibardfast", "Italy"},
         });
         refresh();
 
@@ -765,7 +796,7 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
 
         execute("select count(*), country from foo group by country having country = 'Austria'");
         assertThat(response.rowCount(), is(1L));
-        assertThat((Long)response.rows()[0][0], is(3L));
+        assertThat((Long) response.rows()[0][0], is(3L));
         assertThat((String) response.rows()[0][1], is("Austria"));
 
         execute("select country, min(id) from foo group by country having min(id) < 5 ");
@@ -779,12 +810,12 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         ensureYellow();
 
         execute("insert into foo (id, name, country) values (?, ?, ?)", new Object[][]{
-                new Object[]{1, "Arthur", "Austria"},
-                new Object[]{2, "Trillian", "Austria"},
-                new Object[]{3, "Marvin", "Austria"},
-                new Object[]{4, "Jeltz", "German"},
-                new Object[]{5, "Ford", "German"},
-                new Object[]{6, "Slartibardfast", "Italy"},
+            new Object[]{1, "Arthur", "Austria"},
+            new Object[]{2, "Trillian", "Austria"},
+            new Object[]{3, "Marvin", "Austria"},
+            new Object[]{4, "Jeltz", "German"},
+            new Object[]{5, "Ford", "German"},
+            new Object[]{6, "Slartibardfast", "Italy"},
         });
         refresh();
 
@@ -807,12 +838,12 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         ensureYellow();
 
         execute("insert into foo (id, name, country) values (?, ?, ?)", new Object[][]{
-                new Object[]{1, "Arthur", "Austria"},
-                new Object[]{2, "Trillian", "Austria"},
-                new Object[]{3, "Marvin", "Austria"},
-                new Object[]{4, "Jeltz", "Germany"},
-                new Object[]{5, "Ford", "Germany"},
-                new Object[]{6, "Slartibardfast", "Italy"},
+            new Object[]{1, "Arthur", "Austria"},
+            new Object[]{2, "Trillian", "Austria"},
+            new Object[]{3, "Marvin", "Austria"},
+            new Object[]{4, "Jeltz", "Germany"},
+            new Object[]{5, "Ford", "Germany"},
+            new Object[]{6, "Slartibardfast", "Italy"},
         });
         refresh();
 
@@ -828,20 +859,20 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         execute("create table foo (id int primary key, name string primary key) with (number_of_replicas = 0)");
         ensureYellow();
 
-        execute("insert into foo (id, name) values (?, ?)", new Object[][] {
-                new Object[] { 1, "Arthur" },
-                new Object[] { 2, "Trillian" },
-                new Object[] { 3, "Slartibardfast" },
-                new Object[] { 4, "Marvin" },
+        execute("insert into foo (id, name) values (?, ?)", new Object[][]{
+            new Object[]{1, "Arthur"},
+            new Object[]{2, "Trillian"},
+            new Object[]{3, "Slartibardfast"},
+            new Object[]{4, "Marvin"},
         });
         refresh();
 
         execute("select count(*), name from foo group by id, name order by name desc");
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-                "1| Trillian\n" +
-                "1| Slartibardfast\n" +
-                "1| Marvin\n" +
-                "1| Arthur\n"));
+            "1| Trillian\n" +
+            "1| Slartibardfast\n" +
+            "1| Marvin\n" +
+            "1| Arthur\n"));
     }
 
     @Test
@@ -892,16 +923,16 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
                 " \"avgDuration\" int" +
                 ") with (number_of_replicas=0)");
         ensureYellow();
-        for (int i = 0; i<100; i++) {
+        for (int i = 0; i < 100; i++) {
             execute("insert into rankings (\"pageURL\", \"pageRank\", \"avgDuration\") values (?, ?, ?)",
-                    new Object[]{String.valueOf(i), randomIntBetween(i, i*i),  randomInt(i) });
+                new Object[]{String.valueOf(i), randomIntBetween(i, i * i), randomInt(i)});
             assertThat(response.rowCount(), is(1L));
         }
         execute("refresh table rankings");
 
         execute("select count(*), \"pageURL\" from rankings group by \"pageURL\" order by 1 desc limit 100");
         assertThat(response.rowCount(), is(100L));
-        assertThat(new ArrayBucket(response.rows()), TestingHelpers.isSorted(0, true, null));
+        assertThat(new ArrayBucket(response.rows()), TestingHelpers.hasSortedRows(0, true, null));
     }
 
     @Test
@@ -912,9 +943,9 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
                 " \"avgDuration\" int" +
                 ") with (number_of_replicas=0)");
         ensureYellow();
-        for (int i = 0; i<100; i++) {
+        for (int i = 0; i < 100; i++) {
             execute("insert into rankings (\"pageURL\", \"pageRank\", \"avgDuration\") values (?, ?, ?)",
-                    new Object[]{randomAsciiOfLength(10 + (i%3)), randomIntBetween(i, i*i),  randomInt(i) });
+                new Object[]{randomAsciiOfLength(10 + (i % 3)), randomIntBetween(i, i * i), randomInt(i)});
         }
         execute("refresh table rankings");
         execute("select count(*), \"pageURL\" from rankings group by \"pageURL\" order by 1 desc limit 100");
@@ -930,10 +961,10 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
                 ") clustered by (url) with (number_of_replicas=0)");
         ensureYellow();
         execute("insert into twice (\"name\", \"url\", \"score\") values (?, ?, ?)",
-                new Object[]{
-                        "A",
-                        "https://Ä.com",
-                        99.6d});
+            new Object[]{
+                "A",
+                "https://Ä.com",
+                99.6d});
         refresh();
         execute("select avg(score), url, avg(score) from twice group by url limit 10");
         assertThat(TestingHelpers.printedTable(response.rows()), is("99.6| https://Ä.com| 99.6\n"));
@@ -946,12 +977,12 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
                 "   item_id string" +
                 ") clustered into 2 shards with (number_of_replicas = 0)");
         ensureYellow();
-        execute("insert into likes (event_id, item_id) values (?, ?)", new Object[][] {
-                new Object[] { "event1", "item1" },
-                new Object[] { "event1", "item1" },
-                new Object[] { "event1", "item2" },
-                new Object[] { "event2", "item1" },
-                new Object[] { "event2", "item2" },
+        execute("insert into likes (event_id, item_id) values (?, ?)", new Object[][]{
+            new Object[]{"event1", "item1"},
+            new Object[]{"event1", "item1"},
+            new Object[]{"event1", "item2"},
+            new Object[]{"event2", "item1"},
+            new Object[]{"event2", "item2"},
         });
         execute("refresh table likes");
 
@@ -993,11 +1024,11 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         // only 1 shard to force non-distribution
         ensureYellow();
         execute("insert into likes (event_id, item_id) values (?, ?)", new Object[][]{
-                new Object[]{"event1", "item1"},
-                new Object[]{"event1", "item1"},
-                new Object[]{"event1", "item2"},
-                new Object[]{"event2", "item1"},
-                new Object[]{"event2", "item2"},
+            new Object[]{"event1", "item1"},
+            new Object[]{"event1", "item1"},
+            new Object[]{"event1", "item2"},
+            new Object[]{"event2", "item1"},
+            new Object[]{"event2", "item2"},
         });
         execute("refresh table likes");
 
@@ -1091,22 +1122,22 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
                 "WITH (number_of_replicas=0)");
         ensureYellow();
         execute("insert into tickets (ticket_id, tenant_id, created_month) values (?, ?, ?)",
-                new Object[][]{
-                        {1L, 42, 1425168000000L},
-                        {2L, 43, 0},
-                        {3L, 44, 1425168000000L},
-                        {4L, 45, 499651200000L},
-                        {5L, 42, 0L},
-                });
+            new Object[][]{
+                {1L, 42, 1425168000000L},
+                {2L, 43, 0},
+                {3L, 44, 1425168000000L},
+                {4L, 45, 499651200000L},
+                {5L, 42, 0L},
+            });
         ensureYellow();
         refresh();
 
         execute("select count(*), tenant_id from tickets group by 2 order by tenant_id limit 100");
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-                "2| 42\n" + // assert that different partitions have been merged
-                "1| 43\n" +
-                "1| 44\n" +
-                "1| 45\n"));
+            "2| 42\n" + // assert that different partitions have been merged
+            "1| 43\n" +
+            "1| 44\n" +
+            "1| 45\n"));
     }
 
     @Test
@@ -1115,7 +1146,7 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
                 " altitude int," +
                 " name string," +
                 " description string index using fulltext" +
-                ")");
+                ") clustered into 1 shards with (number_of_replicas = 0)"); // 1 shard because scoring is relative within a shard
         ensureYellow();
 
         execute("insert into locations (altitude, name, description) values (420, 'Crate Dornbirn', 'A nice place in a nice country')");
@@ -1124,8 +1155,46 @@ public class GroupByAggregateTest extends SQLTransportIntegrationTest {
         execute("refresh table locations");
 
         execute("select min(altitude) as altitude, name from locations where match(description, 'nice') " +
-                "and _score >= 0.99 group by name order by name");
+                "and _score >= 1.14 group by name order by name");
         assertEquals(2L, response.rowCount());
     }
 
+    @Test
+    public void testDistinctWithGroupBy() throws Exception {
+        execute("select DISTINCT max(col1), min(col1) from unnest([1,1,1,2,2,2,2,3,3],[1,2,3,1,2,3,4,1,2]) " +
+                "group by col2 order by 2, 1");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("2| 1\n" +
+                                                                    "3| 1\n" +
+                                                                    "2| 2\n"));
+    }
+
+    @Test
+    public void testDistinctWithGroupByLimitAndOffset() throws Exception {
+        execute("select DISTINCT max(col2), min(col2) from " +
+                "unnest([1,1,2,2,3,3,4,4,5,5,6,6],[1,2,2,1,2,1,3,4,4,3,5,6]) " +
+                "group by col1 order by 1 desc, 2 limit 2 offset 1");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("4| 3\n" +
+                                                                   "2| 1\n"));
+    }
+
+    @Test
+    public void testDistinctOnJoinWithGroupBy() throws Exception {
+        execute("select DISTINCT max(t1.col1), min(t2.col2) from " +
+                "unnest([1,1,1,2,2,2,2,3,3],[1,2,3,1,2,3,4,1,2]) as t1, " +
+                "unnest([1,1,1,2,2,2,2,3,3],[1,2,3,1,2,3,4,1,2]) as t2 " +
+                "where t1.col1=t2.col2 " +
+                "group by t1.col2 order by 2, 1");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("2| 1\n" +
+                                                                    "3| 1\n" +
+                                                                    "2| 2\n"));
+    }
+
+    @Test
+    public void testDistinctOnSubselectWithGroupBy() throws Exception {
+        execute("select * from (" +
+                " select distinct max(col1), min(col1) from unnest([1,1,1,2,2,2,2,3,3],[1,2,3,1,2,3,4,1,2]) " +
+                " group by col2 order by 2, 1 limit 2" +
+                ") t order by 1 desc limit 1");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("3| 1\n"));
+    }
 }

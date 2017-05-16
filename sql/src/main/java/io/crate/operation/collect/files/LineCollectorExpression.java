@@ -21,9 +21,10 @@
 
 package io.crate.operation.collect.files;
 
-import io.crate.operation.Input;
+import io.crate.data.Input;
+import io.crate.operation.reference.file.LineContext;
 
 public abstract class LineCollectorExpression<ReturnType> implements Input<ReturnType> {
 
-    public abstract void startCollect(CollectorContext context);
+    public abstract void startCollect(LineContext context);
 }

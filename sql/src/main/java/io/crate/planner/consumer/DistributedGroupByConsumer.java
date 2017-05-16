@@ -21,173 +21,157 @@
 
 package io.crate.planner.consumer;
 
-import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-import io.crate.Constants;
-import io.crate.analyze.*;
+import io.crate.analyze.HavingClause;
+import io.crate.analyze.OrderBy;
+import io.crate.analyze.QuerySpec;
 import io.crate.analyze.relations.AnalyzedRelation;
-import io.crate.analyze.relations.AnalyzedRelationVisitor;
+import io.crate.analyze.relations.QueriedDocTable;
+import io.crate.analyze.symbol.AggregateMode;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.collections.Lists2;
 import io.crate.exceptions.VersionInvalidException;
 import io.crate.metadata.Routing;
-import io.crate.metadata.table.TableInfo;
-import io.crate.planner.PlanNodeBuilder;
-import io.crate.planner.node.NoopPlannedAnalyzedRelation;
-import io.crate.planner.node.dql.CollectNode;
-import io.crate.planner.node.dql.DistributedGroupBy;
+import io.crate.metadata.RowGranularity;
+import io.crate.metadata.doc.DocTableInfo;
+import io.crate.operation.projectors.TopN;
+import io.crate.planner.*;
+import io.crate.planner.distribution.DistributionInfo;
+import io.crate.planner.node.dql.Collect;
 import io.crate.planner.node.dql.GroupByConsumer;
-import io.crate.planner.node.dql.MergeNode;
+import io.crate.planner.node.dql.MergePhase;
+import io.crate.planner.node.dql.RoutedCollectPhase;
 import io.crate.planner.projection.GroupProjection;
 import io.crate.planner.projection.Projection;
-import io.crate.planner.projection.TopNProjection;
 import io.crate.planner.projection.builder.ProjectionBuilder;
 import io.crate.planner.projection.builder.SplitPoints;
-import io.crate.planner.symbol.Aggregation;
-import io.crate.planner.symbol.Symbol;
+import org.elasticsearch.common.inject.Singleton;
 
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
+import java.util.Optional;
 
-public class DistributedGroupByConsumer implements Consumer {
+@Singleton
+class DistributedGroupByConsumer implements Consumer {
 
-    private static final Visitor VISITOR = new Visitor();
+    private final Visitor visitor;
+
+    DistributedGroupByConsumer(ProjectionBuilder projectionBuilder) {
+        visitor = new Visitor(projectionBuilder);
+    }
 
     @Override
-    public boolean consume(AnalyzedRelation rootRelation, ConsumerContext context) {
-        Context ctx = new Context(context);
-        context.rootRelation(VISITOR.process(context.rootRelation(), ctx));
-        return ctx.result;
+    public Plan consume(AnalyzedRelation relation, ConsumerContext context) {
+        return visitor.process(relation, context);
     }
 
-    private static class Context {
-        ConsumerContext consumerContext;
-        boolean result = false;
+    private static class Visitor extends RelationPlanningVisitor {
 
-        public Context(ConsumerContext context) {
-            this.consumerContext = context;
+        private final ProjectionBuilder projectionBuilder;
+
+        public Visitor(ProjectionBuilder projectionBuilder) {
+            this.projectionBuilder = projectionBuilder;
         }
-    }
-
-    private static class Visitor extends AnalyzedRelationVisitor<Context, AnalyzedRelation> {
 
         @Override
-        public AnalyzedRelation visitQueriedTable(QueriedTable table, Context context) {
-            List<Symbol> groupBy = table.querySpec().groupBy();
-            if (groupBy == null) {
-                return table;
+        public Plan visitQueriedDocTable(QueriedDocTable table, ConsumerContext context) {
+            if (!table.querySpec().groupBy().isPresent()) {
+                return null;
+            }
+            QuerySpec querySpec = table.querySpec();
+            List<Symbol> groupBy = querySpec.groupBy().get();
+            DocTableInfo tableInfo = table.tableRelation().tableInfo();
+            if (querySpec.where().hasVersions()) {
+                context.validationException(new VersionInvalidException());
+                return null;
             }
 
-            TableInfo tableInfo = table.tableRelation().tableInfo();
-            if(table.querySpec().where().hasVersions()){
-                context.consumerContext.validationException(new VersionInvalidException());
-                return table;
-            }
-
-            Routing routing = tableInfo.getRouting(table.querySpec().where(), null);
-
-            GroupByConsumer.validateGroupBySymbols(table.tableRelation(), table.querySpec().groupBy());
-
-            ProjectionBuilder projectionBuilder = new ProjectionBuilder(table.querySpec());
-
-            SplitPoints splitPoints = projectionBuilder.getSplitPoints();
+            GroupByConsumer.validateGroupBySymbols(groupBy);
+            SplitPoints splitPoints = SplitPoints.create(querySpec);
 
             // start: Map/Collect side
             GroupProjection groupProjection = projectionBuilder.groupProjection(
-                    splitPoints.leaves(),
-                    table.querySpec().groupBy(),
-                    splitPoints.aggregates(),
-                    Aggregation.Step.ITER,
-                    Aggregation.Step.PARTIAL);
+                splitPoints.toCollect(),
+                groupBy,
+                splitPoints.aggregates(),
+                AggregateMode.ITER_PARTIAL,
+                RowGranularity.SHARD);
 
-            CollectNode collectNode = PlanNodeBuilder.distributingCollect(
-                    tableInfo,
-                    context.consumerContext.plannerContext(),
-                    table.querySpec().where(),
-                    splitPoints.leaves(),
-                    Lists.newArrayList(routing.nodes()),
-                    ImmutableList.<Projection>of(groupProjection)
+            Planner.Context plannerContext = context.plannerContext();
+            Routing routing = plannerContext.allocateRouting(tableInfo, querySpec.where(), null);
+            RoutedCollectPhase collectPhase = new RoutedCollectPhase(
+                plannerContext.jobId(),
+                plannerContext.nextExecutionPhaseId(),
+                "distributing collect",
+                routing,
+                tableInfo.rowGranularity(),
+                splitPoints.toCollect(),
+                ImmutableList.<Projection>of(groupProjection),
+                querySpec.where(),
+                DistributionInfo.DEFAULT_MODULO
             );
             // end: Map/Collect side
 
             // start: Reducer
-            List<Symbol> collectOutputs = new ArrayList<>(
-                    groupBy.size() +
-                            splitPoints.aggregates().size());
-            collectOutputs.addAll(groupBy);
-            collectOutputs.addAll(splitPoints.aggregates());
+            List<Symbol> collectOutputs = Lists2.concat(groupBy, splitPoints.aggregates());
 
-            List<Projection> reducerProjections = new LinkedList<>();
+            List<Projection> reducerProjections = new ArrayList<>();
             reducerProjections.add(projectionBuilder.groupProjection(
-                    collectOutputs,
-                    table.querySpec().groupBy(),
-                    splitPoints.aggregates(),
-                    Aggregation.Step.PARTIAL,
-                    Aggregation.Step.FINAL));
+                collectOutputs,
+                groupBy,
+                splitPoints.aggregates(),
+                AggregateMode.PARTIAL_FINAL,
+                RowGranularity.CLUSTER)
+            );
 
-
-            OrderBy orderBy = table.querySpec().orderBy();
-            if (orderBy != null) {
-                table.tableRelation().validateOrderBy(orderBy);
+            Optional<HavingClause> havingClause = querySpec.having();
+            if (havingClause.isPresent()) {
+                HavingClause having = havingClause.get();
+                reducerProjections.add(ProjectionBuilder.filterProjection(collectOutputs, having));
             }
-
-
-            HavingClause havingClause = table.querySpec().having();
-            if (havingClause != null) {
-                if (havingClause.noMatch()) {
-                    return new NoopPlannedAnalyzedRelation(table);
-                } else if (havingClause.hasQuery()) {
-                    reducerProjections.add(projectionBuilder.filterProjection(
-                            collectOutputs,
-                            havingClause.query()
-                    ));
-                }
+            Limits limits = plannerContext.getLimits(querySpec);
+            Optional<OrderBy> optOrderBy = querySpec.orderBy();
+            List<Symbol> topNOutputs;
+            if (optOrderBy.isPresent()) {
+                topNOutputs = Lists2.concatUnique(querySpec.outputs(), optOrderBy.get().orderBySymbols());
+            } else {
+                topNOutputs = querySpec.outputs();
             }
-
-            boolean isRootRelation = context.consumerContext.rootRelation() == table;
-            if (isRootRelation) {
-                reducerProjections.add(projectionBuilder.topNProjection(
-                        collectOutputs,
-                        orderBy,
-                        0,
-                        MoreObjects.firstNonNull(table.querySpec().limit(),
-                                Constants.DEFAULT_SELECT_LIMIT) + table.querySpec().offset(),
-                        table.querySpec().outputs()));
-            }
-            MergeNode mergeNode = PlanNodeBuilder.distributedMerge(
-                    collectNode,
-                    reducerProjections);
+            reducerProjections.add(ProjectionBuilder.topNOrEval(
+                collectOutputs,
+                optOrderBy.orElse(null),
+                0,
+                limits.limitAndOffset(),
+                topNOutputs));
+            MergePhase reducerMerge = new MergePhase(
+                plannerContext.jobId(),
+                plannerContext.nextExecutionPhaseId(),
+                "distributed merge",
+                collectPhase.nodeIds().size(),
+                collectPhase.nodeIds(),
+                collectPhase.outputTypes(),
+                reducerProjections,
+                DistributionInfo.DEFAULT_BROADCAST,
+                null
+            );
             // end: Reducer
 
-            MergeNode localMergeNode = null;
-            if(isRootRelation) {
-                TopNProjection topN = projectionBuilder.topNProjection(
-                        table.querySpec().outputs(),
-                        orderBy,
-                        table.querySpec().offset(),
-                        table.querySpec().limit(),
-                        null);
-                localMergeNode = PlanNodeBuilder.localMerge(ImmutableList.<Projection>of(topN),
-                        mergeNode, context.consumerContext.plannerContext());
-            }
-            context.result = true;
-            return new DistributedGroupBy(
-                    collectNode,
-                    mergeNode,
-                    localMergeNode
+            return new Merge(
+                new Collect(
+                    collectPhase,
+                    TopN.NO_LIMIT,
+                    0,
+                    collectPhase.outputTypes().size(),
+                    TopN.NO_LIMIT,
+                    null
+                ),
+                reducerMerge,
+                limits.finalLimit(),
+                limits.offset(),
+                querySpec.outputs().size(),
+                limits.limitAndOffset(),
+                PositionalOrderBy.of(optOrderBy.orElse(null), topNOutputs)
             );
         }
-
-        @Override
-        public AnalyzedRelation visitInsertFromQuery(InsertFromSubQueryAnalyzedStatement insertFromSubQueryAnalyzedStatement, Context context) {
-            InsertFromSubQueryConsumer.planInnerRelation(insertFromSubQueryAnalyzedStatement, context, this);
-            return insertFromSubQueryAnalyzedStatement;
-        }
-
-        @Override
-        protected AnalyzedRelation visitAnalyzedRelation(AnalyzedRelation relation, Context context) {
-            return relation;
-        }
-
     }
 }

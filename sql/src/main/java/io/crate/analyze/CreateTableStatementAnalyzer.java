@@ -20,123 +20,143 @@
  */
 package io.crate.analyze;
 
-import io.crate.Constants;
-import io.crate.analyze.expressions.ExpressionToNumberVisitor;
+import com.google.common.collect.ImmutableList;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.expressions.ExpressionToStringVisitor;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.FulltextAnalyzerResolver;
-import io.crate.metadata.ReferenceInfos;
-import io.crate.metadata.TableIdent;
+import io.crate.data.Row;
+import io.crate.metadata.*;
+import io.crate.metadata.information.InformationSchemaInfo;
+import io.crate.metadata.pg_catalog.PgCatalogSchemaInfo;
+import io.crate.metadata.sys.SysSchemaInfo;
 import io.crate.sql.tree.*;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Locale;
 
-@Singleton
 public class CreateTableStatementAnalyzer extends DefaultTraversalVisitor<CreateTableAnalyzedStatement,
-        CreateTableStatementAnalyzer.Context> {
+    CreateTableStatementAnalyzer.Context> {
 
-    private static final TablePropertiesAnalyzer TABLE_PROPERTIES_ANALYZER = new TablePropertiesAnalyzer();
     private static final String CLUSTERED_BY_IN_PARTITIONED_ERROR = "Cannot use CLUSTERED BY column in PARTITIONED BY clause";
-    private final ReferenceInfos referenceInfos;
+    private final Schemas schemas;
     private final FulltextAnalyzerResolver fulltextAnalyzerResolver;
+    private final Functions functions;
+    private final NumberOfShards numberOfShards;
 
-    class Context {
-        Analysis analysis;
-        CreateTableAnalyzedStatement statement;
+    static final Collection<String> READ_ONLY_SCHEMAS = ImmutableList.of(
+        SysSchemaInfo.NAME,
+        InformationSchemaInfo.NAME,
+        PgCatalogSchemaInfo.NAME
+    );
 
-        public Context(Analysis analysis) {
-            this.analysis = analysis;
+    static class Context {
+
+        private final CreateTableAnalyzedStatement statement;
+        private final ParameterContext parameterContext;
+
+        public Context(CreateTableAnalyzedStatement statement, ParameterContext parameterContext) {
+            this.statement = statement;
+            this.parameterContext = parameterContext;
         }
     }
 
-    public CreateTableAnalyzedStatement analyze(Node node, Analysis analysis) {
-        analysis.expectsAffectedRows(true);
-        return super.process(node, new Context(analysis));
-    }
 
-    @Inject
-    public CreateTableStatementAnalyzer(ReferenceInfos referenceInfos,
-                                        FulltextAnalyzerResolver fulltextAnalyzerResolver) {
-        this.referenceInfos = referenceInfos;
+    public CreateTableStatementAnalyzer(Schemas schemas,
+                                        FulltextAnalyzerResolver fulltextAnalyzerResolver,
+                                        Functions functions,
+                                        NumberOfShards numberOfShards) {
+        this.schemas = schemas;
         this.fulltextAnalyzerResolver = fulltextAnalyzerResolver;
+        this.functions = functions;
+        this.numberOfShards = numberOfShards;
     }
 
     @Override
     protected CreateTableAnalyzedStatement visitNode(Node node, Context context) {
         throw new RuntimeException(
-                String.format("Encountered node %s but expected a CreateTable node", node));
+            String.format(Locale.ENGLISH, "Encountered node %s but expected a CreateTable node", node));
     }
 
-    @Override
-    public CreateTableAnalyzedStatement visitCreateTable(CreateTable node, Context context) {
-        assert context.statement == null;
-        context.statement = new CreateTableAnalyzedStatement(fulltextAnalyzerResolver);
-        setTableIdent(node, context);
+    public CreateTableAnalyzedStatement analyze(CreateTable createTable,
+                                                ParameterContext parameterContext,
+                                                SessionContext sessionContext) {
+        CreateTableAnalyzedStatement statement = new CreateTableAnalyzedStatement();
+        Row parameters = parameterContext.parameters();
+
+        TableIdent tableIdent = getTableIdent(createTable, sessionContext);
+        statement.table(tableIdent, createTable.ifNotExists(), schemas);
 
         // apply default in case it is not specified in the genericProperties,
         // if it is it will get overwritten afterwards.
-        TABLE_PROPERTIES_ANALYZER.analyze(
-                context.statement.tableParameter(), new TableParameterInfo(),
-                node.properties(), context.analysis.parameterContext().parameters(), true);
+        TablePropertiesAnalyzer.analyze(
+            statement.tableParameter(),
+            new TableParameterInfo(),
+            createTable.properties(),
+            parameters,
+            true
+        );
+        AnalyzedTableElements tableElements = TableElementsAnalyzer.analyze(
+            createTable.tableElements(), parameters, fulltextAnalyzerResolver, null);
 
-        context.statement.analyzedTableElements(TableElementsAnalyzer.analyze(
-                node.tableElements(),
-                context.analysis.parameterContext().parameters(),
-                context.statement.fulltextAnalyzerResolver()));
+        // validate table elements
+        tableElements.finalizeAndValidate(
+            tableIdent,
+            Collections.emptyList(),
+            functions,
+            parameterContext,
+            sessionContext);
 
-        context.statement.analyzedTableElements().finalizeAndValidate();
         // update table settings
-        context.statement.tableParameter().settingsBuilder().put(context.statement.analyzedTableElements().settings());
+        statement.tableParameter().settingsBuilder().put(tableElements.settings());
+        statement.tableParameter().settingsBuilder().put(
+            IndexMetaData.SETTING_NUMBER_OF_SHARDS, numberOfShards.defaultNumberOfShards());
 
-        for (CrateTableOption option : node.crateTableOptions()) {
+        Context context = new Context(statement, parameterContext);
+        statement.analyzedTableElements(tableElements);
+        for (CrateTableOption option : createTable.crateTableOptions()) {
             process(option, context);
         }
-
-        return context.statement;
+        return statement;
     }
 
-    private void setTableIdent(CreateTable node, Context context) {
-        TableIdent tableIdent = TableIdent.of(node.name(), context.analysis.parameterContext().defaultSchema());
-        context.statement.table(tableIdent, referenceInfos);
+    private TableIdent getTableIdent(CreateTable node, SessionContext sessionContext) {
+        TableIdent tableIdent = TableIdent.of(node.name(), sessionContext.defaultSchema());
+        if (READ_ONLY_SCHEMAS.contains(tableIdent.schema())) {
+            throw new IllegalArgumentException(
+                String.format(Locale.ENGLISH, "Cannot create table in read-only schema '%s'", tableIdent.schema())
+            );
+        }
+        return tableIdent;
     }
 
     @Override
-    public CreateTableAnalyzedStatement visitClusteredBy(ClusteredBy node, Context context) {
-        if (node.column().isPresent()) {
+    public CreateTableAnalyzedStatement visitClusteredBy(ClusteredBy clusteredBy, Context context) {
+        if (clusteredBy.column().isPresent()) {
             ColumnIdent routingColumn = ColumnIdent.fromPath(
-                    ExpressionToStringVisitor.convert(node.column().get(), context.analysis.parameterContext().parameters()));
+                ExpressionToStringVisitor.convert(clusteredBy.column().get(), context.parameterContext.parameters()));
 
-            for(AnalyzedColumnDefinition column: context.statement.analyzedTableElements().partitionedByColumns){
-                if(column.ident().equals(routingColumn)){
+            for (AnalyzedColumnDefinition column : context.statement.analyzedTableElements().partitionedByColumns) {
+                if (column.ident().equals(routingColumn)) {
                     throw new IllegalArgumentException(CLUSTERED_BY_IN_PARTITIONED_ERROR);
                 }
             }
             if (!context.statement.hasColumnDefinition(routingColumn)) {
                 throw new IllegalArgumentException(
-                        String.format(Locale.ENGLISH, "Invalid or non-existent routing column \"%s\"",
-                                routingColumn));
+                    String.format(Locale.ENGLISH, "Invalid or non-existent routing column \"%s\"",
+                        routingColumn));
             }
-            if (context.statement.primaryKeys().size() > 0 && !context.statement.primaryKeys().contains(routingColumn.fqn())) {
+            if (context.statement.primaryKeys().size() > 0 &&
+                !context.statement.primaryKeys().contains(routingColumn.fqn())) {
                 throw new IllegalArgumentException("Clustered by column must be part of primary keys");
             }
 
             context.statement.routing(routingColumn);
         }
-
-        int numShards;
-        if (node.numberOfShards().isPresent()) {
-            numShards = ExpressionToNumberVisitor.convert(node.numberOfShards().get(),
-                    context.analysis.parameterContext().parameters()).intValue();
-            if (numShards < 1) {
-                throw new IllegalArgumentException("num_shards in CLUSTERED clause must be greater than 0");
-            }
-        } else {
-            numShards = Constants.DEFAULT_NUM_SHARDS;
-        }
-        context.statement.tableParameter().settingsBuilder().put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, numShards);
+        context.statement.tableParameter().settingsBuilder().put(
+            IndexMetaData.SETTING_NUMBER_OF_SHARDS,
+            numberOfShards.fromClusteredByClause(clusteredBy, context.parameterContext.parameters())
+        );
         return context.statement;
     }
 
@@ -144,7 +164,7 @@ public class CreateTableStatementAnalyzer extends DefaultTraversalVisitor<Create
     public CreateTableAnalyzedStatement visitPartitionedBy(PartitionedBy node, Context context) {
         for (Expression partitionByColumn : node.columns()) {
             ColumnIdent partitionedByIdent = ColumnIdent.fromPath(
-                    ExpressionToStringVisitor.convert(partitionByColumn, context.analysis.parameterContext().parameters()));
+                ExpressionToStringVisitor.convert(partitionByColumn, context.parameterContext.parameters()));
             context.statement.analyzedTableElements().changeToPartitionedByColumn(partitionedByIdent, false);
             ColumnIdent routing = context.statement.routing();
             if (routing != null && routing.equals(partitionedByIdent)) {

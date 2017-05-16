@@ -22,20 +22,16 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.test.integration.CrateIntegrationTest;
+import io.crate.operation.Paging;
 import io.crate.testing.TestingHelpers;
-import org.hamcrest.core.Is;
-import org.junit.Rule;
+import io.crate.testing.UseJdbc;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
+@UseJdbc
 public class QueryThenFetchIntegrationTest extends SQLTransportIntegrationTest {
-
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
 
     @Test
     public void testCrateSearchServiceSupportsOrderByOnFunctionWithBooleanReturnType() throws Exception {
@@ -46,16 +42,16 @@ public class QueryThenFetchIntegrationTest extends SQLTransportIntegrationTest {
 
         execute("select * from t order by substr(name, 1, 1) = 'M', b");
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-                "1| Trillian\n" +
-                "2| Arthur\n" +
-                "0| Marvin\n" +
-                "3| Max\n"));
+            "1| Trillian\n" +
+            "2| Arthur\n" +
+            "0| Marvin\n" +
+            "3| Max\n"));
     }
 
     @Test
     public void testThatErrorsInSearchResponseCallbackAreNotSwallowed() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage(is("d != java.lang.String"));
+        expectedException.expectMessage(containsString("d != java.lang.String"));
 
         execute("create table t (s string) clustered into 1 shards with (number_of_replicas = 0)");
         ensureYellow();
@@ -79,40 +75,47 @@ public class QueryThenFetchIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testOrderBySortTypes() throws Exception {
-        execute("create table xxx (" +
-                "  b byte," +
-                "  s short," +
-                "  i integer," +
-                "  l long," +
-                "  f float," +
-                "  d double," +
-                "  st string," +
-                "  boo boolean," +
-                "  t timestamp," +
-                "  ipp ip" +
-                ")");
-        ensureYellow();
-        execute("insert into xxx (b, s, i, l, f, d, st, boo, t, ipp) values (?, ?, ?, ?, ?, ?, ? ,?, ?, ?)", new Object[][]{
-                {1, 2, 3, 4L, 1.5f, -0.5d, "hallo", true, "1970-01-01", "127.0.0.1"},
-                {null, null, null, null, null, null, null, null, null, null},
-                {2, 4, 6, 8L, 3.1f, -4.5d, "goodbye", false, "2088-01-01", "10.0.0.1"},
-        });
-        execute("refresh table xxx");
-        execute("select b, s, i, l, f, d, st, boo, t, ipp " +
-                "from xxx " +
-                "order by b, s, i, l, f, d, st, boo, t, ipp");
-        assertThat(TestingHelpers.printedTable(response.rows()), Is.is(
-                "1| 2| 3| 4| 1.5| -0.5| hallo| true| 0| 127.0.0.1\n" +
-                        "2| 4| 6| 8| 3.1| -4.5| goodbye| false| 3723753600000| 10.0.0.1\n" +
-                        "NULL| NULL| NULL| NULL| NULL| NULL| NULL| NULL| NULL| NULL\n"));
+    public void testPushBasedQTF() throws Exception {
+        // use high limit to trigger push based qtf
 
-        execute("select b, s, i, l, f, d, st, boo, t, ipp " +
-                "from xxx " +
-                "order by b desc nulls first, s, i, l, f, d, st, boo, t, ipp");
-        assertThat(TestingHelpers.printedTable(response.rows()), Is.is(
-                "NULL| NULL| NULL| NULL| NULL| NULL| NULL| NULL| NULL| NULL\n" +
-                        "2| 4| 6| 8| 3.1| -4.5| goodbye| false| 3723753600000| 10.0.0.1\n" +
-                        "1| 2| 3| 4| 1.5| -0.5| hallo| true| 0| 127.0.0.1\n"));
+        execute("create table t (x string) with (number_of_replicas = 0)");
+        execute("insert into t (x) values ('a')");
+        execute("refresh table t");
+
+        execute("select * from t limit ?", new Object[]{Paging.PAGE_SIZE + 10000});
+        assertThat(response.rowCount(), is(1L));
+    }
+
+    @Test
+    public void testPushBasedQTFWithPaging() throws Exception {
+        Paging.PAGE_SIZE = 10;
+        // insert more docs than PAGE_SIZE and query at least 2 times of it to trigger push of
+        // at least 2 pages
+        int docCount = (Paging.PAGE_SIZE * 2) + 2;
+
+        Object[][] bulkArgs = new Object[docCount][1];
+        for (int i = 0; i < docCount; i++) {
+            bulkArgs[i][0] = i;
+        }
+
+        execute("create table t (x int) with (number_of_replicas = 0)");
+        ensureYellow();
+        execute("insert into t (x) values (?)", bulkArgs);
+        execute("refresh table t");
+
+        Long limit = (long) (docCount - 1);
+        execute("select * from t limit ?", new Object[]{limit});
+        assertThat(response.rowCount(), is(limit));
+
+        // test if all is fine if we limit more than we have
+        limit += 10;
+        execute("select * from t limit ?", new Object[]{limit});
+        assertThat(response.rowCount(), is((long) docCount));
+
+        // test with sorting
+        execute("select * from t order by x limit ?", new Object[]{limit});
+        assertThat(TestingHelpers.printedTable(response.rows()),
+            is("0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n"));
+        assertThat(response.rowCount(), is((long) docCount));
     }
 }

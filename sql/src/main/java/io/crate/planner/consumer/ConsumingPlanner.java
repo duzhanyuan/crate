@@ -21,55 +21,69 @@
 
 package io.crate.planner.consumer;
 
-import io.crate.analyze.AnalysisMetaData;
+import io.crate.analyze.QuerySpec;
 import io.crate.analyze.relations.AnalyzedRelation;
-import io.crate.analyze.relations.PlannedAnalyzedRelation;
-import io.crate.planner.Plan;
-import io.crate.planner.Planner;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
+import io.crate.analyze.relations.QueriedRelation;
+import io.crate.analyze.symbol.SelectSymbol;
+import io.crate.exceptions.ValidationException;
+import io.crate.metadata.Functions;
+import io.crate.planner.*;
+import io.crate.planner.projection.builder.ProjectionBuilder;
+import org.elasticsearch.cluster.service.ClusterService;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
-@Singleton
 public class ConsumingPlanner {
 
     private final List<Consumer> consumers = new ArrayList<>();
 
-    @Inject
-    public ConsumingPlanner(AnalysisMetaData analysisMetaData) {
-        consumers.add(new NonDistributedGroupByConsumer());
-        consumers.add(new ReduceOnCollectorGroupByConsumer());
-        consumers.add(new DistributedGroupByConsumer());
-        consumers.add(new ESCountConsumer());
-        consumers.add(new GlobalAggregateConsumer());
-        consumers.add(new ESGetConsumer());
-        consumers.add(new QueryThenFetchConsumer());
-        consumers.add(new UpdateConsumer(analysisMetaData));
-        consumers.add(new InsertFromSubQueryConsumer(analysisMetaData));
+    public ConsumingPlanner(ClusterService clusterService, Functions functions, TableStats tableStats) {
+        ProjectionBuilder projectionBuilder = new ProjectionBuilder(functions);
+        consumers.add(new NonDistributedGroupByConsumer(projectionBuilder));
+        consumers.add(new ReduceOnCollectorGroupByConsumer(projectionBuilder));
+        consumers.add(new DistributedGroupByConsumer(projectionBuilder));
+        consumers.add(new CountConsumer());
+        consumers.add(new GlobalAggregateConsumer(projectionBuilder));
         consumers.add(new QueryAndFetchConsumer());
+        consumers.add(new MultiSourceAggregationConsumer(projectionBuilder));
+        consumers.add(new MultiSourceGroupByConsumer(projectionBuilder));
+        consumers.add(new ManyTableConsumer());
+        consumers.add(new NestedLoopConsumer(clusterService, functions, tableStats));
+        consumers.add(new GroupingSubselectConsumer(projectionBuilder));
     }
 
     @Nullable
     public Plan plan(AnalyzedRelation rootRelation, Planner.Context plannerContext) {
-        ConsumerContext consumerContext = new ConsumerContext(rootRelation, plannerContext);
-        for (int i = 0; i < consumers.size(); i++) {
-            Consumer consumer = consumers.get(i);
-            if (consumer.consume(consumerContext.rootRelation(), consumerContext)) {
-                if (consumerContext.rootRelation() instanceof PlannedAnalyzedRelation) {
-                    Plan plan = ((PlannedAnalyzedRelation) consumerContext.rootRelation()).plan();
-                    assert plan != null;
-                    return plan;
-                } else {
-                    i = 0;
-                }
+        ConsumerContext consumerContext = new ConsumerContext(plannerContext);
+        return plan(rootRelation, consumerContext);
+    }
+
+    @Nullable
+    public Plan plan(AnalyzedRelation relation, ConsumerContext consumerContext) {
+        Map<Plan, SelectSymbol> subQueries = getSubQueries(relation, consumerContext);
+        for (Consumer consumer : consumers) {
+            Plan plan = consumer.consume(relation, consumerContext);
+            if (plan != null) {
+                return MultiPhasePlan.createIfNeeded(plan, subQueries);
             }
         }
-        if(consumerContext.validationException() != null){
-            throw consumerContext.validationException();
+        ValidationException validationException = consumerContext.validationException();
+        if (validationException != null) {
+            throw validationException;
         }
         return null;
+    }
+
+    private static Map<Plan, SelectSymbol> getSubQueries(AnalyzedRelation relation, ConsumerContext consumerContext) {
+        if (relation instanceof QueriedRelation) {
+            QuerySpec qs = ((QueriedRelation) relation).querySpec();
+            SubqueryPlanner subqueryPlanner = new SubqueryPlanner(consumerContext.plannerContext());
+            return subqueryPlanner.planSubQueries(qs);
+        }
+        return Collections.emptyMap();
     }
 }

@@ -21,9 +21,10 @@
 
 package io.crate.analyze.relations;
 
+import io.crate.analyze.symbol.Field;
 import io.crate.exceptions.ColumnUnknownException;
 import io.crate.metadata.ColumnIdent;
-import io.crate.planner.symbol.Field;
+import io.crate.metadata.table.Operation;
 import io.crate.sql.tree.QualifiedName;
 
 import javax.annotation.Nullable;
@@ -32,10 +33,10 @@ import java.util.Locale;
 
 /**
  * Resolves QualifiedNames to Fields considering only one AnalyzedRelation
- *
+ * <p>
  * The QualifiedNames must not contain a schema or a table.
  */
-public class NameFieldProvider implements FieldProvider {
+public class NameFieldProvider implements FieldProvider<Field> {
 
     private AnalyzedRelation relation;
 
@@ -43,26 +44,21 @@ public class NameFieldProvider implements FieldProvider {
         this.relation = relation;
     }
 
-    public Field resolveField(QualifiedName qualifiedName, boolean forWrite) {
-        return resolveField(qualifiedName, null, forWrite);
+    public Field resolveField(QualifiedName qualifiedName, Operation operation) {
+        return resolveField(qualifiedName, null, operation);
     }
 
-    public Field resolveField(QualifiedName qualifiedName, @Nullable List<String> path, boolean forWrite) {
+    public Field resolveField(QualifiedName qualifiedName, @Nullable List<String> path, Operation operation) {
         List<String> parts = qualifiedName.getParts();
         ColumnIdent columnIdent = new ColumnIdent(parts.get(parts.size() - 1), path);
-        if(parts.size() != 1){
+        if (parts.size() != 1) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                    "Column reference \"%s\" has too many parts. " +
-                    "A column must not have a schema or a table here.", qualifiedName));
+                "Column reference \"%s\" has too many parts. " +
+                "A column must not have a schema or a table here.", qualifiedName));
         }
 
-        Field field;
-        if(forWrite){
-            field = relation.getWritableField(columnIdent);
-        } else {
-            field = relation.getField(columnIdent);
-        }
-        if(field == null){
+        Field field = relation.getField(columnIdent, operation);
+        if (field == null) {
             throw new ColumnUnknownException(columnIdent.sqlFqn());
         }
         return field;

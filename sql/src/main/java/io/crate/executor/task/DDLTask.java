@@ -21,62 +21,41 @@
 
 package io.crate.executor.task;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.SettableFuture;
 import io.crate.action.sql.DDLStatementDispatcher;
 import io.crate.analyze.AnalyzedStatement;
-import io.crate.executor.TaskResult;
-import io.crate.planner.node.ddl.GenericDDLNode;
-import io.crate.executor.RowCountResult;
+import io.crate.data.BatchConsumer;
+import io.crate.data.Row;
+import io.crate.data.Row1;
 import io.crate.executor.JobTask;
+import io.crate.executor.transport.OneRowActionListener;
 
-import javax.annotation.Nonnull;
-import java.util.List;
+import javax.annotation.Nullable;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 
 public class DDLTask extends JobTask {
 
     private final AnalyzedStatement analyzedStatement;
     private DDLStatementDispatcher ddlStatementDispatcher;
-    private SettableFuture<TaskResult> result = SettableFuture.create();
-    private List<ListenableFuture<TaskResult>> results = ImmutableList.<ListenableFuture<TaskResult>>of(result);
 
-    public DDLTask(UUID jobId, DDLStatementDispatcher ddlStatementDispatcher, GenericDDLNode genericDDLNode) {
+    public DDLTask(UUID jobId, DDLStatementDispatcher ddlStatementDispatcher, AnalyzedStatement analyzedStatement) {
         super(jobId);
         this.ddlStatementDispatcher = ddlStatementDispatcher;
-        analyzedStatement = genericDDLNode.analyzedStatement();
+        this.analyzedStatement = analyzedStatement;
     }
 
     @Override
-    public void start() {
-        ListenableFuture<Long> future = ddlStatementDispatcher.process(analyzedStatement, null);
-        Futures.addCallback(future, new FutureCallback<Long>() {
-            @Override
-            public void onSuccess(Long rowCount) {
-                if (rowCount == null) {
-                    result.set(TaskResult.ROW_COUNT_UNKNOWN);
-                } else {
-                    result.set(new RowCountResult(rowCount));
-                }
-            }
+    public void execute(final BatchConsumer consumer, Row parameters) {
+        CompletableFuture<Long> future = ddlStatementDispatcher.dispatch(analyzedStatement, parameters);
 
+        OneRowActionListener<Long> responseOneRowActionListener = new OneRowActionListener<>(consumer, new Function<Long, Row>() {
+            @Nullable
             @Override
-            public void onFailure(@Nonnull Throwable t) {
-                result.setException(t);
+            public Row apply(@Nullable Long input) {
+                return new Row1(input == null ? -1 : input);
             }
         });
-    }
-
-    @Override
-    public List<ListenableFuture<TaskResult>> result() {
-        return results;
-    }
-
-    @Override
-    public void upstreamResult(List<ListenableFuture<TaskResult>> result) {
-        throw new UnsupportedOperationException("DDLTask doesn't support upstreamResults");
+        future.whenComplete(responseOneRowActionListener);
     }
 }

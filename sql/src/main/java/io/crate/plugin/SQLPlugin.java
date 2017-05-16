@@ -22,173 +22,159 @@
 package io.crate.plugin;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.Constants;
-import io.crate.action.sql.SQLAction;
-import io.crate.action.sql.SQLBulkAction;
-import io.crate.action.sql.TransportSQLAction;
-import io.crate.action.sql.TransportSQLBulkAction;
+import io.crate.action.sql.SQLOperations;
+import io.crate.analyze.repositories.RepositorySettingsModule;
 import io.crate.breaker.CircuitBreakerModule;
-import io.crate.breaker.CrateCircuitBreakerService;
+import io.crate.cluster.gracefulstop.DecommissionAllocationDecider;
+import io.crate.cluster.gracefulstop.DecommissioningService;
 import io.crate.executor.transport.TransportExecutorModule;
+import io.crate.jobs.JobContextService;
+import io.crate.jobs.JobModule;
+import io.crate.jobs.transport.NodeDisconnectJobMonitorService;
+import io.crate.lucene.ArrayMapperModule;
 import io.crate.metadata.MetaDataModule;
+import io.crate.metadata.Schemas;
 import io.crate.metadata.blob.MetaDataBlobModule;
-import io.crate.metadata.doc.MetaDataDocModule;
-import io.crate.metadata.doc.array.ArrayMapperIndexModule;
 import io.crate.metadata.information.MetaDataInformationModule;
+import io.crate.metadata.pg_catalog.PgCatalogModule;
+import io.crate.metadata.settings.AnalyzerSettings;
 import io.crate.metadata.settings.CrateSettings;
-import io.crate.metadata.settings.Setting;
-import io.crate.metadata.shard.MetaDataShardModule;
 import io.crate.metadata.sys.MetaDataSysModule;
+import io.crate.monitor.MonitorModule;
 import io.crate.operation.aggregation.impl.AggregationImplModule;
-import io.crate.operation.collect.CollectContextService;
+import io.crate.operation.auth.AuthenticationProvider;
 import io.crate.operation.collect.CollectOperationModule;
-import io.crate.operation.collect.CollectShardModule;
-import io.crate.operation.merge.MergeOperationModule;
+import io.crate.operation.collect.files.FileCollectModule;
 import io.crate.operation.operator.OperatorModule;
 import io.crate.operation.predicate.PredicateModule;
+import io.crate.operation.reference.sys.check.SysChecksModule;
+import io.crate.operation.reference.sys.check.node.SysNodeChecksModule;
 import io.crate.operation.reference.sys.cluster.SysClusterExpressionModule;
-import io.crate.operation.reference.sys.node.SysNodeExpressionModule;
-import io.crate.operation.reference.sys.shard.SysShardExpressionModule;
-import io.crate.operation.reference.sys.shard.blob.BlobShardExpressionModule;
+import io.crate.operation.reference.sys.node.local.SysNodeExpressionModule;
 import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.operation.scalar.elasticsearch.script.NumericScalarSearchScript;
-import io.crate.operation.scalar.elasticsearch.script.NumericScalarSortScript;
-import io.crate.planner.PlanModule;
+import io.crate.operation.tablefunctions.TableFunctionModule;
+import io.crate.protocols.postgres.PostgresNetty;
 import io.crate.rest.action.RestSQLAction;
-import io.crate.service.SQLService;
-import org.elasticsearch.action.ActionModule;
+import io.crate.settings.CrateSetting;
 import org.elasticsearch.action.bulk.BulkModule;
 import org.elasticsearch.action.bulk.BulkRetryCoordinatorPool;
-import org.elasticsearch.cluster.settings.ClusterDynamicSettingsModule;
-import org.elasticsearch.cluster.settings.Validator;
+import org.elasticsearch.cluster.routing.allocation.decider.AllocationDecider;
 import org.elasticsearch.common.component.LifecycleComponent;
 import org.elasticsearch.common.inject.Module;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.common.settings.ClusterSettings;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.plugins.AbstractPlugin;
-import org.elasticsearch.rest.RestModule;
-import org.elasticsearch.script.ScriptModule;
+import org.elasticsearch.index.mapper.ArrayMapper;
+import org.elasticsearch.index.mapper.ArrayTypeParser;
+import org.elasticsearch.index.mapper.Mapper;
+import org.elasticsearch.plugins.ActionPlugin;
+import org.elasticsearch.plugins.ClusterPlugin;
+import org.elasticsearch.plugins.MapperPlugin;
+import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.rest.RestHandler;
 
-import java.util.Collection;
-import java.util.List;
+import java.util.*;
 
 import static com.google.common.collect.Lists.newArrayList;
 
-public class SQLPlugin extends AbstractPlugin {
+public class SQLPlugin extends Plugin implements ActionPlugin, MapperPlugin, ClusterPlugin {
 
     private final Settings settings;
 
+    @SuppressWarnings("WeakerAccess") // must be public for pluginLoader
     public SQLPlugin(Settings settings) {
         this.settings = settings;
     }
 
     @Override
     public Settings additionalSettings() {
-        ImmutableSettings.Builder settingsBuilder = ImmutableSettings.settingsBuilder();
+        Settings.Builder settingsBuilder = Settings.builder();
 
-        // Set default analyzer
-        settingsBuilder.put("index.analysis.analyzer.default.type", "keyword");
+        // Never allow implicit creation of an index, even on partitioned tables we are creating
+        // partitions explicitly
+        settingsBuilder.put("action.auto_create_index", false);
 
         return settingsBuilder.build();
     }
 
-    public String name() {
-        return "sql";
-    }
-
-    public String description() {
-        return "plugin that adds an /_sql endpoint to query crate with sql";
-    }
-
     @Override
-    public Collection<Class<? extends LifecycleComponent>> services() {
-        return ImmutableList.<Class<? extends LifecycleComponent>>of(
-                SQLService.class,
-                CollectContextService.class,
-                BulkRetryCoordinatorPool.class
-        );
-    }
+    public List<Setting<?>> getSettings() {
+        List<Setting<?>> settings = new ArrayList<>();
+        settings.add(AnalyzerSettings.CUSTOM_ANALYSIS_SETTING_GROUP);
+        settings.add(SQLOperations.NODE_READ_ONLY_SETTING);
+        settings.add(MonitorModule.NODE_INFO_EXTENDED_TYPE_SETTING);
 
-    @Override
-    public Collection<Class<? extends Module>> modules() {
-        Collection<Class<? extends Module>> modules = newArrayList();
-        if (!settings.getAsBoolean("node.client", false)) {
-            modules.add(SQLModule.class);
+        // Postgres settings are node settings
+        settings.add(PostgresNetty.PSQL_ENABLED_SETTING.setting());
+        settings.add(PostgresNetty.PSQL_PORT_SETTING.setting());
 
-            modules.add(CircuitBreakerModule.class);
-            modules.add(TransportExecutorModule.class);
-            modules.add(CollectOperationModule.class);
-            modules.add(MergeOperationModule.class);
-            modules.add(MetaDataModule.class);
-            modules.add(MetaDataSysModule.class);
-            modules.add(MetaDataDocModule.class);
-            modules.add(MetaDataBlobModule.class);
-            modules.add(MetaDataInformationModule.class);
-            modules.add(OperatorModule.class);
-            modules.add(PredicateModule.class);
-            modules.add(SysClusterExpressionModule.class);
-            modules.add(SysNodeExpressionModule.class);
-            modules.add(AggregationImplModule.class);
-            modules.add(ScalarFunctionModule.class);
-            modules.add(PlanModule.class);
-            modules.add(BulkModule.class);
+        // Authentication settings are node settings
+        settings.add(AuthenticationProvider.AUTH_HOST_BASED_ENABLED_SETTING.setting());
+        settings.add(AuthenticationProvider.AUTH_HOST_BASED_CONFIG_SETTING.setting());
+        settings.add(AuthenticationProvider.AUTH_TRUST_HTTP_DEFAULT_HEADER.setting());
+
+        // also add CrateSettings
+        for (CrateSetting crateSetting : CrateSettings.CRATE_CLUSTER_SETTINGS) {
+            settings.add(crateSetting.setting());
         }
+
+        return settings;
+    }
+
+    @Override
+    public Collection<Class<? extends LifecycleComponent>> getGuiceServiceClasses() {
+        return ImmutableList.of(
+            DecommissioningService.class,
+            BulkRetryCoordinatorPool.class,
+            NodeDisconnectJobMonitorService.class,
+            PostgresNetty.class,
+            JobContextService.class,
+            Schemas.class);
+    }
+
+    @Override
+    public Collection<Module> createGuiceModules() {
+        Collection<Module> modules = newArrayList();
+        modules.add(new SQLModule());
+
+        modules.add(new CircuitBreakerModule());
+        modules.add(new TransportExecutorModule());
+        modules.add(new JobModule());
+        modules.add(new CollectOperationModule());
+        modules.add(new FileCollectModule());
+        modules.add(new MetaDataModule());
+        modules.add(new MetaDataSysModule());
+        modules.add(new MetaDataBlobModule());
+        modules.add(new PgCatalogModule());
+        modules.add(new MetaDataInformationModule());
+        modules.add(new OperatorModule());
+        modules.add(new PredicateModule());
+        modules.add(new MonitorModule(settings));
+        modules.add(new SysClusterExpressionModule());
+        modules.add(new SysNodeExpressionModule());
+        modules.add(new AggregationImplModule());
+        modules.add(new ScalarFunctionModule());
+        modules.add(new TableFunctionModule());
+        modules.add(new BulkModule());
+        modules.add(new SysChecksModule());
+        modules.add(new SysNodeChecksModule());
+        modules.add(new RepositorySettingsModule());
+        modules.add(new ArrayMapperModule());
         return modules;
     }
 
-
     @Override
-    public Collection<Class<? extends Module>> indexModules() {
-        Collection<Class<? extends Module>> modules = newArrayList();
-        if (!settings.getAsBoolean("node.client", false)) {
-            modules.add(ArrayMapperIndexModule.class);
-        }
-        return modules;
+    public List<Class<? extends RestHandler>> getRestHandlers() {
+        return Collections.singletonList(RestSQLAction.class);
     }
 
     @Override
-    public Collection<Class<? extends Module>> shardModules() {
-        Collection<Class<? extends Module>> modules = newArrayList();
-        if (!settings.getAsBoolean("node.client", false)) {
-            modules.add(MetaDataShardModule.class);
-            modules.add(SysShardExpressionModule.class);
-            modules.add(BlobShardExpressionModule.class);
-            modules.add(CollectShardModule.class);
-        }
-        return modules;
+    public Map<String, Mapper.TypeParser> getMappers() {
+        return Collections.singletonMap(ArrayMapper.CONTENT_TYPE, new ArrayTypeParser());
     }
 
-    public void onModule(RestModule restModule) {
-        restModule.addRestAction(RestSQLAction.class);
-    }
-
-    public void onModule(ClusterDynamicSettingsModule clusterDynamicSettingsModule) {
-        // add our dynamic cluster settings
-        clusterDynamicSettingsModule.addDynamicSettings(Constants.CUSTOM_ANALYSIS_SETTINGS_PREFIX + "*");
-        clusterDynamicSettingsModule.addDynamicSettings(CrateCircuitBreakerService.QUERY_CIRCUIT_BREAKER_LIMIT_SETTING);
-        clusterDynamicSettingsModule.addDynamicSettings(CrateCircuitBreakerService.QUERY_CIRCUIT_BREAKER_OVERHEAD_SETTING);
-        registerSettings(clusterDynamicSettingsModule, CrateSettings.CRATE_SETTINGS);
-    }
-
-    private void registerSettings(ClusterDynamicSettingsModule clusterDynamicSettingsModule, List<Setting> settings) {
-        for (Setting setting : settings) {
-            /**
-             * validation is done in
-             * {@link io.crate.analyze.SettingsAppliers.AbstractSettingsApplier#apply(org.elasticsearch.common.settings.ImmutableSettings.Builder, Object[], io.crate.sql.tree.Expression)}
-             * here we use Validator.EMPTY, since ES ignores invalid settings silently
-             */
-            clusterDynamicSettingsModule.addDynamicSetting(setting.settingName(), Validator.EMPTY);
-            registerSettings(clusterDynamicSettingsModule, setting.children());
-        }
-    }
-
-    public void onModule(ScriptModule scriptModule) {
-        NumericScalarSearchScript.register(scriptModule);
-        NumericScalarSortScript.register(scriptModule);
-    }
-
-    public void onModule(ActionModule actionModule) {
-        actionModule.registerAction(SQLAction.INSTANCE, TransportSQLAction.class);
-        actionModule.registerAction(SQLBulkAction.INSTANCE, TransportSQLBulkAction.class);
+    @Override
+    public Collection<AllocationDecider> createAllocationDeciders(Settings settings, ClusterSettings clusterSettings) {
+        return ImmutableList.of(new DecommissionAllocationDecider(settings, clusterSettings));
     }
 }

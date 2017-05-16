@@ -21,16 +21,15 @@
 
 package io.crate.sql.tree;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
-import com.google.common.base.Optional;
 
 import java.util.List;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
-public class Query
-        extends Statement
-{
+public class Query extends Statement {
     private final Optional<With> with;
     private final QueryBody queryBody;
     private final List<SortItem> orderBy;
@@ -38,12 +37,11 @@ public class Query
     private final Optional<Expression> offset;
 
     public Query(
-            Optional<With> with,
-            QueryBody queryBody,
-            List<SortItem> orderBy,
-            Optional<Expression> limit,
-            Optional<Expression> offset)
-    {
+        Optional<With> with,
+        QueryBody queryBody,
+        List<SortItem> orderBy,
+        Optional<Expression> limit,
+        Optional<Expression> offset) {
         checkNotNull(with, "with is null");
         checkNotNull(queryBody, "queryBody is null");
         checkNotNull(orderBy, "orderBy is null");
@@ -57,53 +55,45 @@ public class Query
         this.offset = offset;
     }
 
-    public Optional<With> getWith()
-    {
+    public Optional<With> getWith() {
         return with;
     }
 
-    public QueryBody getQueryBody()
-    {
+    public QueryBody getQueryBody() {
         return queryBody;
     }
 
-    public List<SortItem> getOrderBy()
-    {
+    public List<SortItem> getOrderBy() {
         return orderBy;
     }
 
-    public Optional<Expression> getLimit()
-    {
+    public Optional<Expression> getLimit() {
         return limit;
     }
 
-    public Optional<Expression> getOffset()
-    {
+    public Optional<Expression> getOffset() {
         return offset;
     }
 
     @Override
-    public <R, C> R accept(AstVisitor<R, C> visitor, C context)
-    {
+    public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitQuery(this, context);
     }
 
     @Override
-    public String toString()
-    {
-        return Objects.toStringHelper(this)
-                .add("with", with.orNull())
-                .add("queryBody", queryBody)
-                .add("orderBy", orderBy)
-                .add("limit", limit.orNull())
-                .add("offset", offset.orNull())
-                .omitNullValues()
-                .toString();
+    public String toString() {
+        return MoreObjects.toStringHelper(this)
+            .add("with", with)
+            .add("queryBody", queryBody)
+            .add("orderBy", orderBy)
+            .add("limit", limit)
+            .add("offset", offset)
+            .omitNullValues()
+            .toString();
     }
 
     @Override
-    public boolean equals(Object obj)
-    {
+    public boolean equals(Object obj) {
         if (this == obj) {
             return true;
         }
@@ -112,15 +102,14 @@ public class Query
         }
         Query o = (Query) obj;
         return Objects.equal(with, o.with) &&
-                Objects.equal(queryBody, o.queryBody) &&
-                Objects.equal(orderBy, o.orderBy) &&
-                Objects.equal(limit, o.limit) &&
-                Objects.equal(offset, o.offset);
+               Objects.equal(queryBody, o.queryBody) &&
+               Objects.equal(orderBy, o.orderBy) &&
+               Objects.equal(limit, o.limit) &&
+               Objects.equal(offset, o.offset);
     }
 
     @Override
-    public int hashCode()
-    {
+    public int hashCode() {
         return Objects.hashCode(with, queryBody, orderBy, limit, offset);
     }
 }

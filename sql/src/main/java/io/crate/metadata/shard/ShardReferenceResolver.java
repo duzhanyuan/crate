@@ -22,86 +22,93 @@
 package io.crate.metadata.shard;
 
 import com.google.common.collect.ImmutableMap;
-import io.crate.metadata.PartitionName;
+import io.crate.exceptions.ResourceUnknownException;
 import io.crate.exceptions.UnhandledServerException;
 import io.crate.metadata.*;
-import io.crate.metadata.doc.DocSchemaInfo;
 import io.crate.metadata.doc.DocTableInfo;
-import io.crate.metadata.doc.DocTableInfoBuilder;
+import io.crate.metadata.sys.SysShardsTableInfo;
+import io.crate.operation.reference.ReferenceResolver;
 import io.crate.operation.reference.partitioned.PartitionedColumnExpression;
-import org.elasticsearch.action.admin.indices.template.put.TransportPutIndexTemplateAction;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.logging.ESLogger;
+import io.crate.operation.reference.sys.shard.*;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.index.Index;
+import org.elasticsearch.index.shard.IndexShard;
+import org.elasticsearch.index.shard.ShardId;
 
 import java.util.Locale;
-import java.util.Map;
 
-public class ShardReferenceResolver extends AbstractReferenceResolver {
+public class ShardReferenceResolver {
 
-    private final Map<ReferenceIdent, ReferenceImplementation> implementations;
-    private static final ESLogger logger = Loggers.getLogger(ShardReferenceResolver.class);
+    private static final Logger LOGGER = Loggers.getLogger(ShardReferenceResolver.class);
 
-    @Inject
-    public ShardReferenceResolver(Index index,
-                                  DocSchemaInfo docSchemaInfo,
-                                  ClusterService clusterService,
-                                  final TransportPutIndexTemplateAction transportPutIndexTemplateAction,
-                                  final Map<ReferenceIdent, ReferenceImplementation> globalImplementations,
-                                  final Map<ReferenceIdent, ShardReferenceImplementation> shardImplementations) {
+    public static ReferenceResolver<ReferenceImplementation<?>> create(ClusterService clusterService,
+                                                                       Schemas schemas,
+                                                                       IndexShard indexShard) {
+        ShardId shardId = indexShard.shardId();
+        Index index = shardId.getIndex();
+
         ImmutableMap.Builder<ReferenceIdent, ReferenceImplementation> builder = ImmutableMap.builder();
-                builder.putAll(globalImplementations)
-                .putAll(shardImplementations);
+        if (PartitionName.isPartition(index.getName())) {
+            addPartitions(index, schemas, builder);
+        }
+        builder.put(SysShardsTableInfo.ReferenceIdents.ID, new LiteralReferenceImplementation<>(shardId.getId()));
+        builder.put(SysShardsTableInfo.ReferenceIdents.SIZE, new ShardSizeExpression(indexShard));
+        builder.put(SysShardsTableInfo.ReferenceIdents.NUM_DOCS, new ShardNumDocsExpression(indexShard));
+        builder.put(SysShardsTableInfo.ReferenceIdents.PRIMARY, new ShardPrimaryExpression(indexShard));
+        builder.put(SysShardsTableInfo.ReferenceIdents.RELOCATING_NODE,
+            new ShardRelocatingNodeExpression(indexShard));
+        builder.put(SysShardsTableInfo.ReferenceIdents.SCHEMA_NAME,
+            new ShardSchemaNameExpression(shardId));
+        builder.put(SysShardsTableInfo.ReferenceIdents.STATE, new ShardStateExpression(indexShard));
+        builder.put(SysShardsTableInfo.ReferenceIdents.ROUTING_STATE, new ShardRoutingStateExpression(indexShard));
+        builder.put(SysShardsTableInfo.ReferenceIdents.TABLE_NAME, new ShardTableNameExpression(shardId));
+        builder.put(SysShardsTableInfo.ReferenceIdents.PARTITION_IDENT,
+            new ShardPartitionIdentExpression(shardId));
+        builder.put(SysShardsTableInfo.ReferenceIdents.ORPHAN_PARTITION,
+            new ShardPartitionOrphanedExpression(shardId, clusterService));
+        builder.put(SysShardsTableInfo.ReferenceIdents.PATH, new ShardPathExpression(indexShard));
+        builder.put(SysShardsTableInfo.ReferenceIdents.BLOB_PATH, new LiteralReferenceImplementation<>(null));
+        builder.put(SysShardsTableInfo.ReferenceIdents.MIN_LUCENE_VERSION,
+            new ShardMinLuceneVersionExpression(indexShard));
+        builder.put(SysShardsTableInfo.ReferenceIdents.RECOVERY, new ShardRecoveryExpression(indexShard));
 
-        if (PartitionName.isPartition(index.name())) {
-            TableIdent tableIdent = new TableIdent(PartitionName.schemaName(index.name()), PartitionName.tableName(index.name()));
-            // check if alias exists
-            if (clusterService.state().metaData().hasConcreteIndex(tableIdent.esName())) {
-                // get DocTableInfo for virtual partitioned table
-                DocTableInfo info = new DocTableInfoBuilder(
-                        docSchemaInfo,
-                        tableIdent,
-                        clusterService, transportPutIndexTemplateAction, true).build();
-                assert info.isPartitioned();
+        return new MapBackedRefResolver(builder.build());
+    }
+
+    private static void addPartitions(Index index,
+                               Schemas schemas,
+                               ImmutableMap.Builder<ReferenceIdent, ReferenceImplementation> builder) {
+        PartitionName partitionName;
+        try {
+            partitionName = PartitionName.fromIndexOrTemplate(index.getName());
+        } catch (IllegalArgumentException e) {
+            throw new UnhandledServerException(String.format(Locale.ENGLISH,
+                "Unable to load PARTITIONED BY columns from partition %s", index.getName()), e);
+        }
+        TableIdent tableIdent = partitionName.tableIdent();
+        try {
+            DocTableInfo info = schemas.getTableInfo(tableIdent, null);
+            if (!schemas.isOrphanedAlias(info)) {
+                assert info.isPartitioned() : "table must be partitioned";
                 int i = 0;
                 int numPartitionedColumns = info.partitionedByColumns().size();
 
-                PartitionName partitionName;
-                try {
-                    partitionName = PartitionName.fromString(
-                            index.name(),
-                            tableIdent.schema(),
-                            tableIdent.name());
-                } catch (IllegalArgumentException e) {
-                    throw new UnhandledServerException(
-                            String.format(Locale.ENGLISH,
-                                    "Unable to load PARTITIONED BY columns from partition %s",
-                                    index.name()),
-                            e
-                    );
-                }
-                assert partitionName.values().size() == numPartitionedColumns : "invalid number of partitioned columns";
-                for (ReferenceInfo partitionedInfo : info.partitionedByColumns()) {
+                assert partitionName.values().size() ==
+                       numPartitionedColumns : "invalid number of partitioned columns";
+                for (Reference partitionedInfo : info.partitionedByColumns()) {
                     builder.put(partitionedInfo.ident(), new PartitionedColumnExpression(
-                            partitionedInfo,
-                            partitionName.values().get(i)
+                        partitionedInfo,
+                        partitionName.values().get(i)
                     ));
                     i++;
                 }
             } else {
-                logger.error("Orphaned partition '{}' with missing table '{}' found",
-                        index, tableIdent.fqn());
+                LOGGER.error("Orphaned partition '{}' with missing table '{}' found", index, tableIdent.fqn());
             }
+        } catch (ResourceUnknownException e) {
+            LOGGER.error("Orphaned partition '{}' with missing table '{}' found", index, tableIdent.fqn());
         }
-        this.implementations = builder.build();
-
     }
-
-    @Override
-    protected Map<ReferenceIdent, ReferenceImplementation> implementations() {
-        return implementations;
-    }
-
 }

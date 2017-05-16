@@ -23,11 +23,11 @@ package io.crate.planner.projection;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.Symbols;
+import io.crate.analyze.symbol.Value;
 import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.TableIdent;
-import io.crate.planner.symbol.InputColumn;
-import io.crate.planner.symbol.Symbol;
-import io.crate.planner.symbol.Value;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -41,7 +41,7 @@ import java.util.List;
 public abstract class AbstractIndexWriterProjection extends Projection {
 
     protected final static List<Symbol> OUTPUTS = ImmutableList.<Symbol>of(
-            new Value(DataTypes.LONG)  // number of rows imported
+        new Value(DataTypes.LONG)  // number of rows imported
     );
 
     protected final static String BULK_SIZE = "bulk_size";
@@ -51,15 +51,18 @@ public abstract class AbstractIndexWriterProjection extends Projection {
     protected TableIdent tableIdent;
     protected String partitionIdent;
     protected List<ColumnIdent> primaryKeys;
-    protected @Nullable ColumnIdent clusteredByColumn;
+    protected
+    @Nullable
+    ColumnIdent clusteredByColumn;
 
     protected List<Symbol> idSymbols;
     protected List<Symbol> partitionedBySymbols;
-    protected @Nullable Symbol clusteredBySymbol;
+    protected
+    @Nullable
+    Symbol clusteredBySymbol;
 
     protected boolean autoCreateIndices;
 
-    protected AbstractIndexWriterProjection() {}
 
     protected AbstractIndexWriterProjection(TableIdent tableIdent,
                                             @Nullable String partitionIdent,
@@ -77,7 +80,33 @@ public abstract class AbstractIndexWriterProjection extends Projection {
         Preconditions.checkArgument(bulkActions > 0, "\"bulk_size\" must be greater than 0.");
     }
 
-    public List<Symbol> ids() {
+    protected AbstractIndexWriterProjection(StreamInput in) throws IOException {
+        tableIdent = new TableIdent(in);
+
+        partitionIdent = in.readOptionalString();
+        idSymbols = Symbols.listFromStream(in);
+
+        int numPks = in.readVInt();
+        primaryKeys = new ArrayList<>(numPks);
+        for (int i = 0; i < numPks; i++) {
+            primaryKeys.add(new ColumnIdent(in));
+        }
+
+        partitionedBySymbols = Symbols.listFromStream(in);
+        if (in.readBoolean()) {
+            clusteredBySymbol = Symbols.fromStream(in);
+        } else {
+            clusteredBySymbol = null;
+        }
+        if (in.readBoolean()) {
+            clusteredByColumn = new ColumnIdent(in);
+        }
+        bulkActions = in.readVInt();
+        autoCreateIndices = in.readBoolean();
+    }
+
+
+    public List<? extends Symbol> ids() {
         return idSymbols;
     }
 
@@ -97,27 +126,6 @@ public abstract class AbstractIndexWriterProjection extends Projection {
 
     public boolean autoCreateIndices() {
         return autoCreateIndices;
-    }
-
-    /**
-     * generate Symbols needed for projection
-
-     */
-    protected void generateSymbols(int[] primaryKeyIndices,
-                                   int[] partitionedByIndices,
-                                   int clusteredByIdx) {
-        this.idSymbols = new ArrayList<>(primaryKeys.size());
-        for (int primaryKeyIndex : primaryKeyIndices) {
-            idSymbols.add(new InputColumn(primaryKeyIndex, null));
-        }
-
-        this.partitionedBySymbols = new ArrayList<>(partitionedByIndices.length);
-        for (int partitionByIndex : partitionedByIndices) {
-            partitionedBySymbols.add(new InputColumn(partitionByIndex, null));
-        }
-        if (clusteredByIdx >= 0) {
-            clusteredBySymbol = new InputColumn(clusteredByIdx, null);
-        }
     }
 
     public List<ColumnIdent> primaryKeys() {
@@ -143,44 +151,6 @@ public abstract class AbstractIndexWriterProjection extends Projection {
     }
 
     @Override
-    public void readFrom(StreamInput in) throws IOException {
-        tableIdent = TableIdent.fromStream(in);
-
-        partitionIdent = in.readOptionalString();
-        int numIdSymbols = in.readVInt();
-        idSymbols = new ArrayList<>(numIdSymbols);
-        for (int i = 0; i < numIdSymbols; i++) {
-            idSymbols.add(Symbol.fromStream(in));
-        }
-
-        int numPks = in.readVInt();
-        primaryKeys = new ArrayList<>(numPks);
-        for (int i = 0; i < numPks; i++) {
-            ColumnIdent ident = new ColumnIdent();
-            ident.readFrom(in);
-            primaryKeys.add(ident);
-        }
-
-        int numPartitionedSymbols = in.readVInt();
-        partitionedBySymbols = new ArrayList<>(numPartitionedSymbols);
-        for (int i = 0; i < numPartitionedSymbols; i++) {
-            partitionedBySymbols.add(Symbol.fromStream(in));
-        }
-        if (in.readBoolean()) {
-            clusteredBySymbol = Symbol.fromStream(in);
-        } else {
-            clusteredBySymbol = null;
-        }
-        if (in.readBoolean()) {
-            ColumnIdent ident = new ColumnIdent();
-            ident.readFrom(in);
-            clusteredByColumn = ident;
-        }
-        bulkActions = in.readVInt();
-        autoCreateIndices = in.readBoolean();
-    }
-
-    @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (!(o instanceof AbstractIndexWriterProjection)) return false;
@@ -189,9 +159,11 @@ public abstract class AbstractIndexWriterProjection extends Projection {
 
         if (autoCreateIndices != that.autoCreateIndices) return false;
         if (!bulkActions.equals(that.bulkActions)) return false;
-        if (clusteredByColumn != null ? !clusteredByColumn.equals(that.clusteredByColumn) : that.clusteredByColumn != null)
+        if (clusteredByColumn != null ? !clusteredByColumn.equals(that.clusteredByColumn) :
+            that.clusteredByColumn != null)
             return false;
-        if (clusteredBySymbol != null ? !clusteredBySymbol.equals(that.clusteredBySymbol) : that.clusteredBySymbol != null)
+        if (clusteredBySymbol != null ? !clusteredBySymbol.equals(that.clusteredBySymbol) :
+            that.clusteredBySymbol != null)
             return false;
         if (!idSymbols.equals(that.idSymbols)) return false;
         if (!partitionedBySymbols.equals(that.partitionedBySymbols))
@@ -224,23 +196,17 @@ public abstract class AbstractIndexWriterProjection extends Projection {
         tableIdent.writeTo(out);
         out.writeOptionalString(partitionIdent);
 
-        out.writeVInt(idSymbols.size());
-        for (Symbol idSymbol : idSymbols) {
-            Symbol.toStream(idSymbol, out);
-        }
+        Symbols.toStream(idSymbols, out);
         out.writeVInt(primaryKeys.size());
         for (ColumnIdent primaryKey : primaryKeys) {
             primaryKey.writeTo(out);
         }
-        out.writeVInt(partitionedBySymbols.size());
-        for (Symbol partitionedSymbol : partitionedBySymbols) {
-            Symbol.toStream(partitionedSymbol, out);
-        }
+        Symbols.toStream(partitionedBySymbols, out);
         if (clusteredBySymbol == null) {
             out.writeBoolean(false);
         } else {
             out.writeBoolean(true);
-            Symbol.toStream(clusteredBySymbol, out);
+            Symbols.toStream(clusteredBySymbol, out);
         }
 
         if (clusteredByColumn == null) {

@@ -21,11 +21,11 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.Objects;
-import com.google.common.base.Optional;
+import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
+import java.util.Optional;
 
 public class AlterTable extends Statement {
 
@@ -42,7 +42,7 @@ public class AlterTable extends Statement {
     public AlterTable(Table table, List<String> resetProperties) {
         this.table = table;
         this.resetProperties = resetProperties;
-        this.genericProperties = Optional.absent();
+        this.genericProperties = Optional.empty();
     }
 
     @Override
@@ -64,9 +64,9 @@ public class AlterTable extends Statement {
 
     @Override
     public String toString() {
-        return Objects.toStringHelper(this)
-                .add("table", table)
-                .add("properties", genericProperties).toString();
+        return MoreObjects.toStringHelper(this)
+            .add("table", table)
+            .add("properties", genericProperties).toString();
     }
 
     @Override

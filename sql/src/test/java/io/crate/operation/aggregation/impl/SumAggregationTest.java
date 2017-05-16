@@ -22,13 +22,10 @@
 package io.crate.operation.aggregation.impl;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.metadata.FunctionIdent;
 import io.crate.operation.aggregation.AggregationTest;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.junit.Test;
-
-import static org.junit.Assert.assertEquals;
 
 public class SumAggregationTest extends AggregationTest {
 
@@ -38,9 +35,8 @@ public class SumAggregationTest extends AggregationTest {
 
     @Test
     public void testReturnType() throws Exception {
-        FunctionIdent fi = new FunctionIdent("sum", ImmutableList.<DataType>of(DataTypes.INTEGER));
         // Return type is fixed to Double
-        assertEquals(DataTypes.DOUBLE, functions.get(fi).info().returnType());
+        assertEquals(DataTypes.DOUBLE, functions.getBuiltin("sum", ImmutableList.of(DataTypes.INTEGER)).info().returnType());
     }
 
     @Test

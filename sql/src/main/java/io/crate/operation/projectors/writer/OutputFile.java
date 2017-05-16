@@ -21,8 +21,8 @@
 
 package io.crate.operation.projectors.writer;
 
-import org.elasticsearch.common.Preconditions;
-import org.elasticsearch.common.settings.Settings;
+import com.google.common.base.Preconditions;
+import io.crate.planner.projection.WriterProjection;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -34,44 +34,31 @@ import java.util.zip.GZIPOutputStream;
 public class OutputFile extends Output {
 
     private final String path;
-    private OutputStream os;
     private final boolean overwrite;
     private final boolean compression;
 
-    public OutputFile(URI uri, Settings settings) {
+    public OutputFile(URI uri, WriterProjection.CompressionType compressionType) {
         Preconditions.checkArgument(uri.getHost() == null);
         this.path = uri.getPath();
-        compression = parseCompression(settings);
+        compression = compressionType != null;
         this.overwrite = true;
     }
 
     @Override
-    public void open() throws IOException {
+    public OutputStream acquireOutputStream() throws IOException {
         File outFile = new File(path);
-        if (outFile.exists()){
-            if (!overwrite){
+        if (outFile.exists()) {
+            if (!overwrite) {
                 throw new IOException("File exists: " + path);
             }
-            if (outFile.isDirectory()){
+            if (outFile.isDirectory()) {
                 throw new IOException("Output path is a directory: " + path);
             }
         }
-        os = new FileOutputStream(outFile);
+        OutputStream os = new FileOutputStream(outFile);
         if (compression) {
             os = new GZIPOutputStream(os);
         }
-    }
-
-    @Override
-    public void close() throws IOException {
-        if (os != null) { // if open failed os is null here
-            os.close();
-            os = null;
-        }
-    }
-
-    @Override
-    public OutputStream getOutputStream() {
         return os;
     }
 }

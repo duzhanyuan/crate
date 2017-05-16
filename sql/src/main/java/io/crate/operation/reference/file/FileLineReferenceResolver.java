@@ -22,45 +22,31 @@
 package io.crate.operation.reference.file;
 
 import com.google.common.collect.ImmutableMap;
-import io.crate.metadata.ReferenceInfo;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.Reference;
 import io.crate.operation.collect.files.LineCollectorExpression;
-import io.crate.operation.reference.DocLevelReferenceResolver;
 
 import java.util.Map;
+import java.util.function.Supplier;
 
-public class FileLineReferenceResolver implements DocLevelReferenceResolver<LineCollectorExpression<?>> {
-
-    public static final FileLineReferenceResolver INSTANCE = new FileLineReferenceResolver();
+public final class FileLineReferenceResolver {
 
     // need to create a new instance here so that each collector will have its own instance.
     // otherwise multiple collectors would share the same state.
-    private static final Map<String, ExpressionBuilder> expressionBuilder =
-            ImmutableMap.of(
-                    SourceLineExpression.COLUMN_NAME, new ExpressionBuilder() {
-                        @Override
-                        public LineCollectorExpression<?> create() {
-                            return new SourceLineExpression();
-                        }
-                    },
-                    SourceAsMapLineExpression.COLUMN_NAME, new ExpressionBuilder() {
-                        @Override
-                        public LineCollectorExpression<?> create() {
-                            return new SourceAsMapLineExpression();
-                        }
-                    });
+    private static final Map<String, Supplier<LineCollectorExpression<?>>> EXPRESSION_BUILDER =
+        ImmutableMap.of(
+            SourceLineExpression.COLUMN_NAME, SourceLineExpression::new,
+            SourceAsMapLineExpression.COLUMN_NAME, SourceAsMapLineExpression::new);
+
     private FileLineReferenceResolver() {
     }
 
-    public LineCollectorExpression<?> getImplementation(ReferenceInfo info) {
-        ExpressionBuilder builder = expressionBuilder.get(info.ident().columnIdent().name());
-        if (builder != null) {
-            return builder.create();
+    public static LineCollectorExpression<?> getImplementation(Reference refInfo) {
+        ColumnIdent columnIdent = refInfo.ident().columnIdent();
+        Supplier<LineCollectorExpression<?>> supplier = EXPRESSION_BUILDER.get(columnIdent.name());
+        if (supplier == null) {
+            return new ColumnExtractingLineExpression(columnIdent);
         }
-        return new ColumnExtractingLineExpression(info.ident().columnIdent());
-    }
-
-
-    interface ExpressionBuilder {
-        LineCollectorExpression<?> create();
+        return supplier.get();
     }
 }

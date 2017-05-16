@@ -25,8 +25,8 @@ import com.fasterxml.jackson.core.JsonEncoding;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
-import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 import org.jboss.netty.bootstrap.ServerBootstrap;
 import org.jboss.netty.buffer.ChannelBuffers;
@@ -58,9 +58,7 @@ public class HttpTestServer {
         jsonFactory.configure(JsonParser.Feature.ALLOW_COMMENTS, true);
     }
 
-
     /**
-     *
      * @param port the port to listen on
      * @param fail of set to true, the server will emit error responses
      */
@@ -73,33 +71,30 @@ public class HttpTestServer {
     public void run() {
         // Configure the server.
         ServerBootstrap bootstrap = new ServerBootstrap(
-                this.channelFactory);
+            this.channelFactory);
 
         // Set up the pipeline factory.
-        bootstrap.setPipelineFactory(new ChannelPipelineFactory() {
-            public ChannelPipeline getPipeline() throws Exception {
-                // Create a default pipeline implementation.
-                ChannelPipeline pipeline = Channels.pipeline();
+        bootstrap.setPipelineFactory(() -> {
+            // Create a default pipeline implementation.
+            ChannelPipeline pipeline = Channels.pipeline();
 
-                // Uncomment the following line if you want HTTPS
-                //SSLEngine engine = SecureChatSslContextFactory.getServerContext().createSSLEngine();
-                //engine.setUseClientMode(false);
-                //pipeline.addLast("ssl", new SslHandler(engine));
+            // Uncomment the following line if you want HTTPS
+            //SSLEngine engine = SecureChatSslContextFactory.getServerContext().createSSLEngine();
+            //engine.setUseClientMode(false);
+            //pipeline.addLast("ssl", new SslHandler(engine));
 
-                pipeline.addLast("decoder", new HttpRequestDecoder());
-                // Uncomment the following line if you don't want to handle HttpChunks.
-                //pipeline.addLast("aggregator", new HttpChunkAggregator(1048576));
-                pipeline.addLast("encoder", new HttpResponseEncoder());
-                // Remove the following line if you don't want automatic content compression.
-                pipeline.addLast("deflater", new HttpContentCompressor());
-                pipeline.addLast("handler", new HttpTestServerHandler());
-                return pipeline;
-            }
+            pipeline.addLast("decoder", new HttpRequestDecoder());
+            // Uncomment the following line if you don't want to handle HttpChunks.
+            //pipeline.addLast("aggregator", new HttpChunkAggregator(1048576));
+            pipeline.addLast("encoder", new HttpResponseEncoder());
+            // Remove the following line if you don't want automatic content compression.
+            pipeline.addLast("deflater", new HttpContentCompressor());
+            pipeline.addLast("handler", new HttpTestServerHandler());
+            return pipeline;
         });
 
         // Bind and start to accept incoming connections.
         channel = bootstrap.bind(new InetSocketAddress(port));
-
     }
 
     public void shutDown() {
@@ -124,12 +119,12 @@ public class HttpTestServer {
 
     public class HttpTestServerHandler extends SimpleChannelUpstreamHandler {
 
-        private final ESLogger logger = Loggers.getLogger(
-                HttpTestServerHandler.class.getName());
+        private final Logger logger = Loggers.getLogger(
+            HttpTestServerHandler.class.getName());
 
         @Override
         public void messageReceived(
-                ChannelHandlerContext ctx, MessageEvent e) {
+            ChannelHandlerContext ctx, MessageEvent e) {
             Object msg = e.getMessage();
 
             if (msg instanceof HttpRequest) {
@@ -165,26 +160,25 @@ public class HttpTestServer {
                 } catch (Exception ex) {
                     response = new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.INTERNAL_SERVER_ERROR);
                 }
-                response.setContent(ChannelBuffers.copiedBuffer(out.bytes().toUtf8(), CharsetUtil.UTF_8));
+                response.setContent(ChannelBuffers.copiedBuffer(out.bytes().utf8ToString(), CharsetUtil.UTF_8));
 
-                responses.add(out.bytes().toUtf8());
+                responses.add(out.bytes().utf8ToString());
                 if (logger.isDebugEnabled()) {
-                    logger.debug("Sending response: " + out.bytes().toUtf8());
+                    logger.debug("Sending response: " + out.bytes().utf8ToString());
                 }
 
                 ChannelFuture future = e.getChannel().write(response);
                 future.addListener(ChannelFutureListener.CLOSE);
             }
-
         }
 
         @Override
         public void exceptionCaught(
-                ChannelHandlerContext ctx, ExceptionEvent e) {
+            ChannelHandlerContext ctx, ExceptionEvent e) {
             // Close the connection when an exception is raised.
             logger.warn(
-                    "Unexpected exception from downstream.",
-                    e.getCause());
+                "Unexpected exception from downstream.",
+                e.getCause());
             e.getChannel().close();
         }
     }

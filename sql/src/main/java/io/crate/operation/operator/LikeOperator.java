@@ -21,14 +21,14 @@
 
 package io.crate.operation.operator;
 
+import io.crate.analyze.symbol.Symbol;
 import io.crate.metadata.FunctionInfo;
 import io.crate.metadata.Scalar;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Symbol;
+import io.crate.data.Input;
 import io.crate.types.DataTypes;
 import org.apache.lucene.util.BytesRef;
 
+import java.util.List;
 import java.util.regex.Pattern;
 
 public class LikeOperator extends Operator<BytesRef> {
@@ -53,17 +53,22 @@ public class LikeOperator extends Operator<BytesRef> {
     }
 
     @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        assert (symbol != null);
-        assert (symbol.arguments().size() == 2);
-
-        return Scalar.evaluateIfLiterals(this, symbol);
+    public Scalar<Boolean, BytesRef> compile(List<Symbol> arguments) {
+        Symbol pattern = arguments.get(1);
+        if (pattern instanceof Input) {
+            Object value = ((Input) pattern).value();
+            if (value == null) {
+                return this;
+            }
+            return new CompiledLike(info, ((BytesRef) value).utf8ToString());
+        }
+        return super.compile(arguments);
     }
 
     @Override
     public Boolean evaluate(Input<BytesRef>... args) {
-        assert (args != null);
-        assert (args.length == 2);
+        assert args != null : "args must not be null";
+        assert args.length == 2 : "number of args must be 2";
 
         BytesRef expression = args[0].value();
         BytesRef pattern = args[1].value();
@@ -76,7 +81,7 @@ public class LikeOperator extends Operator<BytesRef> {
 
     private boolean matches(String expression, String pattern) {
         return Pattern.compile(
-                patternToRegex(pattern, DEFAULT_ESCAPE, true), Pattern.DOTALL).matcher(expression).matches();
+            patternToRegex(pattern, DEFAULT_ESCAPE, true), Pattern.DOTALL).matcher(expression).matches();
     }
 
     public static String patternToRegex(String patternString, char escapeChar, boolean shouldEscape) {
@@ -117,6 +122,8 @@ public class LikeOperator extends Operator<BytesRef> {
                             case ']':
                             case '(':
                             case ')':
+                            case '|':
+                            case '+':
                                 regex.append('\\');
                         }
 
@@ -129,4 +136,28 @@ public class LikeOperator extends Operator<BytesRef> {
         return regex.toString();
     }
 
+    private static class CompiledLike extends Scalar<Boolean, BytesRef> {
+        private final FunctionInfo info;
+        private final Pattern pattern;
+
+        CompiledLike(FunctionInfo info, String pattern) {
+            this.info = info;
+            this.pattern = Pattern.compile(patternToRegex(pattern, DEFAULT_ESCAPE, true), Pattern.DOTALL);
+        }
+
+        @Override
+        public FunctionInfo info() {
+            return info;
+        }
+
+        @SafeVarargs
+        @Override
+        public final Boolean evaluate(Input<BytesRef>... args) {
+            BytesRef value = args[0].value();
+            if (value == null) {
+                return null;
+            }
+            return pattern.matcher(value.utf8ToString()).matches();
+        }
+    }
 }

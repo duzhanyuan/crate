@@ -22,42 +22,49 @@
 package io.crate.operation.reference.doc.lucene;
 
 import io.crate.exceptions.GroupByOnArrayUnsupportedException;
-import org.apache.lucene.index.AtomicReaderContext;
+import org.apache.lucene.index.DocValues;
+import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.index.fielddata.IndexFieldData;
+import org.elasticsearch.index.fielddata.FieldData;
 import org.elasticsearch.index.fielddata.SortedBinaryDocValues;
 
-public class BooleanColumnReference extends FieldCacheExpression<IndexFieldData, Boolean> {
+import java.io.IOException;
 
-    private static final BytesRef TRUE_BYTESREF = new BytesRef("T");
+public class BooleanColumnReference extends LuceneCollectorExpression<Boolean> {
+
+    private static final BytesRef TRUE_BYTESREF = new BytesRef("1");
     private SortedBinaryDocValues values;
+    private Boolean value;
 
     public BooleanColumnReference(String columnName) {
         super(columnName);
     }
 
     @Override
-    public void setNextReader(AtomicReaderContext context) {
-        super.setNextReader(context);
-        values = indexFieldData.load(context).getBytesValues();
+    public Boolean value() {
+        return value;
     }
 
     @Override
     public void setNextDocId(int docId) {
         super.setNextDocId(docId);
         values.setDocument(docId);
+        switch (values.count()) {
+            case 0:
+                value = null;
+                break;
+            case 1:
+                value = values.valueAt(0).compareTo(TRUE_BYTESREF) == 0;
+                break;
+            default:
+                throw new GroupByOnArrayUnsupportedException(columnName);
+        }
     }
 
     @Override
-    public Boolean value() {
-        switch (values.count()) {
-            case 0:
-                return null;
-            case 1:
-                return values.valueAt(0).compareTo(TRUE_BYTESREF) == 0;
-            default:
-                throw new GroupByOnArrayUnsupportedException(columnName());
-        }
+    public void setNextReader(LeafReaderContext context) throws IOException {
+        super.setNextReader(context);
+        values = FieldData.toString(DocValues.getSortedNumeric(context.reader(), columnName));
     }
 
     @Override

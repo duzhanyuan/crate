@@ -21,79 +21,57 @@
 
 package io.crate.metadata.sys;
 
-import com.google.common.collect.ImmutableList;
 import io.crate.analyze.WhereClause;
 import io.crate.metadata.*;
-import io.crate.planner.RowGranularity;
-import io.crate.types.DataType;
+import io.crate.metadata.table.ColumnRegistrar;
+import io.crate.metadata.table.StaticTableInfo;
 import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.inject.Singleton;
 
 import javax.annotation.Nullable;
-import java.util.*;
+import java.util.Collections;
 
-public class SysOperationsTableInfo extends SysTableInfo {
+@Singleton
+public class SysOperationsTableInfo extends StaticTableInfo {
+
+    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "operations");
+    private final ClusterService clusterService;
+
+    public static class Columns {
+        public final static ColumnIdent ID = new ColumnIdent("id");
+        public final static ColumnIdent JOB_ID = new ColumnIdent("job_id");
+        public final static ColumnIdent NAME = new ColumnIdent("name");
+        public final static ColumnIdent STARTED = new ColumnIdent("started");
+        public final static ColumnIdent USED_BYTES = new ColumnIdent("used_bytes");
+    }
 
     private final TableColumn nodesTableColumn;
 
-    public static class ColumnNames {
-        public final static String ID = "id";
-        public final static String JOB_ID = "job_id";
-        public final static String NAME = "name";
-        public final static String STARTED = "started";
-        public final static String USED_BYTES = "used_bytes";
-    }
-
-    public static final TableIdent IDENT = new TableIdent(SCHEMA, "operations");
-    private static final String[] INDICES = new String[] { IDENT.name() };
-
-    private static final Map<ColumnIdent, ReferenceInfo> INFOS = new LinkedHashMap<>();
-    private static final LinkedHashSet<ReferenceInfo> columns = new LinkedHashSet<>();
-
-    private static ReferenceInfo register(String column, DataType type) {
-        ReferenceInfo info = new ReferenceInfo(new ReferenceIdent(IDENT, column), RowGranularity.DOC, type);
-        columns.add(info);
-        INFOS.put(info.ident().columnIdent(), info);
-        return info;
-    }
-
-    static {
-        register(ColumnNames.ID, DataTypes.STRING);
-        register(ColumnNames.JOB_ID, DataTypes.STRING);
-        register(ColumnNames.NAME, DataTypes.STRING);
-        register(ColumnNames.STARTED, DataTypes.TIMESTAMP);
-        register(ColumnNames.USED_BYTES, DataTypes.LONG);
-
-        INFOS.put(SysNodesTableInfo.SYS_COL_IDENT, SysNodesTableInfo.tableColumnInfo(IDENT));
-    }
-
     @Inject
-    public SysOperationsTableInfo(ClusterService clusterService,
-                                  SysSchemaInfo sysSchemaInfo,
-                                  SysNodesTableInfo sysNodesTableInfo) {
-        super(clusterService, sysSchemaInfo);
+    public SysOperationsTableInfo(ClusterService clusterService, SysNodesTableInfo sysNodesTableInfo) {
+        super(IDENT, new ColumnRegistrar(IDENT, RowGranularity.DOC)
+                .register(Columns.ID, DataTypes.STRING)
+                .register(Columns.JOB_ID, DataTypes.STRING)
+                .register(Columns.NAME, DataTypes.STRING)
+                .register(Columns.STARTED, DataTypes.TIMESTAMP)
+                .register(Columns.USED_BYTES, DataTypes.LONG)
+                .putInfoOnly(SysNodesTableInfo.SYS_COL_IDENT, SysNodesTableInfo.tableColumnInfo(IDENT)),
+            Collections.<ColumnIdent>emptyList());
+        this.clusterService = clusterService;
         nodesTableColumn = sysNodesTableInfo.tableColumn();
     }
 
+
     @Nullable
     @Override
-    public ReferenceInfo getReferenceInfo(ColumnIdent columnIdent) {
-        ReferenceInfo info = columnInfo(columnIdent);
+    public Reference getReference(ColumnIdent columnIdent) {
+        Reference info = super.getReference(columnIdent);
         if (info == null) {
-            return nodesTableColumn.getReferenceInfo(this.ident(), columnIdent);
+            return nodesTableColumn.getReference(this.ident(), columnIdent);
         }
         return info;
-    }
-
-    @Nullable
-    public static ReferenceInfo columnInfo(ColumnIdent ident) {
-        return INFOS.get(ident);
-    }
-
-    @Override
-    public Collection<ReferenceInfo> columns() {
-        return columns;
     }
 
     @Override
@@ -102,27 +80,7 @@ public class SysOperationsTableInfo extends SysTableInfo {
     }
 
     @Override
-    public TableIdent ident() {
-        return IDENT;
-    }
-
-    @Override
     public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return tableRouting(whereClause);
-    }
-
-    @Override
-    public List<ColumnIdent> primaryKey() {
-        return ImmutableList.of();
-    }
-
-    @Override
-    public String[] concreteIndices() {
-        return INDICES;
-    }
-
-    @Override
-    public Iterator<ReferenceInfo> iterator() {
-        return INFOS.values().iterator();
+        return Routing.forTableOnAllNodes(IDENT, clusterService.state().nodes());
     }
 }

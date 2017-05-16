@@ -23,143 +23,80 @@ package io.crate.executor.transport;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
 import io.crate.Constants;
-import io.crate.core.collections.Bucket;
-import io.crate.executor.Job;
-import io.crate.executor.TaskResult;
+import io.crate.data.Bucket;
+import io.crate.data.Row;
 import io.crate.integrationtests.SQLTransportIntegrationTest;
 import io.crate.metadata.PartitionName;
-import io.crate.metadata.TableIdent;
-import io.crate.planner.IterablePlan;
 import io.crate.planner.Plan;
-import io.crate.planner.node.ddl.CreateTableNode;
-import io.crate.planner.node.ddl.ESClusterUpdateSettingsNode;
-import io.crate.planner.node.ddl.ESCreateTemplateNode;
-import io.crate.planner.node.ddl.ESDeleteIndexNode;
-import io.crate.test.integration.CrateIntegrationTest;
+import io.crate.planner.node.ddl.ESClusterUpdateSettingsPlan;
+import io.crate.planner.node.ddl.ESDeletePartition;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.Literal;
+import io.crate.testing.TestingBatchConsumer;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.admin.indices.alias.Alias;
 import org.elasticsearch.action.admin.indices.exists.indices.IndicesExistsRequest;
-import org.elasticsearch.action.admin.indices.template.get.GetIndexTemplatesResponse;
-import org.elasticsearch.cluster.metadata.IndexTemplateMetaData;
-import org.elasticsearch.cluster.settings.ClusterDynamicSettings;
-import org.elasticsearch.cluster.settings.DynamicSettings;
-import org.elasticsearch.common.inject.Key;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.cluster.metadata.MetaData;
+import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.common.settings.Settings;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import static io.crate.testing.TestingHelpers.isRow;
-import static org.elasticsearch.common.settings.ImmutableSettings.Builder.EMPTY_SETTINGS;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.is;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
 public class TransportExecutorDDLTest extends SQLTransportIntegrationTest {
-
-    static {
-        ClassLoader.getSystemClassLoader().setDefaultAssertionStatus(true);
-    }
 
     private TransportExecutor executor;
 
-    private final static Map<String, Object> TEST_MAPPING = ImmutableMap.<String, Object>of(
-            "properties", ImmutableMap.of(
-                    "id", ImmutableMap.builder()
-                            .put("type", "integer")
-                            .put("store", false)
-                            .put("index", "not_analyzed")
-                            .put("doc_values", true).build(),
-                    "name", ImmutableMap.builder()
-                            .put("type", "string")
-                            .put("store", false)
-                            .put("index", "not_analyzed")
-                            .put("doc_values", true).build(),
-                    "names", ImmutableMap.builder()
-                            .put("type", "string")
-                            .put("store", false)
-                            .put("index", "not_analyzed")
-                            .put("doc_values", false).build()
-            ));
     private final static Map<String, Object> TEST_PARTITIONED_MAPPING = ImmutableMap.<String, Object>of(
-            "_meta", ImmutableMap.of(
-                    "partitioned_by", ImmutableList.of(Arrays.asList("name", "string"))
-            ),
-            "properties", ImmutableMap.of(
-                "id", ImmutableMap.builder()
-                    .put("type", "integer")
-                    .put("store", false)
-                    .put("index", "not_analyzed")
-                    .put("doc_values", true).build(),
-                "names", ImmutableMap.builder()
-                    .put("type", "string")
-                    .put("store", false)
-                    .put("index", "not_analyzed")
-                    .put("doc_values", false).build()
-            ));
-    private final static Settings TEST_SETTINGS = ImmutableSettings.settingsBuilder()
-            .put("number_of_replicas", 0)
-            .put("number_of_shards", 2).build();
+        "_meta", ImmutableMap.of(
+            "partitioned_by", ImmutableList.of(Arrays.asList("name", "string"))
+        ),
+        "properties", ImmutableMap.of(
+            "id", ImmutableMap.builder()
+                .put("type", "integer").build(),
+            "names", ImmutableMap.builder()
+                .put("type", "keyword").build()
+        ));
+    private final static Settings TEST_SETTINGS = Settings.builder()
+        .put("number_of_replicas", 0)
+        .put("number_of_shards", 2).build();
 
     @Before
     public void transportSetup() {
-        executor = cluster().getInstance(TransportExecutor.class);
+        executor = internalCluster().getInstance(TransportExecutor.class);
     }
 
-    @Test
-    public void testCreateTableTask() throws Exception {
-        CreateTableNode createTableNode = CreateTableNode.createTableNode(
-                new TableIdent(null, "test"),
-                TEST_SETTINGS,
-                TEST_MAPPING
-        );
-        Plan plan = new IterablePlan(createTableNode);
-
-        Job job = executor.newJob(plan);
-        List<ListenableFuture<TaskResult>> futures = executor.execute(job);
-        ListenableFuture<List<TaskResult>> listenableFuture = Futures.allAsList(futures);
-        Bucket rows = listenableFuture.get().get(0).rows();
-        assertThat(rows, contains(isRow(1L)));
-        execute("select * from information_schema.tables where table_name = 'test' and number_of_replicas = 0 and number_of_shards = 2");
-        assertThat(response.rowCount(), is(1L));
-
-        execute("select count(*) from information_schema.columns where table_name = 'test'");
-        assertThat((Long)response.rows()[0][0], is(3L));
+    @After
+    public void resetSettings() throws Exception {
+        client().admin().cluster().prepareUpdateSettings()
+            .setPersistentSettings(MapBuilder.newMapBuilder().put("stats.enabled", null).map())
+            .setTransientSettings(MapBuilder.newMapBuilder().put("stats.enabled", null).put("bulk.request_timeout", null).map())
+            .execute().actionGet();
     }
 
     @Test
     public void testCreateTableWithOrphanedPartitions() throws Exception {
-        String partitionName = new PartitionName("test", Arrays.asList(new BytesRef("foo"))).stringValue();
+        String partitionName = new PartitionName("test", Collections.singletonList(new BytesRef("foo"))).asIndexName();
         client().admin().indices().prepareCreate(partitionName)
-                .addMapping(Constants.DEFAULT_MAPPING_TYPE, TEST_PARTITIONED_MAPPING)
-                .setSettings(TEST_SETTINGS)
-                .execute().actionGet();
+            .addMapping(Constants.DEFAULT_MAPPING_TYPE, TEST_PARTITIONED_MAPPING)
+            .setSettings(TEST_SETTINGS)
+            .execute().actionGet();
         ensureGreen();
-        CreateTableNode createTableNode = CreateTableNode.createTableNode(
-                new TableIdent(null, "test"),
-                TEST_SETTINGS,
-                TEST_MAPPING
-        );
-        Plan plan = new IterablePlan(createTableNode);
 
-        Job job = executor.newJob(plan);
-        List<ListenableFuture<TaskResult>> futures = executor.execute(job);
-        ListenableFuture<List<TaskResult>> listenableFuture = Futures.allAsList(futures);
-        Bucket objects = listenableFuture.get().get(0).rows();
-        assertThat(objects, contains(isRow(1L)));
-
-        execute("select * from information_schema.tables where table_name = 'test' and number_of_replicas = 0 and number_of_shards = 2");
+        execute("create table test (id integer, name string, names string) partitioned by (id)");
+        ensureYellow();
+        execute("select * from information_schema.tables where table_name = 'test'");
         assertThat(response.rowCount(), is(1L));
 
         execute("select count(*) from information_schema.columns where table_name = 'test'");
-        assertThat((Long)response.rows()[0][0], is(3L));
+        assertThat((Long) response.rows()[0][0], is(3L));
 
         // check that orphaned partition has been deleted
         assertThat(client().admin().indices().exists(new IndicesExistsRequest(partitionName)).actionGet().isExists(), is(false));
@@ -167,219 +104,138 @@ public class TransportExecutorDDLTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testCreateTableWithOrphanedAlias() throws Exception {
-        String partitionName = new PartitionName("test", Arrays.asList(new BytesRef("foo"))).stringValue();
+        String partitionName = new PartitionName("test", Collections.singletonList(new BytesRef("foo"))).asIndexName();
         client().admin().indices().prepareCreate(partitionName)
-                .addMapping(Constants.DEFAULT_MAPPING_TYPE, TEST_PARTITIONED_MAPPING)
-                .setSettings(TEST_SETTINGS)
-                .addAlias(new Alias("test"))
-                .execute().actionGet();
+            .addMapping(Constants.DEFAULT_MAPPING_TYPE, TEST_PARTITIONED_MAPPING)
+            .setSettings(TEST_SETTINGS)
+            .addAlias(new Alias("test"))
+            .execute().actionGet();
         ensureGreen();
-        CreateTableNode createTableNode = CreateTableNode.createTableNode(
-                new TableIdent(null, "test"),
-                TEST_SETTINGS,
-                TEST_MAPPING
-        );
-        Plan plan = new IterablePlan(createTableNode);
 
-        Job job = executor.newJob(plan);
-        List<ListenableFuture<TaskResult>> futures = executor.execute(job);
-        ListenableFuture<List<TaskResult>> listenableFuture = Futures.allAsList(futures);
-        Bucket objects = listenableFuture.get().get(0).rows();
-        assertThat(objects, contains(isRow(1L)));
+        execute("create table test (id integer, name string, names string) " +
+                "clustered into 2 shards " +
+                "partitioned by (id) with (number_of_replicas=0)");
+        assertThat(response.rowCount(), is(1L));
+        ensureGreen();
 
-        execute("select * from information_schema.tables where table_name = 'test' and number_of_replicas = 0 and number_of_shards = 2");
+        execute("select * from information_schema.tables where table_name = 'test'");
         assertThat(response.rowCount(), is(1L));
 
         execute("select count(*) from information_schema.columns where table_name = 'test'");
         assertThat((Long) response.rows()[0][0], is(3L));
 
-        // check that orphaned partition has been deleted
+        // check that orphaned alias has been deleted
         assertThat(client().admin().cluster().prepareState().execute().actionGet()
-                .getState().metaData().aliases().containsKey("test"), is(false));
+            .getState().metaData().hasAlias("test"), is(false));
         // check that orphaned partition has been deleted
         assertThat(client().admin().indices().exists(new IndicesExistsRequest(partitionName)).actionGet().isExists(), is(false));
     }
 
     @Test
-    public void testDeleteIndexTask() throws Exception {
-        execute("create table t (id integer primary key, name string)");
-        ensureGreen();
+    public void testDeletePartitionTask() throws Exception {
+        execute("create table t (id integer primary key, name string) partitioned by (id)");
+        ensureYellow();
 
-        execute("select * from information_schema.tables where table_name = 't'");
+        execute("insert into t (id, name) values (1, 'Ford')");
+        assertThat(response.rowCount(), is(1L));
+        ensureYellow();
+
+        execute("select * from information_schema.table_partitions where table_name = 't'");
         assertThat(response.rowCount(), is(1L));
 
-        ESDeleteIndexNode deleteIndexNode = new ESDeleteIndexNode("t");
-        Plan plan = new IterablePlan(deleteIndexNode);
+        String partitionName = new PartitionName("t", ImmutableList.of(new BytesRef("1"))).asIndexName();
+        ESDeletePartition plan = new ESDeletePartition(UUID.randomUUID(), partitionName);
 
-        Job job = executor.newJob(plan);
-        List<ListenableFuture<TaskResult>> futures = executor.execute(job);
-        ListenableFuture<List<TaskResult>> listenableFuture = Futures.allAsList(futures);
-        Bucket objects = listenableFuture.get().get(0).rows();
-        assertThat(objects, contains(isRow(1L)));
+        TestingBatchConsumer consumer = new TestingBatchConsumer();
+        executor.execute(plan, consumer, Row.EMPTY);
+        Bucket objects = consumer.getBucket();
+        assertThat(objects, contains(isRow(-1L)));
 
-        execute("select * from information_schema.tables where table_name = 't'");
+        execute("select * from information_schema.table_partitions where table_name = 't'");
         assertThat(response.rowCount(), is(0L));
     }
 
     /**
      * this case should not happen as closed indices aren't listed as TableInfo
      * but if it does maybe because of stale cluster state - validate behaviour here
-     *
+     * <p>
      * cannot prevent this task from deleting closed indices.
      */
     @Test
-    public void testDeleteIndexTaskClosed() throws Exception {
-        execute("create table t (id integer primary key, name string)");
-        ensureGreen();
-        assertTrue(client().admin().indices().prepareClose("t").execute().actionGet().isAcknowledged());
+    public void testDeletePartitionTaskClosed() throws Exception {
+        execute("create table t (id integer primary key, name string) partitioned by (id)");
+        ensureYellow();
 
-        ESDeleteIndexNode deleteIndexNode = new ESDeleteIndexNode("t");
-        Plan plan = new IterablePlan(deleteIndexNode);
+        execute("insert into t (id, name) values (1, 'Ford')");
+        assertThat(response.rowCount(), is(1L));
+        ensureYellow();
 
-        Job job = executor.newJob(plan);
-        List<ListenableFuture<TaskResult>> futures = executor.execute(job);
-        ListenableFuture<List<TaskResult>> listenableFuture = Futures.allAsList(futures);
-        Bucket objects = listenableFuture.get().get(0).rows();
-        assertThat(objects, contains(isRow(1L)));
+        String partitionName = new PartitionName("t", ImmutableList.of(new BytesRef("1"))).asIndexName();
+        assertTrue(client().admin().indices().prepareClose(partitionName).execute().actionGet().isAcknowledged());
 
-        execute("select * from information_schema.tables where table_name = 't'");
+        ESDeletePartition plan = new ESDeletePartition(UUID.randomUUID(), partitionName);
+
+        TestingBatchConsumer consumer = new TestingBatchConsumer();
+        executor.execute(plan, consumer, Row.EMPTY);
+        Bucket bucket = consumer.getBucket();
+        assertThat(bucket, contains(isRow(-1L)));
+
+        execute("select * from information_schema.table_partitions where table_name = 't'");
         assertThat(response.rowCount(), is(0L));
     }
 
     @Test
     public void testClusterUpdateSettingsTask() throws Exception {
-        final String persistentSetting = "persistent.level";
-        final String transientSetting = "transient.uptime";
-        // allow our settings to be updated (at all nodes)
-        DynamicSettings dynamicSettings;
-        for (int i = 0; i < cluster().size(); i++) {
-            dynamicSettings = cluster().getInstance(Key.get(DynamicSettings.class, ClusterDynamicSettings.class), "node_" + i);
-            dynamicSettings.addDynamicSetting(persistentSetting);
-            dynamicSettings.addDynamicSetting(transientSetting);
-        }
+        final String persistentSetting = "stats.enabled";
+        final String transientSetting = "bulk.request_timeout";
 
         // Update persistent only
-        Settings persistentSettings = ImmutableSettings.builder()
-                .put(persistentSetting, "panic")
-                .build();
+        Map<String, List<Expression>> persistentSettings = new HashMap<String, List<Expression>>(){{
+            put(persistentSetting, ImmutableList.<Expression>of(Literal.fromObject(true)));
+        }};
 
-        ESClusterUpdateSettingsNode node = new ESClusterUpdateSettingsNode(persistentSettings);
+        ESClusterUpdateSettingsPlan node = new ESClusterUpdateSettingsPlan(UUID.randomUUID(), persistentSettings);
+        Bucket objects = executePlan(node);
 
-        Plan plan = new IterablePlan(node);
-
-        Job job = executor.newJob(plan);
-        List<ListenableFuture<TaskResult>> futures = executor.execute(job);
-        ListenableFuture<List<TaskResult>> listenableFuture = Futures.allAsList(futures);
-        Bucket objects = listenableFuture.get().get(0).rows();
         assertThat(objects, contains(isRow(1L)));
-        assertEquals("panic", client().admin().cluster().prepareState().execute().actionGet().getState().metaData().persistentSettings().get(persistentSetting));
+        assertEquals("true", client().admin().cluster().prepareState().execute().actionGet().getState().metaData()
+            .persistentSettings().get(persistentSetting)
+        );
 
         // Update transient only
-        Settings transientSettings = ImmutableSettings.builder()
-                .put(transientSetting, "123")
-                .build();
+        Map<String, List<Expression>> transientSettings = new HashMap<String, List<Expression>>(){{
+            put(transientSetting, ImmutableList.<Expression>of(Literal.fromObject("123s")));
+        }};
 
-        node = new ESClusterUpdateSettingsNode(EMPTY_SETTINGS, transientSettings);
+        node = new ESClusterUpdateSettingsPlan(UUID.randomUUID(), ImmutableMap.<String, List<Expression>>of(), transientSettings);
+        objects = executePlan(node);
 
-        plan = new IterablePlan(node);
-
-        job = executor.newJob(plan);
-        futures = executor.execute(job);
-        listenableFuture = Futures.allAsList(futures);
-        objects = listenableFuture.get().get(0).rows();
         assertThat(objects, contains(isRow(1L)));
-        assertEquals("123", client().admin().cluster().prepareState().execute().actionGet().getState().metaData().transientSettings().get(transientSetting));
+        assertEquals("123s", client().admin().cluster().prepareState().execute().actionGet().getState().metaData()
+            .transientSettings().get(transientSetting)
+        );
 
         // Update persistent & transient
-        persistentSettings = ImmutableSettings.builder()
-                .put(persistentSetting, "normal")
-                .build();
-        transientSettings = ImmutableSettings.builder()
-                .put(transientSetting, "243")
-                .build();
+        persistentSettings = new HashMap<String, List<Expression>>(){{
+            put(persistentSetting, ImmutableList.<Expression>of(Literal.fromObject(false)));
+        }};
 
-        node = new ESClusterUpdateSettingsNode(persistentSettings, transientSettings);
+        transientSettings = new HashMap<String, List<Expression>>(){{
+            put(transientSetting, ImmutableList.<Expression>of(Literal.fromObject("243s")));
+        }};
 
-        plan = new IterablePlan(node);
+        node = new ESClusterUpdateSettingsPlan(UUID.randomUUID(), persistentSettings, transientSettings);
+        objects = executePlan(node);
 
-        job = executor.newJob(plan);
-        futures = executor.execute(job);
-        listenableFuture = Futures.allAsList(futures);
-        objects = listenableFuture.get().get(0).rows();
+        MetaData md = client().admin().cluster().prepareState().execute().actionGet().getState().metaData();
         assertThat(objects, contains(isRow(1L)));
-        assertEquals("normal", client().admin().cluster().prepareState().execute().actionGet().getState().metaData().persistentSettings().get(persistentSetting));
-        assertEquals("243", client().admin().cluster().prepareState().execute().actionGet().getState().metaData().transientSettings().get(transientSetting));
+        assertEquals("false", md.persistentSettings().get(persistentSetting));
+        assertEquals("243s", md.transientSettings().get(transientSetting));
     }
 
-    @Test
-    public void testCreateIndexTemplateTask() throws Exception {
-        Settings indexSettings = ImmutableSettings.builder()
-                .put("number_of_replicas", 0)
-                .put("number_of_shards", 2)
-                .build();
-        Map<String, Object> mapping = ImmutableMap.<String, Object>of(
-                "properties", ImmutableMap.of(
-                        "id", ImmutableMap.builder()
-                                .put("type", "integer")
-                                .put("store", false)
-                                .put("index", "not_analyzed")
-                                .put("doc_values", true).build(),
-                        "name", ImmutableMap.builder()
-                                .put("type", "string")
-                                .put("store", false)
-                                .put("index", "not_analyzed")
-                                .put("doc_values", true).build(),
-                        "names", ImmutableMap.builder()
-                                .put("type", "string")
-                                .put("store", false)
-                                .put("index", "not_analyzed")
-                                .put("doc_values", false).build()
-                ),
-                "_meta", ImmutableMap.of(
-                        "partitioned_by", ImmutableList.<List<String>>of(
-                                ImmutableList.of("name", "string")
-                        )
-                )
-        );
-        String templateName = PartitionName.templateName(null, "partitioned");
-        String templatePrefix = PartitionName.templateName(null, "partitioned") + "*";
-        final String alias = "aliasName";
-
-        ESCreateTemplateNode planNode = new ESCreateTemplateNode(
-                templateName,
-                templatePrefix,
-                indexSettings,
-                mapping,
-                alias);
-        Plan plan = new IterablePlan(planNode);
-
-        Job job = executor.newJob(plan);
-        List<ListenableFuture<TaskResult>> futures = executor.execute(job);
-        ListenableFuture<List<TaskResult>> listenableFuture = Futures.allAsList(futures);
-        Bucket objects = listenableFuture.get().get(0).rows();
-        assertThat(objects, contains(isRow(1L)));
-
-        refresh();
-
-        GetIndexTemplatesResponse response = client().admin().indices()
-                .prepareGetTemplates(".partitioned.partitioned.").execute().actionGet();
-
-        assertThat(response.getIndexTemplates().size(), is(1));
-        IndexTemplateMetaData templateMeta = response.getIndexTemplates().get(0);
-        assertThat(templateMeta.getName(), is(".partitioned.partitioned."));
-        assertThat(templateMeta.mappings().get(Constants.DEFAULT_MAPPING_TYPE).string(),
-                is("{\"default\":" +
-                        "{\"properties\":{" +
-                        "\"id\":{\"type\":\"integer\",\"store\":false,\"index\":\"not_analyzed\",\"doc_values\":true}," +
-                        "\"name\":{\"type\":\"string\",\"store\":false,\"index\":\"not_analyzed\",\"doc_values\":true}," +
-                        "\"names\":{\"type\":\"string\",\"store\":false,\"index\":\"not_analyzed\",\"doc_values\":false}" +
-                        "}," +
-                        "\"_meta\":{" +
-                        "\"partitioned_by\":[[\"name\",\"string\"]]" +
-                        "}}}"));
-        assertThat(templateMeta.template(), is(".partitioned.partitioned.*"));
-        assertThat(templateMeta.settings().toDelimitedString(','),
-                is("index.number_of_replicas=0,index.number_of_shards=2,"));
-        assertThat(templateMeta.aliases().get(alias).alias(), is(alias));
+    private Bucket executePlan(Plan plan) throws Exception {
+        TestingBatchConsumer consumer = new TestingBatchConsumer();
+        executor.execute(plan, consumer, Row.EMPTY);
+        return consumer.getBucket();
     }
 }

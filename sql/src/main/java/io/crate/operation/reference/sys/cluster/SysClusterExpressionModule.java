@@ -21,31 +21,30 @@
 
 package io.crate.operation.reference.sys.cluster;
 
-import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.ReferenceIdent;
 import io.crate.metadata.ReferenceImplementation;
-import io.crate.metadata.ReferenceInfo;
 import io.crate.metadata.sys.SysClusterTableInfo;
 import org.elasticsearch.common.inject.AbstractModule;
 import org.elasticsearch.common.inject.multibindings.MapBinder;
-
-import java.util.Map;
 
 public class SysClusterExpressionModule extends AbstractModule {
 
     @Override
     protected void configure() {
         MapBinder<ReferenceIdent, ReferenceImplementation> b = MapBinder
-                .newMapBinder(binder(), ReferenceIdent.class, ReferenceImplementation.class);
+            .newMapBinder(binder(), ReferenceIdent.class, ReferenceImplementation.class);
 
-        Map<ColumnIdent, ReferenceInfo> infos = SysClusterTableInfo.INFOS;
-        b.addBinding(infos.get(new ColumnIdent(ClusterIdExpression.NAME)).ident()).to(
-                ClusterIdExpression.class).asEagerSingleton();
-        b.addBinding(infos.get(new ColumnIdent(ClusterNameExpression.NAME)).ident()).to(
-                ClusterNameExpression.class).asEagerSingleton();
-        b.addBinding(infos.get(new ColumnIdent(ClusterMasterNodeExpression.NAME)).ident()).to(
-                ClusterMasterNodeExpression.class).asEagerSingleton();
-        b.addBinding(infos.get(new ColumnIdent(ClusterSettingsExpression.NAME)).ident()).to(
-                ClusterSettingsExpression.class).asEagerSingleton();
+        b.addBinding(clusterIdent(ClusterIdExpression.NAME)).to(
+            ClusterIdExpression.class).asEagerSingleton();
+        b.addBinding(clusterIdent(ClusterNameExpression.NAME)).to(
+            ClusterNameExpression.class).asEagerSingleton();
+        b.addBinding(clusterIdent(ClusterMasterNodeExpression.NAME)).to(
+            ClusterMasterNodeExpression.class).asEagerSingleton();
+        b.addBinding(clusterIdent(ClusterSettingsExpression.NAME)).to(
+            ClusterSettingsExpression.class).asEagerSingleton();
+    }
+
+    private ReferenceIdent clusterIdent(String name) {
+        return new ReferenceIdent(SysClusterTableInfo.IDENT, name);
     }
 }

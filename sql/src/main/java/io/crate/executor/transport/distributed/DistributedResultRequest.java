@@ -22,49 +22,90 @@
 package io.crate.executor.transport.distributed;
 
 import io.crate.Streamer;
-import io.crate.core.collections.Bucket;
+import io.crate.data.Bucket;
 import io.crate.executor.transport.StreamBucket;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.transport.TransportRequest;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.UUID;
 
 public class DistributedResultRequest extends TransportRequest {
 
+    private byte inputId;
+    private int executionPhaseId;
+    private int bucketIdx;
+
     private Streamer<?>[] streamers;
-    private DistributedRequestContextManager contextManager;
     private Bucket rows;
-    private UUID contextId;
+    private UUID jobId;
+    private boolean isLast = true;
 
-    // TODO: change failure flag to string or enum so that the receiver can recreate the
-    // exception and the error handling in the DistributedMergeTask can be simplified.
-    private boolean failure = false;
+    private Throwable throwable = null;
+    private boolean isKilled = false;
 
-    public DistributedResultRequest(DistributedRequestContextManager contextManager) {
-        this.contextManager = contextManager;
+    public DistributedResultRequest() {
     }
 
-    public DistributedResultRequest(UUID contextId, Streamer<?>[] streamers) {
-        this.contextId = contextId;
+    private DistributedResultRequest(UUID jobId, byte inputId, int executionPhaseId, int bucketIdx) {
+        this.jobId = jobId;
+        this.executionPhaseId = executionPhaseId;
+        this.bucketIdx = bucketIdx;
+        this.inputId = inputId;
+    }
+
+    public DistributedResultRequest(UUID jobId,
+                                    int executionPhaseId,
+                                    byte inputId,
+                                    int bucketIdx,
+                                    Streamer<?>[] streamers,
+                                    Bucket rows,
+                                    boolean isLast) {
+        this(jobId, inputId, executionPhaseId, bucketIdx);
         this.streamers = streamers;
+        this.rows = rows;
+        this.isLast = isLast;
     }
 
-    public UUID contextId() {
-        return contextId;
+    public DistributedResultRequest(UUID jobId,
+                                    int executionPhaseId,
+                                    byte inputId,
+                                    int bucketIdx,
+                                    Throwable throwable,
+                                    boolean isKilled) {
+        this(jobId, inputId, executionPhaseId, bucketIdx);
+        this.throwable = throwable;
+        this.isKilled = isKilled;
+    }
+
+    public UUID jobId() {
+        return jobId;
+    }
+
+    public int executionPhaseId() {
+        return executionPhaseId;
+    }
+
+    public byte executionPhaseInputId() {
+        return inputId;
+    }
+
+    public int bucketIdx() {
+        return bucketIdx;
     }
 
     public void streamers(Streamer<?>[] streamers) {
         if (rows instanceof StreamBucket) {
-            assert streamers != null;
+            assert streamers != null : "streamers must not be null";
             ((StreamBucket) rows).streamers(streamers);
         }
         this.streamers = streamers;
     }
 
-    public boolean rowsCanBeRead(){
-        if (rows instanceof StreamBucket){
+    public boolean rowsCanBeRead() {
+        if (rows instanceof StreamBucket) {
             return streamers != null;
         }
         return true;
@@ -74,43 +115,57 @@ public class DistributedResultRequest extends TransportRequest {
         return rows;
     }
 
-    public void rows(Bucket rows) {
-        this.rows = rows;
+    public boolean isLast() {
+        return isLast;
+    }
+
+    @Nullable
+    public Throwable throwable() {
+        return throwable;
+    }
+
+    public boolean isKilled() {
+        return isKilled;
     }
 
     @Override
     public void readFrom(StreamInput in) throws IOException {
         super.readFrom(in);
-        contextId = new UUID(in.readLong(), in.readLong());
-        if (in.readBoolean()) {
-            failure = true;
-            return;
+        jobId = new UUID(in.readLong(), in.readLong());
+        executionPhaseId = in.readVInt();
+        bucketIdx = in.readVInt();
+        isLast = in.readBoolean();
+        inputId = in.readByte();
+
+        boolean failure = in.readBoolean();
+        if (failure) {
+            throwable = in.readException();
+            isKilled = in.readBoolean();
+        } else {
+            StreamBucket bucket = new StreamBucket(streamers);
+            bucket.readFrom(in);
+            rows = bucket;
         }
-        StreamBucket bucket = new StreamBucket(streamers);
-        bucket.readFrom(in);
-        rows = bucket;
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        out.writeLong(contextId.getMostSignificantBits());
-        out.writeLong(contextId.getLeastSignificantBits());
+        out.writeLong(jobId.getMostSignificantBits());
+        out.writeLong(jobId.getLeastSignificantBits());
+        out.writeVInt(executionPhaseId);
+        out.writeVInt(bucketIdx);
+        out.writeBoolean(isLast);
+        out.writeByte(inputId);
+
+        boolean failure = throwable != null;
+        out.writeBoolean(failure);
         if (failure) {
-            out.writeBoolean(true);
-            return;
+            out.writeException(throwable);
+            out.writeBoolean(isKilled);
+        } else {
+            // TODO: we should not rely on another bucket in this class and instead write to the stream directly
+            StreamBucket.writeBucket(out, streamers, rows);
         }
-        out.writeBoolean(false);
-
-        // TODO: we should not rely on another bucket in this class and instead write to the stream directly
-        StreamBucket.writeBucket(out, streamers, rows);
-    }
-
-    public void failure(boolean failure) {
-        this.failure = failure;
-    }
-
-    public boolean failure() {
-        return this.failure;
     }
 }

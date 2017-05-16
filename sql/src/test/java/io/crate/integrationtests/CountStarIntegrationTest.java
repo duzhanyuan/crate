@@ -22,18 +22,13 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.test.integration.CrateIntegrationTest;
-import org.junit.Rule;
+import io.crate.testing.UseJdbc;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
 import static org.hamcrest.core.Is.is;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
+@UseJdbc
 public class CountStarIntegrationTest extends SQLTransportIntegrationTest {
-
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
 
     @Test
     public void testCountWithPartitionFilter() throws Exception {
@@ -58,9 +53,9 @@ public class CountStarIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testCountRouting() throws Exception {
         execute("create table count_routing (" +
-                  "street string, " +
-                  "number short, " +
-                  "zipcode string" +
+                "street string, " +
+                "number short, " +
+                "zipcode string" +
                 ") clustered by (zipcode) with (number_of_replicas=0)");
         ensureYellow();
         execute("insert into count_routing (street, number, zipcode) values " +
@@ -71,10 +66,10 @@ public class CountStarIntegrationTest extends SQLTransportIntegrationTest {
         execute("refresh table count_routing");
 
         execute("select count(*) from count_routing where zipcode='1,2'");
-        assertThat((Long)response.rows()[0][0], is(1L)); // FOUND ONLY ONE
+        assertThat((Long) response.rows()[0][0], is(1L)); // FOUND ONLY ONE
 
         execute("select count(*) from count_routing where zipcode=''");
-        assertThat((Long)response.rows()[0][0], is(1L)); // FOUND ONE
+        assertThat((Long) response.rows()[0][0], is(1L)); // FOUND ONE
     }
 
     @Test
@@ -85,7 +80,7 @@ public class CountStarIntegrationTest extends SQLTransportIntegrationTest {
         execute("select count(*) from test where non_existant = 'Some Value'");
     }
 
-        @Test
+    @Test
     public void testCountRoutingClusteredById() throws Exception {
         execute("create table auto_id (" +
                 "  name string," +
@@ -97,9 +92,9 @@ public class CountStarIntegrationTest extends SQLTransportIntegrationTest {
         execute("refresh table auto_id");
 
         execute("select count(*) from auto_id where _id=''");
-        assertThat((Long)response.rows()[0][0], is(0L)); // FOUND NONE
+        assertThat((Long) response.rows()[0][0], is(0L)); // FOUND NONE
 
         execute("select count(*) from auto_id where name=','");
-        assertThat((Long)response.rows()[0][0], is(1L)); // FOUND ONE
+        assertThat((Long) response.rows()[0][0], is(1L)); // FOUND ONE
     }
 }

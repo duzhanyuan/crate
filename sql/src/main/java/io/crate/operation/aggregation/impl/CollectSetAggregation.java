@@ -22,23 +22,18 @@
 package io.crate.operation.aggregation.impl;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.Streamer;
 import io.crate.breaker.RamAccountingContext;
 import io.crate.breaker.SizeEstimator;
 import io.crate.breaker.SizeEstimatorFactory;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.aggregation.AggregationFunction;
 import io.crate.types.DataType;
-import io.crate.types.DataTypeFactory;
 import io.crate.types.DataTypes;
 import io.crate.types.SetType;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
-import org.elasticsearch.common.io.stream.StreamInput;
-import org.elasticsearch.common.io.stream.StreamOutput;
 
-import java.io.IOException;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -52,8 +47,8 @@ public class CollectSetAggregation extends AggregationFunction<Set<Object>, Set<
     public static void register(AggregationImplModule mod) {
         for (final DataType dataType : DataTypes.PRIMITIVE_TYPES) {
             mod.register(new CollectSetAggregation(new FunctionInfo(new FunctionIdent(NAME,
-                    ImmutableList.of(dataType)),
-                    new SetType(dataType), FunctionInfo.Type.AGGREGATE)));
+                ImmutableList.of(dataType)),
+                new SetType(dataType), FunctionInfo.Type.AGGREGATE)));
         }
     }
 
@@ -74,14 +69,16 @@ public class CollectSetAggregation extends AggregationFunction<Set<Object>, Set<
             return state;
         }
         if (state.add(value)) {
-            ramAccountingContext.addBytes(innerTypeEstimator.estimateSize(value));
+            ramAccountingContext.addBytes(
+                RamAccountingContext.roundUp(innerTypeEstimator.estimateSize(value) + 36L) // values size + 32 bytes for entry, 4 bytes for increased capacity
+            );
         }
         return state;
     }
 
     @Override
     public Set<Object> newState(RamAccountingContext ramAccountingContext) {
-        ramAccountingContext.addBytes(36L); // overhead for the HashSet (map ref 8 + 28 for fields inside the map)
+        ramAccountingContext.addBytes(RamAccountingContext.roundUp(64L)); // overhead for HashSet: 32 * 0 + 16 * 4 bytes
         return new HashSet<>();
     }
 
@@ -94,7 +91,9 @@ public class CollectSetAggregation extends AggregationFunction<Set<Object>, Set<
     public Set<Object> reduce(RamAccountingContext ramAccountingContext, Set<Object> state1, Set<Object> state2) {
         for (Object newValue : state2) {
             if (state1.add(newValue)) {
-                ramAccountingContext.addBytes(innerTypeEstimator.estimateSize(newValue));
+                ramAccountingContext.addBytes(
+                    RamAccountingContext.roundUp(innerTypeEstimator.estimateSize(newValue) + 36L) // value size + 32 bytes for entry + 4 bytes for increased capacity
+                );
             }
         }
         return state1;

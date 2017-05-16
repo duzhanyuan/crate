@@ -21,151 +21,122 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Function;
-import com.google.common.base.MoreObjects;
+import com.google.common.base.Throwables;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.doc.DocSysColumns;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.Base64;
-import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.UUIDs;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
-import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.lucene.BytesRefs;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.function.Function;
+
+import static io.crate.collections.Lists2.getOnlyElement;
+
 
 public class Id {
 
-    public static final Function<Id, String> ROUTING_VALUES_FUNCTION = new Function<Id, String>() {
-        @javax.annotation.Nullable
-        @Override
-        public String apply(@Nullable Id input) {
-            return input.routingValue();
-        }
+    private final static Function<List<BytesRef>, String> RANDOM_ID = ignored -> UUIDs.base64UUID();
+
+    private final static Function<List<BytesRef>, String> ONLY_ITEM_NULL_VALIDATION = keyValues -> {
+        return ensureNonNull(getOnlyElement(keyValues)).utf8ToString();
     };
 
-    public static final Function<Id, String> ID_STRING_FUNCTION = new Function<Id, String>() {
-        @javax.annotation.Nullable
-        @Override
-        public String apply(@Nullable Id input) {
-            return input.stringValue();
+    private final static Function<List<BytesRef>, String> ONLY_ITEM = keyValues -> {
+        BytesRef element = getOnlyElement(keyValues);
+        if (element == null) {
+            return null;
         }
+        return element.utf8ToString();
     };
 
-    private final List<BytesRef> values;
-    private String routingValue;
 
-    // used to avoid bytesRef/string conversion if there is just one primary key used for IndexRequests
-    private String singleStringValue = null;
-
-    public Id(List<BytesRef> values){
-        this.values = values;
-        singleStringValue = null;
-        this.routingValue = null;
-    }
-
-    public Id(List<ColumnIdent> primaryKeys, List<BytesRef> primaryKeyValues,
-              ColumnIdent clusteredBy) {
-        this(primaryKeys, primaryKeyValues, clusteredBy, true);
-    }
-
-    public Id(List<ColumnIdent> primaryKeys, List<BytesRef> primaryKeyValues,
-              ColumnIdent clusteredBy, boolean create) {
-        values = new ArrayList<>(primaryKeys.size());
-        if (primaryKeys.size() == 1 && primaryKeys.get(0).name().equals("_id") && create) {
-            singleStringValue = Strings.base64UUID();
-        } else {
-            singleStringValue = null;
-            if (primaryKeys.size() != primaryKeyValues.size()) {
-                // Primary key count does not match, cannot compute id
-                if (create) {
-                    throw new UnsupportedOperationException("Missing required primary key values");
-                }
-                return;
-            }
-            for (int i=0; i<primaryKeys.size(); i++)  {
-                BytesRef primaryKeyValue = primaryKeyValues.get(i);
-                if (primaryKeyValue == null) {
-                    // Missing primary key value, cannot compute id
-                    return;
-                }
-                if (primaryKeys.get(i).equals(clusteredBy)) {
-                    // clusteredBy value must always be first
-                    values.add(0, primaryKeyValue);
-                    routingValue = primaryKeyValue.utf8ToString();
-                } else {
-                    values.add(primaryKeyValue);
-                }
-            }
-        }
-
-    }
-
-    public String routingValue(){
-        return MoreObjects.firstNonNull(routingValue, stringValue());
-    }
-
-    public boolean isValid() {
-        return values.size() > 0 || singleStringValue != null;
-    }
-
-    private void encodeValues(StreamOutput out) throws IOException {
-        out.writeVInt(values.size());
-        for (BytesRef value : values) {
-            out.writeBytesRef(value);
+    /**
+     * generates a function which can be used to generate an id and apply null validation.
+     * <p>
+     * This variant doesn't handle the pk = _id case.
+     */
+    private static Function<List<BytesRef>, String> compileWithNullValidation(final int numPks,
+                                                                              final int clusteredByPosition) {
+        switch (numPks) {
+            case 0:
+                return RANDOM_ID;
+            case 1:
+                return ONLY_ITEM_NULL_VALIDATION;
+            default:
+                return keyValues -> {
+                    if (keyValues.size() != numPks) {
+                        throw new IllegalArgumentException("Missing primary key values");
+                    }
+                    return encode(keyValues, clusteredByPosition);
+                };
         }
     }
 
-    private BytesReference bytes() {
-        assert values.size() > 0;
-        BytesStreamOutput out = new BytesStreamOutput(estimateSize(values));
-        try {
-            encodeValues(out);
-            out.close();
+    /**
+     * generates a function which can be used to generate an id.
+     * <p>
+     * This variant doesn't handle the pk = _id case.
+     */
+    public static Function<List<BytesRef>, String> compile(final int numPks, final int clusteredByPosition) {
+        if (numPks == 1) {
+            return ONLY_ITEM;
+        }
+        return compileWithNullValidation(numPks, clusteredByPosition);
+    }
+
+    /**
+     * returns a function which can be used to generate an id with null validation.
+     */
+    public static Function<List<BytesRef>, String> compileWithNullValidation(final List<ColumnIdent> pkColumns, final ColumnIdent clusteredBy) {
+        final int numPks = pkColumns.size();
+        if (numPks == 1 && getOnlyElement(pkColumns).equals(DocSysColumns.ID)) {
+            return RANDOM_ID;
+        }
+        return compileWithNullValidation(numPks, pkColumns.indexOf(clusteredBy));
+    }
+
+
+    @Nonnull
+    private static BytesRef ensureNonNull(@Nullable BytesRef pkValue) throws IllegalArgumentException {
+        if (pkValue == null) {
+            throw new IllegalArgumentException("A primary key value must not be NULL");
+        }
+        return pkValue;
+    }
+
+    private static String encode(List<BytesRef> values, int clusteredByPosition) {
+        try (BytesStreamOutput out = new BytesStreamOutput(estimateSize(values))) {
+            int size = values.size();
+            out.writeVInt(size);
+            if (clusteredByPosition >= 0) {
+                out.writeBytesRef(ensureNonNull(values.get(clusteredByPosition)));
+            }
+            for (int i = 0; i < size; i++) {
+                if (i != clusteredByPosition) {
+                    out.writeBytesRef(ensureNonNull(values.get(i)));
+                }
+            }
+            return Base64.getEncoder().encodeToString(BytesReference.toBytes(out.bytes()));
         } catch (IOException e) {
-            //
+            throw Throwables.propagate(e);
         }
-        return out.bytes();
     }
 
     /**
      * estimates the size the bytesRef values will take if written onto a StreamOutput using the String streamer
      */
-    private int estimateSize(List<BytesRef> values) {
+    private static int estimateSize(Iterable<BytesRef> values) {
         int expectedEncodedSize = 0;
         for (BytesRef value : values) {
             // 5 bytes for the value of the length itself using vInt
             expectedEncodedSize += 5 + (value != null ? value.length : 0);
         }
         return expectedEncodedSize;
-    }
-
-    @Nullable
-    public String stringValue() {
-        if (singleStringValue != null) {
-            return singleStringValue;
-        }
-        if (values.size() == 0) {
-            return null;
-        } else if (values.size() == 1) {
-            return BytesRefs.toString(values.get(0));
-        }
-        return Base64.encodeBytes(bytes().toBytes());
-    }
-
-    @Nullable
-    public String toString() {
-        return stringValue();
-    }
-
-    public List<BytesRef> values() {
-        if (singleStringValue != null && values.size() == 0) {
-            // convert singleStringValue lazy..
-            values.add(new BytesRef(singleStringValue));
-        }
-        return values;
     }
 }

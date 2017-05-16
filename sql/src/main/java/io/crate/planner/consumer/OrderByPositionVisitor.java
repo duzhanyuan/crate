@@ -22,29 +22,35 @@
 package io.crate.planner.consumer;
 
 import com.carrotsearch.hppc.IntArrayList;
-import io.crate.planner.symbol.*;
+import io.crate.analyze.symbol.Field;
+import io.crate.analyze.symbol.InputColumn;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolVisitor;
+import io.crate.analyze.symbol.format.SymbolFormatter;
 import org.elasticsearch.common.inject.Singleton;
 
 import java.util.List;
 
 /**
  * Extract 0-based integer positions for order by symbols.
- *
+ * <p>
  * This can only be used under the following restriction:
  * <ul>
- *   <li>if an <code>orderBySymbol</code> is no input column with explicit index,
- *    it must be part of <code>sourceSymbols</code>.
+ * <li>if an <code>orderBySymbol</code> is no input column with explicit index,
+ * it must be part of <code>sourceSymbols</code>.
+ * </li>
+ * </ul>
  */
 @Singleton
 public class OrderByPositionVisitor extends SymbolVisitor<OrderByPositionVisitor.Context, Void> {
 
-    private static OrderByPositionVisitor INSTANCE = new OrderByPositionVisitor();
+    private final static OrderByPositionVisitor INSTANCE = new OrderByPositionVisitor();
 
     public static class Context {
-        final List<Symbol> sourceSymbols;
+        final List<? extends Symbol> sourceSymbols;
         IntArrayList orderByPositions;
 
-        public Context(List<Symbol> sourceSymbols) {
+        public Context(List<? extends Symbol> sourceSymbols) {
             this.sourceSymbols = sourceSymbols;
             this.orderByPositions = new IntArrayList();
         }
@@ -57,7 +63,7 @@ public class OrderByPositionVisitor extends SymbolVisitor<OrderByPositionVisitor
     private OrderByPositionVisitor() {
     }
 
-    public static int[] orderByPositions(List<Symbol> orderBySymbols, List<Symbol> sourceSymbols) {
+    public static int[] orderByPositions(Iterable<? extends Symbol> orderBySymbols, List<? extends Symbol> sourceSymbols) {
         Context context = new Context(sourceSymbols);
         for (Symbol orderBySymbol : orderBySymbols) {
             INSTANCE.process(orderBySymbol, context);

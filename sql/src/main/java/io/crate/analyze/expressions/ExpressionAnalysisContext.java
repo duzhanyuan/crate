@@ -21,58 +21,19 @@
 
 package io.crate.analyze.expressions;
 
-import io.crate.analyze.EvaluatingNormalizer;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Symbol;
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.scalar.timestamp.CurrentTimestampFunction;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
-import io.crate.sql.tree.CurrentTime;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 public class ExpressionAnalysisContext {
 
-    /**
-     * currentTime should be evaluated only once per query/statement.
-     * This map is used to
-     */
-    private final Map<CurrentTime, Literal> allocatedCurrentTimestamps = new HashMap<>();
-
-    private final Map<Function, Function> functionSymbols = new HashMap<>();
     public boolean hasAggregates = false;
-
-    public ExpressionAnalysisContext() {
-    }
 
     public Function allocateFunction(FunctionInfo functionInfo, List<Symbol> arguments) {
         Function newFunction = new Function(functionInfo, arguments);
-        Function existingFunction = functionSymbols.get(newFunction);
-
-        if (existingFunction == null) {
-            functionSymbols.put(newFunction, newFunction);
-            hasAggregates = hasAggregates || functionInfo.type() == FunctionInfo.Type.AGGREGATE;
-
-            return newFunction;
-        } else {
-            return existingFunction;
-        }
-    }
-
-    /**
-     * allocate a new function for the currentTime node or re-use an already evaluated one to ensure
-     * currentTime evaluation is global per query.
-     *
-     * TODO: once sub-selects are implemented need to take care to re-use the ExpressionAnalysisContext...
-     */
-    public Symbol allocateCurrentTime(CurrentTime node, List<Symbol> args, EvaluatingNormalizer normalizer) {
-        Literal literal = allocatedCurrentTimestamps.get(node);
-        if (literal == null) {
-            literal = (Literal)normalizer.normalize(allocateFunction(CurrentTimestampFunction.INFO, args));
-            allocatedCurrentTimestamps.put(node, literal);
-        }
-        return literal;
+        hasAggregates = hasAggregates || functionInfo.type() == FunctionInfo.Type.AGGREGATE;
+        return newFunction;
     }
 }

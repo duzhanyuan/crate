@@ -22,102 +22,97 @@
 package io.crate.operation.collect;
 
 import com.google.common.collect.ImmutableList;
+import io.crate.action.job.ContextPreparer;
+import io.crate.action.job.SharedShardContexts;
 import io.crate.analyze.WhereClause;
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.Row;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.data.Bucket;
+import io.crate.data.Row;
 import io.crate.integrationtests.SQLTransportIntegrationTest;
+import io.crate.jobs.JobContextService;
+import io.crate.jobs.JobExecutionContext;
 import io.crate.metadata.*;
-import io.crate.metadata.doc.DocSchemaInfo;
+import io.crate.operation.NodeOperation;
 import io.crate.operation.operator.EqOperator;
-import io.crate.planner.PlanNodeBuilder;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.node.dql.CollectNode;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
-import io.crate.test.integration.CrateIntegrationTest;
-import io.crate.types.DataType;
+import io.crate.planner.distribution.DistributionInfo;
+import io.crate.planner.node.ExecutionPhase;
+import io.crate.planner.node.dql.RoutedCollectPhase;
 import io.crate.types.DataTypes;
 import org.elasticsearch.cluster.routing.ShardRouting;
+import org.elasticsearch.indices.IndicesService;
+import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static io.crate.testing.TestingHelpers.isRow;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.mockito.Mockito.mock;
 
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.SUITE, numNodes = 1)
+@ESIntegTestCase.ClusterScope(randomDynamicTemplates = false, numDataNodes = 1)
 public class DocLevelCollectTest extends SQLTransportIntegrationTest {
+
     private static final String TEST_TABLE_NAME = "test_table";
     private static final Reference testDocLevelReference = new Reference(
-            new ReferenceInfo(
-                    new ReferenceIdent(new TableIdent(null, TEST_TABLE_NAME), "doc"),
-                    RowGranularity.DOC,
-                    DataTypes.INTEGER
-            )
-    );
+        new ReferenceIdent(new TableIdent(null, TEST_TABLE_NAME), "doc"),
+        RowGranularity.DOC,
+        DataTypes.INTEGER);
     private static final Reference underscoreIdReference = new Reference(
-            new ReferenceInfo(
-                    new ReferenceIdent(new TableIdent(null, TEST_TABLE_NAME), "_id"),
-                    RowGranularity.DOC,
-                    DataTypes.STRING
-            )
-    );
+        new ReferenceIdent(new TableIdent(null, TEST_TABLE_NAME), "_id"),
+        RowGranularity.DOC,
+        DataTypes.STRING);
     private static final Reference underscoreRawReference = new Reference(
-            new ReferenceInfo(
-                    new ReferenceIdent(new TableIdent(null, TEST_TABLE_NAME), "_raw"),
-                    RowGranularity.DOC,
-                    DataTypes.STRING
-            )
-    );
+        new ReferenceIdent(new TableIdent(null, TEST_TABLE_NAME), "_raw"),
+        RowGranularity.DOC,
+        DataTypes.STRING);
 
     private static final String PARTITIONED_TABLE_NAME = "parted_table";
 
-    private NonDistributingCollectOperation operation;
     private Functions functions;
-    private DocSchemaInfo docSchemaInfo;
+    private Schemas schemas;
 
     @Before
     public void prepare() {
-        operation = cluster().getInstance(NonDistributingCollectOperation.class);
-        functions = cluster().getInstance(Functions.class);
-        docSchemaInfo = cluster().getInstance(DocSchemaInfo.class);
+        functions = internalCluster().getDataNodeInstance(Functions.class);
+        schemas = internalCluster().getDataNodeInstance(Schemas.class);
 
         execute(String.format(Locale.ENGLISH, "create table %s (" +
-                "  id integer," +
-                "  name string," +
-                "  date timestamp" +
-                ") clustered into 2 shards partitioned by (date) with(number_of_replicas=0)", PARTITIONED_TABLE_NAME));
+                                              "  id integer," +
+                                              "  name string," +
+                                              "  date timestamp" +
+                                              ") clustered into 2 shards partitioned by (date) with(number_of_replicas=0)", PARTITIONED_TABLE_NAME));
         ensureGreen();
-        execute(String.format("insert into %s (id, name, date) values (?, ?, ?)",
-                PARTITIONED_TABLE_NAME),
-                new Object[]{1, "Ford", 0L});
-        execute(String.format("insert into %s (id, name, date) values (?, ?, ?)",
-                PARTITIONED_TABLE_NAME),
-                new Object[]{2, "Trillian", 1L});
+        execute(String.format(Locale.ENGLISH, "insert into %s (id, name, date) values (?, ?, ?)",
+            PARTITIONED_TABLE_NAME),
+            new Object[]{1, "Ford", 0L});
+        execute(String.format(Locale.ENGLISH, "insert into %s (id, name, date) values (?, ?, ?)",
+            PARTITIONED_TABLE_NAME),
+            new Object[]{2, "Trillian", 1L});
         ensureGreen();
         refresh();
 
         execute(String.format(Locale.ENGLISH, "create table %s (" +
-                " id integer primary key," +
-                " doc integer" +
-                ") clustered into 2 shards with(number_of_replicas=0)", TEST_TABLE_NAME));
+                                              " id integer primary key," +
+                                              " doc integer" +
+                                              ") clustered into 2 shards with(number_of_replicas=0)", TEST_TABLE_NAME));
         ensureGreen();
-        execute(String.format("insert into %s (id, doc) values (?, ?)", TEST_TABLE_NAME), new Object[]{1, 2});
-        execute(String.format("insert into %s (id, doc) values (?, ?)", TEST_TABLE_NAME), new Object[]{3, 4});
+        execute(String.format(Locale.ENGLISH, "insert into %s (id, doc) values (?, ?)", TEST_TABLE_NAME), new Object[]{1, 2});
+        execute(String.format(Locale.ENGLISH, "insert into %s (id, doc) values (?, ?)", TEST_TABLE_NAME), new Object[]{3, 4});
         refresh();
     }
 
     @After
     public void cleanUp() {
-        operation = null;
         functions = null;
-        docSchemaInfo = null;
+        schemas = null;
     }
 
     private Routing routing(String table) {
@@ -130,10 +125,10 @@ public class DocLevelCollectTest extends SQLTransportIntegrationTest {
                 locations.put(shardRouting.currentNodeId(), shardIds);
             }
 
-            List<Integer> shardIdSet = shardIds.get(shardRouting.index());
+            List<Integer> shardIdSet = shardIds.get(shardRouting.getIndexName());
             if (shardIdSet == null) {
                 shardIdSet = new ArrayList<>();
-                shardIds.put(shardRouting.index(), shardIdSet);
+                shardIds.put(shardRouting.index().getName(), shardIdSet);
             }
             shardIdSet.add(shardRouting.id());
         }
@@ -141,55 +136,64 @@ public class DocLevelCollectTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testCollectDocLevel() throws Exception {
-        CollectNode collectNode = new CollectNode("docCollect", routing(TEST_TABLE_NAME));
-        collectNode.toCollect(Arrays.<Symbol>asList(testDocLevelReference, underscoreRawReference, underscoreIdReference));
-        collectNode.maxRowGranularity(RowGranularity.DOC);
-        collectNode.jobId(UUID.randomUUID());
-        PlanNodeBuilder.setOutputTypes(collectNode);
+    public void testCollectDocLevel() throws Throwable {
+        List<Symbol> toCollect = Arrays.asList(testDocLevelReference, underscoreRawReference, underscoreIdReference);
+        RoutedCollectPhase collectNode = getCollectNode(toCollect, WhereClause.MATCH_ALL);
         Bucket result = collect(collectNode);
-        assertThat(result, contains(
-                isRow(2, "{\"id\":1,\"doc\":2}", "1"),
-                isRow(4, "{\"id\":3,\"doc\":4}", "3")
+        assertThat(result, containsInAnyOrder(
+            isRow(2, "{\"id\":1,\"doc\":2}", "1"),
+            isRow(4, "{\"id\":3,\"doc\":4}", "3")
         ));
     }
 
     @Test
-    public void testCollectDocLevelWhereClause() throws Exception {
-        EqOperator op = (EqOperator) functions.get(new FunctionIdent(EqOperator.NAME,
-                ImmutableList.<DataType>of(DataTypes.INTEGER, DataTypes.INTEGER)));
-        CollectNode collectNode = new CollectNode("docCollect", routing(TEST_TABLE_NAME));
-        collectNode.jobId(UUID.randomUUID());
-        collectNode.toCollect(Arrays.<Symbol>asList(testDocLevelReference));
-        collectNode.maxRowGranularity(RowGranularity.DOC);
-        collectNode.whereClause(new WhereClause(new Function(
-                op.info(),
-                Arrays.<Symbol>asList(testDocLevelReference, Literal.newLiteral(2)))
-        ));
-        PlanNodeBuilder.setOutputTypes(collectNode);
+    public void testCollectDocLevelWhereClause() throws Throwable {
+        EqOperator op =
+            (EqOperator) functions.getBuiltin(EqOperator.NAME, ImmutableList.of(DataTypes.INTEGER, DataTypes.INTEGER));
+        List<Symbol> toCollect = Collections.<Symbol>singletonList(testDocLevelReference);
+        WhereClause whereClause = new WhereClause(new Function(
+            op.info(),
+            Arrays.asList(testDocLevelReference, Literal.of(2)))
+        );
+        RoutedCollectPhase collectNode = getCollectNode(toCollect, whereClause);
 
         Bucket result = collect(collectNode);
         assertThat(result, contains(isRow(2)));
     }
 
+    private RoutedCollectPhase getCollectNode(List<Symbol> toCollect, Routing routing, WhereClause whereClause) {
+        return new RoutedCollectPhase(
+            UUID.randomUUID(),
+            1,
+            "docCollect",
+            routing,
+            RowGranularity.DOC,
+            toCollect,
+            ImmutableList.of(),
+            whereClause,
+            DistributionInfo.DEFAULT_BROADCAST
+        );
+    }
+
+    private RoutedCollectPhase getCollectNode(List<Symbol> toCollect, WhereClause whereClause) {
+        return getCollectNode(toCollect, routing(TEST_TABLE_NAME), whereClause);
+    }
 
     @Test
-    public void testCollectWithPartitionedColumns() throws Exception {
-        Routing routing = docSchemaInfo.getTableInfo(PARTITIONED_TABLE_NAME).getRouting(WhereClause.MATCH_ALL);
-        TableIdent tableIdent = new TableIdent(ReferenceInfos.DEFAULT_SCHEMA_NAME, PARTITIONED_TABLE_NAME);
-        CollectNode collectNode = new CollectNode("docCollect", routing);
-        collectNode.toCollect(Arrays.<Symbol>asList(
-                new Reference(new ReferenceInfo(
-                        new ReferenceIdent(tableIdent, "id"),
-                        RowGranularity.DOC, DataTypes.INTEGER)),
-                new Reference(new ReferenceInfo(
-                        new ReferenceIdent(tableIdent, "date"),
-                        RowGranularity.SHARD, DataTypes.TIMESTAMP))
-        ));
-        collectNode.maxRowGranularity(RowGranularity.DOC);
-        collectNode.isPartitioned(true);
-        collectNode.jobId(UUID.randomUUID());
-        PlanNodeBuilder.setOutputTypes(collectNode);
+    public void testCollectWithPartitionedColumns() throws Throwable {
+        TableIdent tableIdent = new TableIdent(Schemas.DEFAULT_SCHEMA_NAME, PARTITIONED_TABLE_NAME);
+        Routing routing = schemas.getTableInfo(tableIdent, null).getRouting(WhereClause.MATCH_ALL, null);
+        RoutedCollectPhase collectNode = getCollectNode(
+            Arrays.asList(
+                new Reference(new ReferenceIdent(tableIdent, "id"),
+                    RowGranularity.DOC,
+                    DataTypes.INTEGER),
+                new Reference(new ReferenceIdent(tableIdent, "date"),
+                    RowGranularity.SHARD,
+                    DataTypes.TIMESTAMP)),
+            routing,
+            WhereClause.MATCH_ALL
+        );
 
         Bucket result = collect(collectNode);
         for (Row row : result) {
@@ -197,12 +201,23 @@ public class DocLevelCollectTest extends SQLTransportIntegrationTest {
         }
 
         assertThat(result, containsInAnyOrder(
-                isRow(1, 0L),
-                isRow(2, 1L)
+            isRow(1, 0L),
+            isRow(2, 1L)
         ));
     }
 
-    private Bucket collect(CollectNode collectNode) throws InterruptedException, java.util.concurrent.ExecutionException {
-        return operation.collect(collectNode, null).get();
+    private Bucket collect(RoutedCollectPhase collectNode) throws Throwable {
+        ContextPreparer contextPreparer = internalCluster().getDataNodeInstance(ContextPreparer.class);
+        JobContextService contextService = internalCluster().getDataNodeInstance(JobContextService.class);
+        SharedShardContexts sharedShardContexts = new SharedShardContexts(internalCluster().getDataNodeInstance(IndicesService.class));
+        JobExecutionContext.Builder builder = contextService.newBuilder(collectNode.jobId());
+        NodeOperation nodeOperation = NodeOperation.withDirectResponse(collectNode, mock(ExecutionPhase.class), (byte) 0,
+            "remoteNode");
+
+        List<CompletableFuture<Bucket>> results = contextPreparer.prepareOnRemote(
+            ImmutableList.of(nodeOperation), builder, sharedShardContexts);
+        JobExecutionContext context = contextService.createContext(builder);
+        context.start();
+        return results.get(0).get(2, TimeUnit.SECONDS);
     }
 }

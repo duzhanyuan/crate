@@ -23,125 +23,135 @@ package io.crate.operation.collect;
 
 import com.google.common.collect.ImmutableList;
 import io.crate.analyze.WhereClause;
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.TreeMapBuilder;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.data.Bucket;
+import io.crate.data.CollectionBucket;
 import io.crate.integrationtests.SQLTransportIntegrationTest;
 import io.crate.metadata.*;
 import io.crate.metadata.information.InformationSchemaInfo;
 import io.crate.metadata.sys.SysClusterTableInfo;
 import io.crate.metadata.table.TableInfo;
 import io.crate.operation.operator.EqOperator;
-import io.crate.planner.RowGranularity;
-import io.crate.planner.node.dql.CollectNode;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
-import io.crate.test.integration.CrateIntegrationTest;
+import io.crate.operation.reference.sys.cluster.ClusterNameExpression;
+import io.crate.planner.distribution.DistributionInfo;
+import io.crate.planner.node.dql.RoutedCollectPhase;
+import io.crate.planner.projection.Projection;
+import io.crate.testing.TestingBatchConsumer;
 import io.crate.testing.TestingHelpers;
-import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.test.ESIntegTestCase;
+import org.hamcrest.Matchers;
 import org.junit.Before;
 import org.junit.Test;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
 
 import static org.hamcrest.core.Is.is;
+import static org.mockito.Mockito.mock;
 
-@CrateIntegrationTest.ClusterScope(scope = CrateIntegrationTest.Scope.GLOBAL)
+@ESIntegTestCase.ClusterScope(numDataNodes = 1, numClientNodes = 0, supportsDedicatedMasters = false)
 public class HandlerSideLevelCollectTest extends SQLTransportIntegrationTest {
 
-    static {
-        ClassLoader.getSystemClassLoader().setDefaultAssertionStatus(true);
-    }
-
-    private HandlerSideDataCollectOperation operation;
+    private MapSideDataCollectOperation operation;
     private Functions functions;
-
 
     @Before
     public void prepare() {
-        operation = cluster().getInstance(HandlerSideDataCollectOperation.class);
-        functions = cluster().getInstance(Functions.class);
+        operation = internalCluster().getDataNodeInstance(MapSideDataCollectOperation.class);
+        functions = internalCluster().getInstance(Functions.class);
+    }
+
+    private RoutedCollectPhase collectNode(Routing routing,
+                                           List<Symbol> toCollect,
+                                           RowGranularity rowGranularity,
+                                           WhereClause whereClause) {
+        return new RoutedCollectPhase(
+            UUID.randomUUID(),
+            0,
+            "dummy",
+            routing,
+            rowGranularity,
+            toCollect,
+            ImmutableList.<Projection>of(),
+            whereClause,
+            DistributionInfo.DEFAULT_BROADCAST
+        );
+    }
+
+    private RoutedCollectPhase collectNode(Routing routing, List<Symbol> toCollect, RowGranularity rowGranularity) {
+        return collectNode(routing, toCollect, rowGranularity, WhereClause.MATCH_ALL);
     }
 
     @Test
     public void testClusterLevel() throws Exception {
-        Routing routing = SysClusterTableInfo.ROUTING;
-        CollectNode collectNode = new CollectNode("clusterCollect", routing);
-
-        Reference clusterNameRef = new Reference(SysClusterTableInfo.INFOS.get(new ColumnIdent("name")));
-        collectNode.toCollect(Arrays.<Symbol>asList(clusterNameRef));
-        collectNode.maxRowGranularity(RowGranularity.CLUSTER);
+        Schemas schemas = internalCluster().getInstance(Schemas.class);
+        TableInfo tableInfo = schemas.getTableInfo(new TableIdent("sys", "cluster"), null);
+        Routing routing = tableInfo.getRouting(WhereClause.MATCH_ALL, null);
+        Reference clusterNameRef = new Reference(new ReferenceIdent(SysClusterTableInfo.IDENT, new ColumnIdent(ClusterNameExpression.NAME)), RowGranularity.CLUSTER, DataTypes.STRING);
+        RoutedCollectPhase collectNode = collectNode(routing, Arrays.<Symbol>asList(clusterNameRef), RowGranularity.CLUSTER);
         Bucket result = collect(collectNode);
         assertThat(result.size(), is(1));
-        assertTrue(((BytesRef) result.iterator().next().get(0)).utf8ToString().startsWith("shared-"));
+        assertThat(((BytesRef) result.iterator().next().get(0)).utf8ToString(), Matchers.startsWith("SUITE-"));
     }
 
-    private Bucket collect(CollectNode collectNode) throws InterruptedException, java.util.concurrent.ExecutionException {
-        return operation.collect(collectNode, null).get();
+    private Bucket collect(RoutedCollectPhase collectPhase) throws Exception {
+        TestingBatchConsumer consumer = new TestingBatchConsumer();
+        CrateCollector collector = operation.createCollector(collectPhase, consumer, mock(JobCollectContext.class));
+        operation.launchCollector(collector, JobCollectContext.threadPoolName(collectPhase));
+        return new CollectionBucket(consumer.getResult());
     }
 
     @Test
     public void testInformationSchemaTables() throws Exception {
-        Routing routing = new Routing(TreeMapBuilder.<String, Map<String, List<Integer>>>newMapBuilder().put(
-                TableInfo.NULL_NODE_ID, TreeMapBuilder.<String, List<Integer>>newMapBuilder().put("information_schema.tables", null).map()
-        ).map());
-        CollectNode collectNode = new CollectNode("tablesCollect", routing);
-
-        InformationSchemaInfo schemaInfo =  cluster().getInstance(InformationSchemaInfo.class);
+        InformationSchemaInfo schemaInfo = internalCluster().getInstance(InformationSchemaInfo.class);
         TableInfo tablesTableInfo = schemaInfo.getTableInfo("tables");
+        Routing routing = tablesTableInfo.getRouting(WhereClause.MATCH_ALL, null);
         List<Symbol> toCollect = new ArrayList<>();
-        for (ReferenceInfo info : tablesTableInfo.columns()) {
-            toCollect.add(new Reference(info));
+        for (Reference reference : tablesTableInfo.columns()) {
+            toCollect.add(reference);
         }
-        Symbol tableNameRef = toCollect.get(1);
+        Symbol tableNameRef = toCollect.get(9);
 
-        FunctionImplementation eqImpl = functions.get(new FunctionIdent(EqOperator.NAME,
-                ImmutableList.<DataType>of(DataTypes.STRING, DataTypes.STRING)));
+        FunctionImplementation eqImpl
+            = functions.getBuiltin(EqOperator.NAME, ImmutableList.of(DataTypes.STRING, DataTypes.STRING));
         Function whereClause = new Function(eqImpl.info(),
-                Arrays.asList(tableNameRef, Literal.newLiteral("shards")));
+            Arrays.asList(tableNameRef, Literal.of("shards")));
 
-        collectNode.whereClause(new WhereClause(whereClause));
-        collectNode.toCollect(toCollect);
-        collectNode.maxRowGranularity(RowGranularity.DOC);
+        RoutedCollectPhase collectNode = collectNode(routing, toCollect, RowGranularity.DOC, new WhereClause(whereClause));
         Bucket result = collect(collectNode);
-        System.out.println(TestingHelpers.printedTable(result));
-        assertEquals("sys| shards| 1| 0| NULL| NULL| NULL\n", TestingHelpers.printedTable(result));
+        assertThat(TestingHelpers.printedTable(result),
+            is("NULL| NULL| NULL| strict| 0| 1| NULL| NULL| NULL| shards| sys| NULL\n"));
     }
-
 
     @Test
     public void testInformationSchemaColumns() throws Exception {
-        Routing routing = new Routing(TreeMapBuilder.<String, Map<String, List<Integer>>>newMapBuilder().put(
-                TableInfo.NULL_NODE_ID, TreeMapBuilder.<String, List<Integer>>newMapBuilder().put("information_schema.columns", null).map()
-        ).map());
-        CollectNode collectNode = new CollectNode("columnsCollect", routing);
-
-        InformationSchemaInfo schemaInfo =  cluster().getInstance(InformationSchemaInfo.class);
+        InformationSchemaInfo schemaInfo = internalCluster().getInstance(InformationSchemaInfo.class);
         TableInfo tableInfo = schemaInfo.getTableInfo("columns");
+        assert tableInfo != null;
+        Routing routing = tableInfo.getRouting(WhereClause.MATCH_ALL, null);
         List<Symbol> toCollect = new ArrayList<>();
-        for (ReferenceInfo info : tableInfo.columns()) {
-            toCollect.add(new Reference(info));
+        for (Reference ref : tableInfo.columns()) {
+            toCollect.add(ref);
         }
-        collectNode.toCollect(toCollect);
-        collectNode.maxRowGranularity(RowGranularity.DOC);
+        RoutedCollectPhase collectNode = collectNode(routing, toCollect, RowGranularity.DOC);
         Bucket result = collect(collectNode);
 
+        String expected = "id| string| NULL| false| true| 1| cluster| sys\n" +
+                          "master_node| string| NULL| false| true| 2| cluster| sys\n" +
+                          "name| string| NULL| false| true| 3| cluster| sys\n" +
+                          "settings| object| NULL| false| true| 4| cluster| sys\n";
 
-        String expected = "sys| cluster| id| 1| string\n" +
-                "sys| cluster| name| 2| string\n" +
-                "sys| cluster| master_node| 3| string\n" +
-                "sys| cluster| settings| 4| object";
 
-
-        assertTrue(TestingHelpers.printedTable(result).contains(expected));
+        assertThat(TestingHelpers.printedTable(result), Matchers.containsString(expected));
 
         // second time - to check if the internal iterator resets
-        System.out.println(TestingHelpers.printedTable(result));
-        result = operation.collect(collectNode, null).get();
-        assertTrue(TestingHelpers.printedTable(result).contains(expected));
+        result = collect(collectNode);
+        assertThat(TestingHelpers.printedTable(result), Matchers.containsString(expected));
     }
-
 }

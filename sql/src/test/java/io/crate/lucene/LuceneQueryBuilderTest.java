@@ -21,57 +21,176 @@
 
 package io.crate.lucene;
 
-import com.google.common.collect.Sets;
+import com.google.common.collect.ImmutableMap;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
-import io.crate.metadata.FunctionIdent;
-import io.crate.metadata.FunctionInfo;
+import io.crate.analyze.relations.AnalyzedRelation;
+import io.crate.analyze.relations.TableRelation;
+import io.crate.lucene.match.CrateRegexQuery;
 import io.crate.metadata.Functions;
-import io.crate.operation.operator.*;
-import io.crate.operation.operator.any.*;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
+import io.crate.metadata.Reference;
+import io.crate.metadata.TableIdent;
+import io.crate.metadata.doc.DocTableInfo;
+import io.crate.metadata.table.ColumnPolicy;
+import io.crate.metadata.table.TestingTableInfo;
+import io.crate.sql.tree.QualifiedName;
 import io.crate.test.integration.CrateUnitTest;
+import io.crate.testing.SqlExpressions;
 import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
-import io.crate.types.SetType;
-import org.apache.lucene.queries.BooleanFilter;
-import org.apache.lucene.queries.TermsFilter;
-import org.apache.lucene.sandbox.queries.regex.RegexQuery;
+import org.apache.lucene.queries.TermsQuery;
 import org.apache.lucene.search.*;
-import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.inject.ModulesBuilder;
+import org.apache.lucene.spatial.prefix.IntersectsPrefixTreeQuery;
+import org.apache.lucene.spatial.prefix.WithinPrefixTreeQuery;
+import org.elasticsearch.common.UUIDs;
+import org.elasticsearch.common.compress.CompressedXContent;
 import org.elasticsearch.common.lucene.search.MatchNoDocsQuery;
-import org.elasticsearch.common.lucene.search.XConstantScoreQuery;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.env.Environment;
+import org.elasticsearch.index.Index;
+import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.analysis.AnalysisService;
 import org.elasticsearch.index.cache.IndexCache;
-import org.elasticsearch.search.internal.SearchContext;
+import org.elasticsearch.index.fielddata.IndexFieldData;
+import org.elasticsearch.index.fielddata.IndexFieldDataService;
+import org.elasticsearch.index.fielddata.IndexGeoPointFieldData;
+import org.elasticsearch.index.mapper.*;
+import org.elasticsearch.index.mapper.array.DynamicArrayFieldMapperBuilderFactoryProvider;
+import org.elasticsearch.index.similarity.SimilarityService;
+import org.elasticsearch.indices.IndicesModule;
+import org.elasticsearch.indices.analysis.AnalysisModule;
+import org.elasticsearch.plugins.MapperPlugin;
+import org.elasticsearch.test.IndexSettingsModule;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.mockito.Answers;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Map;
 
-import static io.crate.testing.TestingHelpers.createFunction;
-import static io.crate.testing.TestingHelpers.createReference;
-import static org.hamcrest.Matchers.instanceOf;
-import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class LuceneQueryBuilderTest extends CrateUnitTest {
 
     private LuceneQueryBuilder builder;
-    private SearchContext searchContext;
     private IndexCache indexCache;
+    private SqlExpressions expressions;
+    private Map<QualifiedName, AnalyzedRelation> sources;
+    private IndexFieldDataService indexFieldDataService;
+    private MapperService mapperService;
+
+    @Rule
+    public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     @Before
     public void prepare() throws Exception {
-        Functions functions = new ModulesBuilder()
-                .add(new OperatorModule()).createInjector().getInstance(Functions.class);
-        builder = new LuceneQueryBuilder(functions);
-        searchContext = mock(SearchContext.class, Answers.RETURNS_MOCKS.get());
+        DocTableInfo users = TestingTableInfo.builder(new TableIdent(null, "users"), null)
+            .add("name", DataTypes.STRING)
+            .add("x", DataTypes.INTEGER, null, ColumnPolicy.DYNAMIC, Reference.IndexType.NOT_ANALYZED, false, false)
+            .add("d", DataTypes.DOUBLE)
+            .add("d_array", new ArrayType(DataTypes.DOUBLE))
+            .add("y_array", new ArrayType(DataTypes.LONG))
+            .add("shape", DataTypes.GEO_SHAPE)
+            .add("point", DataTypes.GEO_POINT)
+            .build();
+        TableRelation usersTr = new TableRelation(users);
+        sources = ImmutableMap.of(new QualifiedName("users"), usersTr);
+
+        expressions = new SqlExpressions(sources, usersTr);
+        builder = new LuceneQueryBuilder(expressions.getInstance(Functions.class));
         indexCache = mock(IndexCache.class, Answers.RETURNS_MOCKS.get());
+
+        Path tempDir = createTempDir();
+        Index index = new Index(users.ident().indexName(), UUIDs.randomBase64UUID());
+        Settings nodeSettings = Settings.builder().put("path.home", tempDir).build();
+        IndexSettings idxSettings = IndexSettingsModule.newIndexSettings(index, nodeSettings);
+        when(indexCache.getIndexSettings()).thenReturn(idxSettings);
+        AnalysisService analysisService = createAnalysisService(idxSettings, nodeSettings);
+        mapperService = createMapperService(idxSettings, analysisService);
+
+        // @formatter:off
+        XContentBuilder xContentBuilder = XContentFactory.jsonBuilder()
+            .startObject()
+            .startObject("default")
+                .startObject("properties")
+                    .startObject("name").field("type", "keyword").endObject()
+                    .startObject("x").field("type", "integer").endObject()
+                    .startObject("d").field("type", "double").endObject()
+                    .startObject("point").field("type", "geo_point").endObject()
+                    .startObject("shape").field("type", "geo_shape").endObject()
+                    .startObject("d_array")
+                        .field("type", "array")
+                        .startObject("inner")
+                            .field("type", "double")
+                        .endObject()
+                    .endObject()
+                    .startObject("y_array")
+                        .field("type", "array")
+                        .startObject("inner")
+                            .field("type", "integer")
+                        .endObject()
+                    .endObject()
+                .endObject()
+            .endObject()
+            .endObject();
+        // @formatter:on
+        mapperService.merge("default",
+            new CompressedXContent(xContentBuilder.bytes()), MapperService.MergeReason.MAPPING_UPDATE, true);
+
+        indexFieldDataService = mock(IndexFieldDataService.class);
+        IndexFieldData geoFieldData = mock(IndexGeoPointFieldData.class);
+
+        when(geoFieldData.getFieldName()).thenReturn("point");
+        when(indexFieldDataService.getForField(mapperService.fullName("point"))).thenReturn(geoFieldData);
+    }
+
+    private MapperService createMapperService(IndexSettings indexSettings, AnalysisService analysisService) {
+        DynamicArrayFieldMapperBuilderFactoryProvider arrayMapperProvider =
+            new DynamicArrayFieldMapperBuilderFactoryProvider();
+        arrayMapperProvider.dynamicArrayFieldMapperBuilderFactory = new BuilderFactory();
+        IndicesModule indicesModule = new IndicesModule(Collections.singletonList(
+            new MapperPlugin() {
+                @Override
+                public Map<String, Mapper.TypeParser> getMappers() {
+                    return Collections.singletonMap(ArrayMapper.CONTENT_TYPE, new ArrayTypeParser());
+                }
+            }));
+        return new MapperService(
+            indexSettings,
+            analysisService,
+            new SimilarityService(indexSettings, Collections.emptyMap()),
+            indicesModule.getMapperRegistry(),
+            () -> null,
+            arrayMapperProvider
+        );
+    }
+
+    private AnalysisService createAnalysisService(IndexSettings indexSettings, Settings nodeSettings) throws IOException {
+        Environment env = new Environment(nodeSettings);
+        AnalysisModule analysisModule = new AnalysisModule(env, Collections.emptyList());
+        return analysisModule.getAnalysisRegistry().build(indexSettings);
+    }
+
+    private WhereClause asWhereClause(String expression) {
+        return new WhereClause(expressions.normalize(expressions.asSymbol(expression)));
+    }
+
+    private Query convert(WhereClause clause) {
+        return builder.convert(clause, mapperService, null, indexFieldDataService, indexCache).query;
+    }
+
+    private Query convert(String expression) {
+        return convert(asWhereClause(expression));
     }
 
     @Test
@@ -83,8 +202,15 @@ public class LuceneQueryBuilderTest extends CrateUnitTest {
     @Test
     public void testWhereRefEqNullWithDifferentTypes() throws Exception {
         for (DataType type : DataTypes.PRIMITIVE_TYPES) {
-            Reference foo = createReference("foo", type);
-            Query query = convert(whereClause(EqOperator.NAME, foo, Literal.newLiteral(type, null)));
+            DocTableInfo tableInfo = TestingTableInfo.builder(new TableIdent(null, "test_primitive"), null)
+                .add("x", type)
+                .build();
+            TableRelation tableRelation = new TableRelation(tableInfo);
+            Map<QualifiedName, AnalyzedRelation> tableSources = ImmutableMap.of(new QualifiedName(tableInfo.ident().name()), tableRelation);
+            SqlExpressions sqlExpressions = new SqlExpressions(
+                tableSources, tableRelation, new Object[]{null}, SessionContext.SYSTEM_SESSION);
+
+            Query query = convert(new WhereClause(sqlExpressions.normalize(sqlExpressions.asSymbol("x = ?"))));
 
             // must always become a MatchNoDocsQuery
             // string: term query with null would cause NPE
@@ -96,96 +222,71 @@ public class LuceneQueryBuilderTest extends CrateUnitTest {
 
     @Test
     public void testWhereRefEqRef() throws Exception {
-        Reference foo = createReference("foo", DataTypes.STRING);
-        Query query = convert(whereClause(EqOperator.NAME, foo, foo));
-        assertThat(query, instanceOf(FilteredQuery.class));
+        Query query = convert("name = name");
+        assertThat(query, instanceOf(GenericFunctionQuery.class));
     }
 
     @Test
     public void testLteQuery() throws Exception {
-        Query query = convert(new WhereClause(createFunction(LteOperator.NAME,
-                DataTypes.BOOLEAN,
-                createReference("x", DataTypes.INTEGER),
-                Literal.newLiteral(10))));
-        assertThat(query, instanceOf(NumericRangeQuery.class));
-        assertThat(query.toString(), is("x:{* TO 10]"));
+        Query query = convert("x <= 10");
+        assertThat(query.toString(), is("x:[-2147483648 TO 10]"));
+    }
+
+    @Test
+    public void testNotEqOnNotNullableColumnQuery() throws Exception {
+        Query query = convert("x != 10");
+        assertThat(query, instanceOf(BooleanQuery.class));
+        assertThat(query.toString(), is("+(+*:* -x:[10 TO 10])"));
+
+        query = convert("not x = 10");
+        assertThat(query, instanceOf(BooleanQuery.class));
+        assertThat(query.toString(), is("+(+*:* -x:[10 TO 10])"));
     }
 
     @Test
     public void testEqOnTwoArraysBecomesGenericFunctionQuery() throws Exception {
-        DataType longArray = new ArrayType(DataTypes.LONG);
-        Query query = convert(new WhereClause(createFunction(EqOperator.NAME,
-                DataTypes.BOOLEAN,
-                createReference("x", longArray),
-                Literal.newLiteral(longArray, new Object[] { 10L, null, 20L }))));
-        assertThat(query, instanceOf(FilteredQuery.class));
-        FilteredQuery filteredQuery = (FilteredQuery) query;
-
-        assertThat(filteredQuery.getFilter(), instanceOf(BooleanFilter.class));
-        assertThat(filteredQuery.getQuery(), instanceOf(XConstantScoreQuery.class));
-
-        BooleanFilter filter = (BooleanFilter) filteredQuery.getFilter();
-        assertThat(filter.clauses().get(0).getFilter(), instanceOf(BooleanFilter.class)); // booleanFilter with terms filter
-        assertThat(filter.clauses().get(1).getFilter(), instanceOf(Filter.class)); // generic function filter
+        Query query = convert("y_array = [10, 20, 30]");
+        assertThat(query, instanceOf(BooleanQuery.class));
+        BooleanQuery booleanQuery = (BooleanQuery) query;
+        assertThat(booleanQuery.clauses().get(0).getQuery(), instanceOf(PointInSetQuery.class));
+        assertThat(booleanQuery.clauses().get(1).getQuery(), instanceOf(GenericFunctionQuery.class));
     }
 
     @Test
     public void testEqOnTwoArraysBecomesGenericFunctionQueryAllValuesNull() throws Exception {
-        DataType longArray = new ArrayType(DataTypes.LONG);
-        Query query = convert(new WhereClause(createFunction(EqOperator.NAME,
-                DataTypes.BOOLEAN,
-                createReference("x", longArray),
-                Literal.newLiteral(longArray, new Object[] { null, null, null }))));
-        assertThat(query, instanceOf(FilteredQuery.class));
+        SqlExpressions sqlExpressions = new SqlExpressions(sources, new Object[]{new Object[]{null, null, null}});
+        Query query = convert(new WhereClause(expressions.normalize(sqlExpressions.asSymbol("y_array = ?"))));
+        assertThat(query, instanceOf(GenericFunctionQuery.class));
     }
 
     @Test
     public void testEqOnArrayWithTooManyClauses() throws Exception {
         Object[] values = new Object[2000]; // should trigger the TooManyClauses exception
         Arrays.fill(values, 10L);
-        DataType longArray = new ArrayType(DataTypes.LONG);
-        Query query = convert(new WhereClause(createFunction(EqOperator.NAME,
-                DataTypes.BOOLEAN,
-                createReference("x", longArray),
-                Literal.newLiteral(longArray, values))));
-        assertThat(query, instanceOf(FilteredQuery.class));
+        SqlExpressions sqlExpressions = new SqlExpressions(sources, new Object[]{values});
+        Query query = convert(new WhereClause(expressions.normalize(sqlExpressions.asSymbol("y_array = ?"))));
+        assertThat(query, instanceOf(BooleanQuery.class));
+        BooleanQuery booleanQuery = (BooleanQuery) query;
+        assertThat(booleanQuery.clauses().get(0).getQuery(), instanceOf(PointInSetQuery.class));
+        assertThat(booleanQuery.clauses().get(1).getQuery(), instanceOf(GenericFunctionQuery.class));
     }
 
     @Test
     public void testGteQuery() throws Exception {
-        Query query = convert(new WhereClause(createFunction(GteOperator.NAME,
-                DataTypes.BOOLEAN,
-                createReference("x", DataTypes.INTEGER),
-                Literal.newLiteral(10))));
-        assertThat(query, instanceOf(NumericRangeQuery.class));
-        assertThat(query.toString(), is("x:[10 TO *}"));
+        Query query = convert("x >= 10");
+        assertThat(query.toString(), is("x:[10 TO 2147483647]"));
     }
 
     @Test
-    public void testWhereRefInSetLiteralIsConvertedToBooleanQuery() throws Exception {
-        DataType dataType = new SetType(DataTypes.INTEGER);
-        Reference foo = createReference("foo", DataTypes.INTEGER);
-        WhereClause whereClause = new WhereClause(
-                createFunction(InOperator.NAME, DataTypes.BOOLEAN,
-                        foo,
-                        Literal.newLiteral(dataType, Sets.newHashSet(1, 3))));
-        Query query = convert(whereClause);
-        assertThat(query, instanceOf(FilteredQuery.class));
-        assertThat(((FilteredQuery)query).getFilter(), instanceOf(TermsFilter.class));
+    public void testWhereRefInSetLiteralIsConvertedToTermsQuery() throws Exception {
+        Query query = convert("x in (1, 3)");
+        assertThat(query, instanceOf(PointInSetQuery.class));
     }
 
     @Test
-    public void testWhereStringRefInSetLiteralIsConvertedToBooleanQuery() throws Exception {
-        DataType dataType = new SetType(DataTypes.STRING);
-        Reference foo = createReference("foo", DataTypes.STRING);
-        WhereClause whereClause = new WhereClause(
-                createFunction(InOperator.NAME, DataTypes.BOOLEAN,
-                        foo,
-                        Literal.newLiteral(dataType, Sets.newHashSet(new BytesRef("foo"), new BytesRef("bar")))
-                ));
-        Query query = convert(whereClause);
-        assertThat(query, instanceOf(FilteredQuery.class));
-        assertThat(((FilteredQuery)query).getFilter(), instanceOf(TermsFilter.class));
+    public void testWhereStringRefInSetLiteralIsConvertedToTermsQuery() throws Exception {
+        Query query = convert("name in ('foo', 'bar')");
+        assertThat(query, instanceOf(TermsQuery.class));
     }
 
     /**
@@ -194,10 +295,10 @@ public class LuceneQueryBuilderTest extends CrateUnitTest {
      */
     @Test
     public void testRegexQueryFast() throws Exception {
-        Reference value = createReference("foo", DataTypes.STRING);
-        Literal pattern = Literal.newLiteral(new BytesRef("[a-z]"));
-        Query query = convert(whereClause(RegexpMatchOperator.NAME, value, pattern));
-        assertThat(query, instanceOf(RegexpQuery.class));
+        Query query = convert("name ~ '[a-z]'");
+        assertThat(query, instanceOf(ConstantScoreQuery.class));
+        ConstantScoreQuery scoreQuery = (ConstantScoreQuery) query;
+        assertThat(scoreQuery.getQuery(), instanceOf(RegexpQuery.class));
     }
 
     /**
@@ -206,115 +307,210 @@ public class LuceneQueryBuilderTest extends CrateUnitTest {
      */
     @Test
     public void testRegexQueryPcre() throws Exception {
-        Reference value = createReference("foo", DataTypes.STRING);
-        Literal pattern = Literal.newLiteral(new BytesRef("\\D"));
-        Query query = convert(whereClause(RegexpMatchOperator.NAME, value, pattern));
-        assertThat(query, instanceOf(RegexQuery.class));
+        Query query = convert("name ~ '\\D'");
+        assertThat(query, instanceOf(CrateRegexQuery.class));
+    }
+
+    @Test
+    public void testIdQuery() throws Exception {
+        Query query = convert("_id = 'i1'");
+        assertThat(query, instanceOf(TermQuery.class));
+        assertThat(query.toString(), is("_uid:default#i1"));
     }
 
     @Test
     public void testAnyEqArrayLiteral() throws Exception {
-        Reference ref = createReference("d", DataTypes.DOUBLE);
-        Literal doubleArrayLiteral = Literal.newLiteral(new Object[]{-1.5d, 0.0d, 1.5d}, new ArrayType(DataTypes.DOUBLE));
-        Query query = convert(whereClause(AnyEqOperator.NAME, ref, doubleArrayLiteral));
-        assertThat(query, instanceOf(FilteredQuery.class));
-        assertThat(((FilteredQuery)query).getFilter(), instanceOf(TermsFilter.class));
+        Query query = convert("d = any([-1.5, 0.0, 1.5])");
+        assertThat(query, instanceOf(PointInSetQuery.class));
     }
 
     @Test
     public void testAnyEqArrayReference() throws Exception {
-        Reference ref = createReference("d_array", new ArrayType(DataTypes.DOUBLE));
-        Literal doubleLiteral = Literal.newLiteral(1.5d);
-        Query query = convert(whereClause(AnyEqOperator.NAME, doubleLiteral, ref));
-        assertThat(query.toString(), is("d_array:[1.5 TO 1.5]"));
+        Query query = convert("1.5 = any(d_array)");
+        assertThat(query, instanceOf(PointRangeQuery.class));
+        assertThat(query.toString(), startsWith("d_array"));
     }
 
     @Test
     public void testAnyGreaterAndSmaller() throws Exception {
-
-        Reference arrayRef = createReference("d_array", new ArrayType(DataTypes.DOUBLE));
-        Literal doubleLiteral = Literal.newLiteral(1.5d);
-
-        Reference ref = createReference("d", DataTypes.DOUBLE);
-        Literal arrayLiteral = Literal.newLiteral(new Object[]{1.2d, 3.5d}, new ArrayType(DataTypes.DOUBLE));
-
-        // 1.5d < ANY (d_array)
-        Query ltQuery = convert(whereClause(AnyLtOperator.NAME, doubleLiteral, arrayRef));
-        assertThat(ltQuery.toString(), is("d_array:{1.5 TO *}"));
+        Query ltQuery = convert("1.5 < any(d_array)");
+        assertThat(ltQuery.toString(), is("d_array:[1.5000000000000002 TO Infinity]"));
 
         // d < ANY ([1.2, 3.5])
-        Query ltQuery2 = convert(whereClause(AnyLtOperator.NAME, ref, arrayLiteral));
-        assertThat(ltQuery2.toString(), is("(d:{* TO 1.2} d:{* TO 3.5})~1"));
+        Query ltQuery2 = convert("d < any ([1.2, 3.5])");
+        assertThat(ltQuery2.toString(), is("(d:[-Infinity TO 1.1999999999999997] d:[-Infinity TO 3.4999999999999996])~1"));
 
         // 1.5d <= ANY (d_array)
-        Query lteQuery = convert(whereClause(AnyLteOperator.NAME, doubleLiteral, arrayRef));
-        assertThat(lteQuery.toString(), is("d_array:[1.5 TO *}"));
+        Query lteQuery = convert("1.5 <= any(d_array)");
+        assertThat(lteQuery.toString(), is("d_array:[1.5 TO Infinity]"));
 
         // d <= ANY ([1.2, 3.5])
-        Query lteQuery2 = convert(whereClause(AnyLteOperator.NAME, ref, arrayLiteral));
-        assertThat(lteQuery2.toString(), is("(d:{* TO 1.2] d:{* TO 3.5])~1"));
+        Query lteQuery2 = convert("d <= any([1.2, 3.5])");
+        assertThat(lteQuery2.toString(), is("(d:[-Infinity TO 1.2] d:[-Infinity TO 3.5])~1"));
 
         // 1.5d > ANY (d_array)
-        Query gtQuery = convert(whereClause(AnyGtOperator.NAME, doubleLiteral, arrayRef));
-        assertThat(gtQuery.toString(), is("d_array:{* TO 1.5}"));
+        Query gtQuery = convert("1.5 > any(d_array)");
+        assertThat(gtQuery.toString(), is("d_array:[-Infinity TO 1.4999999999999998]"));
 
         // d > ANY ([1.2, 3.5])
-        Query gtQuery2 = convert(whereClause(AnyGtOperator.NAME, ref, arrayLiteral));
-        assertThat(gtQuery2.toString(), is("(d:{1.2 TO *} d:{3.5 TO *})~1"));
+        Query gtQuery2 = convert("d > any ([1.2, 3.5])");
+        assertThat(gtQuery2.toString(), is("(d:[1.2000000000000002 TO Infinity] d:[3.5000000000000004 TO Infinity])~1"));
 
         // 1.5d >= ANY (d_array)
-        Query gteQuery = convert(whereClause(AnyGteOperator.NAME, doubleLiteral, arrayRef));
-        assertThat(gteQuery.toString(), is("d_array:{* TO 1.5]"));
+        Query gteQuery = convert("1.5 >= any(d_array)");
+        assertThat(gteQuery.toString(), is("d_array:[-Infinity TO 1.5]"));
 
         // d >= ANY ([1.2, 3.5])
-        Query gteQuery2 = convert(whereClause(AnyGteOperator.NAME, ref, arrayLiteral));
-        assertThat(gteQuery2.toString(), is("(d:[1.2 TO *} d:[3.5 TO *})~1"));
+        Query gteQuery2 = convert("d >= any ([1.2, 3.5])");
+        assertThat(gteQuery2.toString(), is("(d:[1.2 TO Infinity] d:[3.5 TO Infinity])~1"));
     }
 
     @Test
-    public void testAnyOnArrayLiteral() throws Exception {
-        Reference ref = createReference("d", DataTypes.STRING);
-        Literal stringArrayLiteral = Literal.newLiteral(new Object[]{"a", "b", "c"}, new ArrayType(DataTypes.STRING));
+    public void testNeqAnyOnArrayLiteral() throws Exception {
+        Query neqQuery = convert("name != any (['a', 'b', 'c'])");
+        assertThat(neqQuery, instanceOf(BooleanQuery.class));
 
-        // col != ANY (1,2,3)
-        Query neqQuery = convert(whereClause(AnyNeqOperator.NAME, ref, stringArrayLiteral));
-        assertThat(neqQuery, instanceOf(FilteredQuery.class));
-        assertThat(((FilteredQuery)neqQuery).getFilter(), instanceOf(BooleanFilter.class));
-        BooleanFilter filter = (BooleanFilter)((FilteredQuery) neqQuery).getFilter();
-        assertThat(filter.toString(), is("BooleanFilter(-BooleanFilter(+d:a +d:b +d:c))"));
+        BooleanClause booleanClause = ((BooleanQuery) neqQuery).clauses().get(1);
+        assertThat(booleanClause.getOccur(), is(BooleanClause.Occur.MUST_NOT));
+        assertThat(booleanClause.getQuery().toString(), is("+name:a +name:b +name:c"));
+    }
 
-        // col like any (1,2,3)
-        Query likeQuery = convert(whereClause(AnyLikeOperator.NAME, ref, stringArrayLiteral));
+    @Test
+    public void testLikeAnyOnArrayLiteral() throws Exception {
+        Query likeQuery = convert("name like any (['a', 'b', 'c'])");
         assertThat(likeQuery, instanceOf(BooleanQuery.class));
-        BooleanQuery likeBQuery = (BooleanQuery)likeQuery;
+        BooleanQuery likeBQuery = (BooleanQuery) likeQuery;
         assertThat(likeBQuery.clauses().size(), is(3));
         for (int i = 0; i < 2; i++) {
-            assertThat(likeBQuery.clauses().get(i).getQuery(), instanceOf(WildcardQuery.class));
+            // like --> ConstantScoreQuery with regexp-filter
+            Query filteredQuery = likeBQuery.clauses().get(i).getQuery();
+            assertThat(filteredQuery, instanceOf(WildcardQuery.class));
         }
+    }
 
-        // col not like any (1,2,3)
-        Query notLikeQuery = convert(whereClause(AnyNotLikeOperator.NAME, ref, stringArrayLiteral));
+    @Test
+    public void testNotLikeAnyOnArrayLiteral() throws Exception {
+        Query notLikeQuery = convert("name not like any (['a', 'b', 'c'])");
         assertThat(notLikeQuery, instanceOf(BooleanQuery.class));
-        BooleanQuery notLikeBQuery = (BooleanQuery)notLikeQuery;
-        assertThat(notLikeBQuery.toString(), is("-(+d:a +d:b +d:c)"));
+        BooleanQuery notLikeBQuery = (BooleanQuery) notLikeQuery;
+        assertThat(notLikeBQuery.clauses(), hasSize(2));
+        BooleanClause clause = notLikeBQuery.clauses().get(1);
+        assertThat(clause.getOccur(), is(BooleanClause.Occur.MUST_NOT));
+        assertThat(((BooleanQuery) clause.getQuery()).clauses(), hasSize(3));
+        for (BooleanClause innerClause : ((BooleanQuery) clause.getQuery()).clauses()) {
+            assertThat(innerClause.getOccur(), is(BooleanClause.Occur.MUST));
+            assertThat(innerClause.getQuery(), instanceOf(WildcardQuery.class));
+        }
+    }
 
-
-        // col < any (1,2,3)
-        Query ltQuery2 = convert(whereClause(AnyLtOperator.NAME, ref, stringArrayLiteral));
+    @Test
+    public void testLessThanAnyOnArrayLiteral() throws Exception {
+        Query ltQuery2 = convert("name < any (['a', 'b', 'c'])");
         assertThat(ltQuery2, instanceOf(BooleanQuery.class));
-        BooleanQuery ltBQuery = (BooleanQuery)ltQuery2;
-        assertThat(ltBQuery.toString(), is("(d:{* TO a} d:{* TO b} d:{* TO c})~1"));
+        BooleanQuery ltBQuery = (BooleanQuery) ltQuery2;
+        assertThat(ltBQuery.toString(), is("(name:{* TO a} name:{* TO b} name:{* TO c})~1"));
     }
 
-    private Query convert(WhereClause clause) {
-        return builder.convert(clause, searchContext, indexCache).query;
+    @Test
+    public void testSqlLikeToLuceneWildcard() throws Exception {
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("%\\\\%"), is("*\\\\*"));
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("%\\\\_"), is("*\\\\?"));
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("%\\%"), is("*%"));
+
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("%me"), is("*me"));
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("\\%me"), is("%me"));
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("*me"), is("\\*me"));
+
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("_me"), is("?me"));
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("\\_me"), is("_me"));
+        assertThat(LuceneQueryBuilder.convertSqlLikeToLuceneWildcard("?me"), is("\\?me"));
     }
 
-    private WhereClause whereClause(String opname, Symbol left, Symbol right) {
-        return new WhereClause(new Function(new FunctionInfo(
-                new FunctionIdent(opname, Arrays.asList(left.valueType(), right.valueType())), DataTypes.BOOLEAN),
-                Arrays.<Symbol>asList(left, right)
-        ));
+
+    /**
+     * geo match tests below... error cases (wrong matchType, etc.) are not tests here because validation is done in the
+     * analyzer
+     */
+
+    @Test
+    public void testGeoShapeMatchWithDefaultMatchType() throws Exception {
+        Query query = convert("match(shape, 'POLYGON ((30 10, 40 40, 20 40, 10 20, 30 10))')");
+        assertThat(query, instanceOf(IntersectsPrefixTreeQuery.class));
     }
 
+    @Test
+    public void testGeoShapeMatchDisJoint() throws Exception {
+        Query query = convert("match(shape, 'POLYGON ((30 10, 40 40, 20 40, 10 20, 30 10))') using disjoint");
+        assertThat(query, instanceOf(ConstantScoreQuery.class));
+        Query booleanQuery = ((ConstantScoreQuery) query).getQuery();
+        assertThat(booleanQuery, instanceOf(BooleanQuery.class));
+
+        BooleanClause existsClause = ((BooleanQuery) booleanQuery).clauses().get(0);
+        BooleanClause intersectsClause = ((BooleanQuery) booleanQuery).clauses().get(1);
+
+        assertThat(existsClause.getQuery(), instanceOf(TermRangeQuery.class));
+        assertThat(intersectsClause.getQuery(), instanceOf(IntersectsPrefixTreeQuery.class));
+    }
+
+    @Test
+    public void testGeoShapeMatchWithin() throws Exception {
+        Query query = convert("match(shape, 'POLYGON ((30 10, 40 40, 20 40, 10 20, 30 10))') using within");
+        assertThat(query, instanceOf(WithinPrefixTreeQuery.class));
+    }
+
+    @Test
+    public void testWithinFunctionTooFewPoints() throws Exception {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("at least 4 polygon points required");
+        convert("within(point, {type='LineString', coordinates=[[0.0, 0.0], [1.0, 1.0]]})");
+    }
+
+    @Test
+    public void testWithinFunction() throws Exception {
+        Query eqWithinQuery = convert("within(point, {type='LineString', coordinates=[[0.0, 0.0], [1.0, 1.0], [2.0, 1.0]]})");
+        assertThat(eqWithinQuery.toString(), is("GeoPointInPolygonQuery: field=point: Polygon: [[0.0, 0.0] [1.0, 1.0] [1.0, 2.0] [0.0, 0.0] ]"));
+    }
+
+    @Test
+    public void testLikeWithBothSidesReferences() throws Exception {
+        Query query = convert("name like name");
+        assertThat(query, instanceOf(GenericFunctionQuery.class));
+    }
+
+    @Test
+    public void testWithinFunctionWithShapeReference() throws Exception {
+        // shape references cannot use the inverted index, so use generic function here
+        Query eqWithinQuery = convert("within(point, shape)");
+        assertThat(eqWithinQuery, instanceOf(GenericFunctionQuery.class));
+    }
+
+    @Test
+    public void testWhereInIsOptimized() throws Exception {
+        Query query = convert("name in ('foo', 'bar')");
+        assertThat(query, instanceOf(TermsQuery.class));
+        assertThat(query.toString(), is("name:bar name:foo"));
+    }
+
+    @Test
+    public void testRewriteDocReferenceInWhereClause() throws Exception {
+        Query query = convert("_doc['name'] = 'foo'");
+        assertThat(query, instanceOf(TermQuery.class));
+        assertThat(query.toString(), is("name:foo"));
+        query = convert("_doc = {\"name\"='foo'}");
+        assertThat(query, instanceOf(GenericFunctionQuery.class));
+    }
+
+    @Test
+    public void testMatchQueryTermMustNotBeNull() throws Exception {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("cannot use NULL as query term in match predicate");
+        convert("match(name, null)");
+    }
+
+    @Test
+    public void testMatchQueryTermMustBeALiteral() throws Exception {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("queryTerm must be a literal");
+        convert("match(name, name)");
+    }
 }

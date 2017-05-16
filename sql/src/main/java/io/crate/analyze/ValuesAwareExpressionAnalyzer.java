@@ -21,40 +21,44 @@
 
 package io.crate.analyze;
 
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.expressions.ExpressionAnalysisContext;
 import io.crate.analyze.expressions.ExpressionAnalyzer;
 import io.crate.analyze.relations.FieldProvider;
-import io.crate.planner.symbol.Field;
-import io.crate.planner.symbol.Symbol;
-import io.crate.planner.symbol.SymbolFormatter;
+import io.crate.analyze.symbol.Field;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.format.SymbolFormatter;
+import io.crate.metadata.Functions;
 import io.crate.sql.tree.Expression;
 import io.crate.sql.tree.FunctionCall;
+import io.crate.sql.tree.ParameterExpression;
 import io.crate.types.DataTypes;
 
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * ExpressionAnalyzer that supports the VALUES ( columnRef ) expression
- *
+ * <p>
  * e.g. in
- *
+ * <p>
  * -------------------------------------------------------------------
  * insert into t_new (id, name) (select id_old, name_old from t_old)
  * on duplicate key update
- *  set id = values(id) + 1000
- *
+ * set id = values(id) + 1000
+ * <p>
  * will return the following for values (id) + 1000
- *
- *  add(id_old, 10000)
- *
+ * <p>
+ * add(id_old, 10000)
+ * <p>
  * -------------------------------------------------------------------
  * insert into t_new (id, name) values (1, 'foo')
  * on duplicate key update
- *  set id = values (id) + 1
- *
+ * set id = values (id) + 1
+ * <p>
  * will return the following for values (id) + 1
- *
- *  2      (normalized add(1, 1))
+ * <p>
+ * 2      (normalized add(1, 1))
  */
 public class ValuesAwareExpressionAnalyzer extends ExpressionAnalyzer {
 
@@ -63,16 +67,17 @@ public class ValuesAwareExpressionAnalyzer extends ExpressionAnalyzer {
     /**
      * used to resolve the argument column in VALUES (&lt;argumentColumn&gt;) to the literal or reference
      */
-    public interface ValuesResolver {
+    interface ValuesResolver {
 
-        public Symbol allocateAndResolve(Field argumentColumn);
+        Symbol allocateAndResolve(Field argumentColumn);
     }
 
-    public ValuesAwareExpressionAnalyzer(AnalysisMetaData analysisMetaData,
-                                         ParameterContext parameterContext,
-                                         FieldProvider fieldProvider,
-                                         ValuesResolver valuesResolver) {
-        super(analysisMetaData, parameterContext, fieldProvider);
+    ValuesAwareExpressionAnalyzer(Functions functions,
+                                  SessionContext sessionContext,
+                                  Function<ParameterExpression, Symbol> convertParamFunction,
+                                  FieldProvider fieldProvider,
+                                  ValuesResolver valuesResolver) {
+        super(functions, sessionContext, convertParamFunction, fieldProvider, null);
         this.valuesResolver = valuesResolver;
     }
 
@@ -84,12 +89,12 @@ public class ValuesAwareExpressionAnalyzer extends ExpressionAnalyzer {
             Symbol argumentColumn = super.convert(expression, context);
             if (argumentColumn.valueType().equals(DataTypes.UNDEFINED)) {
                 throw new IllegalArgumentException(
-                        SymbolFormatter.format("Referenced column '%s' in VALUES expression not found", argumentColumn));
+                    SymbolFormatter.format("Referenced column '%s' in VALUES expression not found", argumentColumn));
             }
             if (!(argumentColumn instanceof Field)) {
                 throw new IllegalArgumentException(SymbolFormatter.format(
-                        "Argument to VALUES expression must reference a column that " +
-                                "is part of the INSERT statement. %s is invalid", argumentColumn));
+                    "Argument to VALUES expression must reference a column that " +
+                    "is part of the INSERT statement. %s is invalid", argumentColumn));
             }
             return valuesResolver.allocateAndResolve((Field) argumentColumn);
         }

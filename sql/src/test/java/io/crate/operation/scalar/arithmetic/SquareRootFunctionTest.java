@@ -21,108 +21,37 @@
 
 package io.crate.operation.scalar.arithmetic;
 
-import io.crate.metadata.FunctionIdent;
-import io.crate.operation.Input;
 import io.crate.operation.scalar.AbstractScalarFunctionsTest;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Reference;
-import io.crate.planner.symbol.Symbol;
-import io.crate.testing.TestingHelpers;
-import io.crate.types.DataType;
-import io.crate.types.DataTypes;
-import org.hamcrest.Matchers;
 import org.junit.Test;
 
-import java.util.Arrays;
-import java.util.List;
+import static io.crate.testing.SymbolMatchers.isFunction;
 
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.CoreMatchers.nullValue;
 
 public class SquareRootFunctionTest extends AbstractScalarFunctionsTest {
 
-    private Number evaluate(Number number, DataType dataType) {
-        List<DataType> dataTypes = Arrays.asList(dataType);
-        Input input = (Input) Literal.newLiteral(dataType, number);
-        return getFunction(dataTypes).evaluate(input);
-    }
-
-    private Double evaluate(Double number) {
-        return evaluate(number, DataTypes.DOUBLE).doubleValue();
-    }
-
-    private Double evaluate(Float number) {
-        return evaluate(number, DataTypes.FLOAT).doubleValue();
-    }
-
-    private Double evaluate(Integer number) {
-        return evaluate(number, DataTypes.INTEGER).doubleValue();
-    }
-
-    private Double evaluate(Long number) {
-        return evaluate(number, DataTypes.LONG).doubleValue();
-    }
-
-    private SquareRootFunction getFunction(List<DataType> dataTypes) {
-        return (SquareRootFunction)functions.get(new FunctionIdent(SquareRootFunction.NAME, dataTypes));
-    }
-
-    private Symbol normalize(Number number, DataType type) {
-        SquareRootFunction function = getFunction(Arrays.asList(type));
-        return function.normalizeSymbol(new Function(function.info(),
-                Arrays.<Symbol>asList(Literal.newLiteral(type, number))));
+    @Test
+    public void testSqrt() throws Exception {
+        assertEvaluate("sqrt(25)", 5.0d);
+        assertEvaluate("sqrt(25.0)", 5.0d);
+        assertEvaluate("sqrt(null)", null);
+        assertEvaluate("sqrt(cast(25 as integer))", 5.0);
+        assertEvaluate("sqrt(cast(25.0 as float))", 5.0);
     }
 
     @Test
-    public void testEvaluateOnFloat() throws Exception {
-        assertThat(evaluate(25.f), is(5.d));
-        assertThat(evaluate(0.f), is(0.d));
-        assertThat(evaluate(null, DataTypes.FLOAT), nullValue());
-    }
-
-    @Test
-    public void testEvaluateOnDouble() throws Exception {
-        assertThat(evaluate(25.d), is(5.d));
-        assertThat(evaluate(null, DataTypes.DOUBLE), nullValue());
-    }
-
-    @Test
-    public void testEvaluateOnInteger() throws Exception {
-        assertThat(evaluate(25), is(5.d));
-        assertThat(evaluate(null, DataTypes.INTEGER), nullValue());
-    }
-
-    @Test
-    public void testEvaluateOnLong() throws Exception {
-        assertThat(evaluate(25L), is(5.d));
-        assertThat(evaluate(null, DataTypes.LONG), nullValue());
-    }
-
-    @Test(expected = IllegalArgumentException.class)
     public void testSmallerThanZero() throws Exception {
-        evaluate(-25.0);
+        expectedException.expectMessage("cannot take square root of a negative number");
+        assertEvaluate("sqrt(-25.0)", null);
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void testInvalidType() throws Exception {
-        functions.get(new FunctionIdent(SquareRootFunction.NAME,Arrays.<DataType>asList(DataTypes.STRING) ));
+        expectedException.expectMessage("unknown function: sqrt(string)");
+        assertEvaluate("sqrt('foo')", null);
     }
 
     @Test
-    public void testNormalizeValueSymbol() throws Exception {
-        TestingHelpers.assertLiteralSymbol(normalize(25.0, DataTypes.DOUBLE), 5.d);
-        TestingHelpers.assertLiteralSymbol(normalize(25.f, DataTypes.FLOAT), 5.d);
-        TestingHelpers.assertLiteralSymbol(normalize(25, DataTypes.INTEGER), 5.d);
-        TestingHelpers.assertLiteralSymbol(normalize(25L, DataTypes.LONG), 5.d);
-    }
-
-    @Test
-    public void testNormalizeReference() throws Exception {
-        Reference height = TestingHelpers.createReference("height", DataTypes.DOUBLE);
-        SquareRootFunction sqrt = getFunction(Arrays.<DataType>asList(DataTypes.DOUBLE));
-        Function function = new Function(sqrt.info(), Arrays.<Symbol>asList(height));
-        Function normalized = (Function) sqrt.normalizeSymbol(function);
-        assertThat(normalized, Matchers.sameInstance(function));
+    public void testNormalizeWithRef() throws Exception {
+        assertNormalize("sqrt(id)", isFunction("sqrt"));
     }
 }

@@ -27,7 +27,7 @@ import io.crate.breaker.SizeEstimator;
 import io.crate.breaker.SizeEstimatorFactory;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.aggregation.AggregationFunction;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
@@ -42,8 +42,8 @@ public class ArbitraryAggregation extends AggregationFunction<Object, Object> {
     public static void register(AggregationImplModule mod) {
         for (final DataType t : DataTypes.PRIMITIVE_TYPES) {
             mod.register(new ArbitraryAggregation(
-                    new FunctionInfo(new FunctionIdent(NAME, ImmutableList.of(t)), t,
-                                    FunctionInfo.Type.AGGREGATE)));
+                new FunctionInfo(new FunctionIdent(NAME, ImmutableList.of(t)), t,
+                    FunctionInfo.Type.AGGREGATE)));
         }
     }
 

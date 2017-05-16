@@ -21,7 +21,8 @@
 
 package io.crate.executor.transport.task.elasticsearch;
 
-import io.crate.planner.symbol.Reference;
+import com.google.common.base.Function;
+import io.crate.metadata.Reference;
 
 /**
  * Interface is used together with the {@link io.crate.executor.transport.task.elasticsearch.SymbolToFieldExtractor}
@@ -32,6 +33,6 @@ import io.crate.planner.symbol.Reference;
  */
 public interface FieldExtractorFactory<T, C extends SymbolToFieldExtractor.Context> {
 
-    public FieldExtractor<T> build(Reference reference, C context);
+    Function<T, Object> build(Reference reference, C context);
 
 }

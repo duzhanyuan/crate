@@ -21,26 +21,22 @@
 
 package io.crate.operation.reference.doc.lucene;
 
-import io.crate.Constants;
 import org.elasticsearch.index.fielddata.IndexFieldData;
-import org.elasticsearch.index.mapper.FieldMapper;
+import org.elasticsearch.index.mapper.MappedFieldType;
 
 
 public abstract class FieldCacheExpression<IFD extends IndexFieldData, ReturnType> extends
-        ColumnReferenceCollectorExpression<ReturnType> {
+    LuceneCollectorExpression<ReturnType> {
 
-    private final static String[] DEFAULT_MAPPING_TYPES = new String[]{
-            Constants.DEFAULT_MAPPING_TYPE};
-
+    private final MappedFieldType fieldType;
     protected IFD indexFieldData;
 
-    public FieldCacheExpression(String columnName) {
+    FieldCacheExpression(String columnName, MappedFieldType fieldType) {
         super(columnName);
+        this.fieldType = fieldType;
     }
 
-    public void startCollect(CollectorContext context){
-        FieldMapper mapper = context.searchContext().mapperService().smartNameFieldMapper
-                (columnName, DEFAULT_MAPPING_TYPES);
-        indexFieldData = (IFD) context.searchContext().fieldData().getForField(mapper);
+    public void startCollect(CollectorContext context) {
+        indexFieldData = context.fieldData().getForField(fieldType);
     }
 }

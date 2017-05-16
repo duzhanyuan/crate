@@ -30,40 +30,33 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
-import org.elasticsearch.index.fielddata.FieldDataType;
-import org.elasticsearch.index.mapper.FieldMapper;
+import org.elasticsearch.index.mapper.MappedFieldType;
+import org.elasticsearch.index.mapper.StringFieldMapper;
 import org.junit.Test;
 
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 
 public class BytesRefColumnReferenceTest extends DocLevelExpressionsTest {
 
+    private String column = "b";
+
     @Override
     protected void insertValues(IndexWriter writer) throws Exception {
         StringBuilder builder = new StringBuilder();
-        for (int i = 0; i<10; i++) {
+        for (int i = 0; i < 10; i++) {
             builder.append(i);
             Document doc = new Document();
             doc.add(new StringField("_id", Integer.toString(i), Field.Store.NO));
-            doc.add(new StringField(fieldName().name(), builder.toString(), Field.Store.NO));
+            doc.add(new StringField(column, builder.toString(), Field.Store.NO));
             writer.addDocument(doc);
         }
     }
 
-    @Override
-    protected FieldMapper.Names fieldName() {
-        return new FieldMapper.Names("br");
-    }
-
-    @Override
-    protected FieldDataType fieldType() {
-        return new FieldDataType("string");
-    }
-
     @Test
     public void testFieldCacheExpression() throws Exception {
-        BytesRefColumnReference bytesRefColumn = new BytesRefColumnReference(fieldName().name());
+        MappedFieldType fieldType = StringFieldMapper.Defaults.FIELD_TYPE.clone();
+        fieldType.setName(column);
+        BytesRefColumnReference bytesRefColumn = new BytesRefColumnReference(column, fieldType);
         bytesRefColumn.startCollect(ctx);
         bytesRefColumn.setNextReader(readerContext);
         IndexSearcher searcher = new IndexSearcher(readerContext.reader());

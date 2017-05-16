@@ -21,49 +21,43 @@
 
 package io.crate.executor.transport.distributed;
 
-import com.google.common.base.Throwables;
 import io.crate.Streamer;
-import io.crate.core.collections.Bucket;
-import io.crate.core.collections.Row;
-import io.crate.executor.transport.StreamBucket;
+import io.crate.concurrent.CompletionListenable;
+import io.crate.data.BatchConsumer;
+import io.crate.data.BatchIterator;
+import io.crate.data.BatchRowVisitor;
+import io.crate.data.Bucket;
+import io.crate.executor.transport.StreamBucketCollector;
 
-import java.io.IOException;
+import javax.annotation.Nullable;
+import java.util.concurrent.CompletableFuture;
 
 
-public class SingleBucketBuilder extends ResultProviderBase {
+public class SingleBucketBuilder implements BatchConsumer, CompletionListenable {
 
-    private final StreamBucket.Builder bucketBuilder;
+    private final Streamer<?>[] streamers;
+    private final CompletableFuture<Bucket> bucketFuture = new CompletableFuture<>();
 
     public SingleBucketBuilder(Streamer<?>[] streamers) {
-        bucketBuilder = new StreamBucket.Builder(streamers);
+        this.streamers = streamers;
     }
 
-    public Bucket build() {
-        try {
-            return bucketBuilder.build();
-        } catch (IOException e) {
-            Throwables.propagate(e);
+    @Override
+    public CompletableFuture<Bucket> completionFuture() {
+        return bucketFuture;
+    }
+
+    @Override
+    public void accept(BatchIterator iterator, @Nullable Throwable failure) {
+        if (failure == null) {
+            bucketFuture.whenComplete((ignored, t) -> iterator.close());
+            StreamBucketCollector streamBucketCollector = new StreamBucketCollector(streamers);
+            BatchRowVisitor.visitRows(iterator, streamBucketCollector.supplier().get(), streamBucketCollector, bucketFuture);
+        } else {
+            if (iterator != null) {
+                iterator.close();
+            }
+            bucketFuture.completeExceptionally(failure);
         }
-        return null;
-    }
-
-    @Override
-    public Bucket doFinish() {
-        return build();
-    }
-
-    @Override
-    public Throwable doFail(Throwable t) {
-        return t;
-    }
-
-    @Override
-    public synchronized boolean setNextRow(Row row) {
-        try {
-            bucketBuilder.add(row);
-        } catch (IOException e) {
-            Throwables.propagate(e);
-        }
-        return true;
     }
 }

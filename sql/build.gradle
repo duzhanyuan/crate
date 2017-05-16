@@ -1,74 +1,70 @@
-apply plugin: 'idea'
-apply plugin: 'java'
+apply from: "$rootDir/gradle/javaModule.gradle"
+apply plugin: 'groovy'
 
 archivesBaseName = 'crate-sql'
 
-// we do not want to have elasticsearch here, since we provide it in :es
 configurations {
-    all*.exclude group: 'org.elasticsearch'
-    sharedCompile.extendsFrom compile
+    benchmarksCompile.extendsFrom testCompile
+    benchmarksRuntime.extendsFrom testRuntime, benchmarksCompile
+    // export of test so that other modules can use the utilities there as well.
+    testOutput
 }
 
 dependencies {
-    compile project(':es')
+    compile project(':shared')
     compile project(':core')
+    compile project(':dex')
     compile project(':blob')
     compile project(':sql-parser')
-    compile 'com.amazonaws:aws-java-sdk:1.8.7'
-    compile 'org.apache.commons:commons-math3:3.4.1'
-    testCompile project(':testing')
-    testCompile 'org.skyscreamer:jsonassert:1.2.0'
-    testCompile ('org.powermock:powermock-module-junit4:1.6.1') {
-        exclude group: 'junit', module: 'junit'
+    compile project(':udc')
+    compile "com.google.guava:guava:${versions.guava}"
+    compile "com.amazonaws:aws-java-sdk-s3:${versions.aws}"
+    compile "org.apache.commons:commons-math3:${versions.commonsmath}"
+
+    testCompile project(':integration-testing')
+    testCompile project(path: ':dex', configuration: 'testOutput')
+    testCompile 'org.skyscreamer:jsonassert:1.3.0'
+    testCompile "org.hamcrest:hamcrest-all:${versions.hamcrest}"
+    testCompile "org.slf4j:slf4j-api:${versions.slf4j}"
+    testCompile('io.crate:crate-jdbc:2.1.5') {
+        exclude group: 'net.java.dev.jna', module: 'jna'
+        exclude group: 'commons-logging', module: 'commons-logging'
+        exclude group: 'org.slf4j', module: 'jcl-over-slf4j'
     }
-    testCompile ('org.powermock:powermock-api-mockito:1.6.1') {
-        exclude group: 'junit', module: 'junit'
-        exclude group: 'org.mockito', module: 'mockito-all'
-    }
-    testCompile 'org.javassist:javassist:3.19.0-GA'
+}
+//noinspection GroovyAssignabilityCheck
+task jarTest (type: Jar) {
+    from sourceSets.test.output
+    classifier = 'sql-testing'
 }
 
-buildscript {
-    repositories {
-        mavenCentral()
-    }
+jmhJar {
+    append 'META-INF/services/org.apache.lucene.codecs.DocValuesFormat'
+    append 'META-INF/services/org.apache.lucene.codecs.Codec'
+    append 'META-INF/services/org.apache.lucene.codecs.PostingsFormat'
+}
+
+artifacts {
+    testOutput jarTest
 }
 
 test {
-    // force run, see: http://gradle.1045684.n5.nabble.com/how-does-gradle-decide-when-to-run-tests-td3314172.html
-    outputs.upToDateWhen { false }
-
     testLogging.exceptionFormat = 'full'
-    exclude('io/crate/benchmark/**')
+    outputs.dir("$projectDir/data")
 
-    // fix powermock issue - causing VerifyErrors being thrown
-    // see: https://issues.jboss.org/browse/JASSIST-228
-    jvmArgs '-XX:-UseSplitVerifier'
+    jacoco.excludes = ["*Test*"]
 
-    jacoco {
-        excludes = [
-            "*Test*",
-            "*Benchmark*"
-        ]
-    }
+    // make sure sources are first on classpath because we do override some class(es) (currently: lucene's AssertingLeafReader)
+    classpath = sourceSets.main.output + sourceSets.test.output + configurations.testCompile
 }
 
+clean.dependsOn('cleanTest')
 
 sourceSets {
     test {
         resources {
-            srcDir 'src/test/java'
-            include '**/*.rst'
-            include '**/*.json'
-            include '**/*.sql'
-            include '**/*.html'
-            include '**/*.jsonp'
-        }
-    }
-    shared {
-        java {
-            srcDir "src/main/java/"
-            include "io/crate/action/sql/SQL*"
+            srcDir 'src/test/resources'
+
         }
     }
 }

@@ -22,56 +22,104 @@
 package io.crate.metadata.information;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
+import io.crate.Version;
 import io.crate.analyze.WhereClause;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.ReferenceInfo;
-import io.crate.metadata.Routing;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.table.AbstractTableInfo;
-import io.crate.metadata.table.ColumnPolicy;
-import io.crate.planner.RowGranularity;
+import io.crate.metadata.*;
+import io.crate.metadata.table.StaticTableInfo;
+import org.elasticsearch.cluster.service.ClusterService;
 
 import javax.annotation.Nullable;
-import java.util.*;
+import java.util.Map;
 
-public class InformationTableInfo extends AbstractTableInfo {
+public class InformationTableInfo extends StaticTableInfo {
 
-    protected final TableIdent ident;
-    private final ImmutableList<ColumnIdent> primaryKeyIdentList;
-    protected final Routing routing;
+    private final ClusterService clusterService;
 
-    private final ImmutableMap<ColumnIdent, ReferenceInfo> references;
-    private final ImmutableList<ReferenceInfo> columns;
-    private final String[] concreteIndices;
+    public static class Columns {
+        public static final ColumnIdent TABLE_NAME = new ColumnIdent("table_name");
+        public static final ColumnIdent TABLE_SCHEMA = new ColumnIdent("table_schema");
+        public static final ColumnIdent PARTITION_IDENT = new ColumnIdent("partition_ident");
+        public static final ColumnIdent VALUES = new ColumnIdent("values");
+        public static final ColumnIdent NUMBER_OF_SHARDS = new ColumnIdent("number_of_shards");
+        public static final ColumnIdent NUMBER_OF_REPLICAS = new ColumnIdent("number_of_replicas");
+        public static final ColumnIdent CLUSTERED_BY = new ColumnIdent("clustered_by");
+        public static final ColumnIdent PARTITIONED_BY = new ColumnIdent("partitioned_by");
+        public static final ColumnIdent BLOBS_PATH = new ColumnIdent("blobs_path");
+        public static final ColumnIdent COLUMN_POLICY = new ColumnIdent("column_policy");
+        public static final ColumnIdent ROUTING_HASH_FUNCTION = new ColumnIdent("routing_hash_function");
+        public static final ColumnIdent TABLE_VERSION = new ColumnIdent("version");
+        public static final ColumnIdent TABLE_VERSION_CREATED = new ColumnIdent("version",
+            ImmutableList.of(Version.Property.CREATED.toString()));
+        public static final ColumnIdent TABLE_VERSION_CREATED_CRATEDB = new ColumnIdent("version",
+            ImmutableList.of(Version.Property.CREATED.toString(), Version.CRATEDB_VERSION_KEY));
+        public static final ColumnIdent TABLE_VERSION_CREATED_ES = new ColumnIdent("version",
+            ImmutableList.of(Version.Property.CREATED.toString(), Version.ES_VERSION_KEY));
+        public static final ColumnIdent TABLE_VERSION_UPGRADED = new ColumnIdent("version",
+            ImmutableList.of(Version.Property.UPGRADED.toString()));
+        public static final ColumnIdent TABLE_VERSION_UPGRADED_CRATEDB = new ColumnIdent("version",
+            ImmutableList.of(Version.Property.UPGRADED.toString(), Version.CRATEDB_VERSION_KEY));
+        public static final ColumnIdent TABLE_VERSION_UPGRADED_ES = new ColumnIdent("version",
+            ImmutableList.of(Version.Property.UPGRADED.toString(), Version.ES_VERSION_KEY));
+        public static final ColumnIdent CLOSED = new ColumnIdent("closed");
+        public static final ColumnIdent TABLE_SETTINGS = new ColumnIdent("settings");
+        public static final ColumnIdent TABLE_SETTINGS_BLOCKS = new ColumnIdent("settings",
+            ImmutableList.of("blocks"));
+        public static final ColumnIdent TABLE_SETTINGS_BLOCKS_READ_ONLY = new ColumnIdent("settings",
+            ImmutableList.of("blocks", "read_only"));
+        public static final ColumnIdent TABLE_SETTINGS_BLOCKS_READ = new ColumnIdent("settings",
+            ImmutableList.of("blocks", "read"));
+        public static final ColumnIdent TABLE_SETTINGS_BLOCKS_WRITE = new ColumnIdent("settings",
+            ImmutableList.of("blocks", "write"));
+        public static final ColumnIdent TABLE_SETTINGS_BLOCKS_METADATA = new ColumnIdent("settings",
+            ImmutableList.of("blocks", "metadata"));
+        public static final ColumnIdent TABLE_SETTINGS_ROUTING = new ColumnIdent("settings",
+            ImmutableList.of("routing"));
+        public static final ColumnIdent TABLE_SETTINGS_ROUTING_ALLOCATION = new ColumnIdent("settings",
+            ImmutableList.of("routing", "allocation"));
+        public static final ColumnIdent TABLE_SETTINGS_ROUTING_ALLOCATION_ENABLE = new ColumnIdent("settings",
+            ImmutableList.of("routing", "allocation", "enable"));
+        public static final ColumnIdent TABLE_SETTINGS_ROUTING_ALLOCATION_TOTAL_SHARDS_PER_NODE = new ColumnIdent("settings",
+            ImmutableList.of("routing", "allocation", "total_shards_per_node"));
+        public static final ColumnIdent TABLE_SETTINGS_RECOVERY = new ColumnIdent("settings",
+            ImmutableList.of("recovery"));
+        public static final ColumnIdent TABLE_SETTINGS_RECOVERY_INITIAL_SHARDS = new ColumnIdent("settings",
+            ImmutableList.of("recovery", "initial_shards"));
+        public static final ColumnIdent TABLE_SETTINGS_WARMER = new ColumnIdent("settings",
+            ImmutableList.of("warmer"));
+        public static final ColumnIdent TABLE_SETTINGS_WARMER_ENABLED = new ColumnIdent("settings",
+            ImmutableList.of("warmer", "enabled"));
 
-    protected InformationTableInfo(InformationSchemaInfo schemaInfo,
-                                 TableIdent ident,
-                                 ImmutableList<ColumnIdent> primaryKeyIdentList,
-                                 ImmutableMap<ColumnIdent, ReferenceInfo> references,
-                                 ImmutableList<ReferenceInfo> columns) {
-        super(schemaInfo);
-        this.ident = ident;
-        this.primaryKeyIdentList = primaryKeyIdentList;
-        this.references = references;
-        this.columns = columns;
-        this.concreteIndices = new String[]{ident.esName()};
-        Map<String, Map<String, List<Integer>>> locations = new TreeMap<>();
-        Map<String, List<Integer>> tableLocation = new TreeMap<>();
-        tableLocation.put(ident.fqn(), null);
-        locations.put(NULL_NODE_ID, tableLocation);
-        this.routing = new Routing(locations);
+        public static final ColumnIdent TABLE_SETTINGS_TRANSLOG = new ColumnIdent("settings",
+            ImmutableList.of("translog"));
+        public static final ColumnIdent TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_SIZE = new ColumnIdent("settings",
+            ImmutableList.of("translog", "flush_threshold_size"));
+        public static final ColumnIdent TABLE_SETTINGS_TRANSLOG_SYNC_INTERVAL = new ColumnIdent("settings",
+            ImmutableList.of("translog", "sync_interval"));
+
+        public static final ColumnIdent TABLE_SETTINGS_REFRESH_INTERVAL = new ColumnIdent("settings",
+            ImmutableList.of("refresh_interval"));
+        public static final ColumnIdent TABLE_SETTINGS_UNASSIGNED = new ColumnIdent("settings",
+            ImmutableList.of("unassigned"));
+        public static final ColumnIdent TABLE_SETTINGS_UNASSIGNED_NODE_LEFT = new ColumnIdent("settings",
+            ImmutableList.of("unassigned", "node_left"));
+        public static final ColumnIdent TABLE_SETTINGS_UNASSIGNED_NODE_LEFT_DELAYED_TIMEOUT = new ColumnIdent("settings",
+            ImmutableList.of("unassigned", "node_left", "delayed_timeout"));
     }
 
-    @Nullable
-    @Override
-    public ReferenceInfo getReferenceInfo(ColumnIdent columnIdent) {
-        return references.get(columnIdent);
+    protected InformationTableInfo(ClusterService clusterService,
+                                   TableIdent ident,
+                                   ImmutableList<ColumnIdent> primaryKeyIdentList,
+                                   Map<ColumnIdent, Reference> references) {
+        this(clusterService, ident, primaryKeyIdentList, references, null);
     }
 
-    @Override
-    public Collection<ReferenceInfo> columns() {
-        return columns;
+    protected InformationTableInfo(ClusterService clusterService,
+                                   TableIdent ident,
+                                   ImmutableList<ColumnIdent> primaryKeyIdentList,
+                                   Map<ColumnIdent, Reference> references,
+                                   @Nullable ImmutableList<Reference> columns) {
+        super(ident, references, columns, primaryKeyIdentList);
+        this.clusterService = clusterService;
     }
 
     @Override
@@ -81,31 +129,6 @@ public class InformationTableInfo extends AbstractTableInfo {
 
     @Override
     public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return routing;
-    }
-
-    @Override
-    public TableIdent ident() {
-        return ident;
-    }
-
-    @Override
-    public List<ColumnIdent> primaryKey() {
-        return primaryKeyIdentList;
-    }
-
-    @Override
-    public String[] concreteIndices() {
-        return concreteIndices;
-    }
-
-    @Override
-    public ColumnPolicy columnPolicy() {
-        return ColumnPolicy.STRICT;
-    }
-
-    @Override
-    public Iterator<ReferenceInfo> iterator() {
-        return references.values().iterator();
+        return Routing.forTableOnSingleNode(ident(), clusterService.localNode().getId());
     }
 }

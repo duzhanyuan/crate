@@ -21,23 +21,19 @@
 
 package io.crate.executor.transport;
 
-import io.crate.executor.transport.merge.TransportMergeNodeAction;
+import io.crate.action.job.TransportJobAction;
+import io.crate.executor.transport.kill.TransportKillAllNodeAction;
+import io.crate.executor.transport.kill.TransportKillJobsNodeAction;
 import org.elasticsearch.action.admin.cluster.settings.TransportClusterUpdateSettingsAction;
+import org.elasticsearch.action.admin.cluster.snapshots.create.TransportCreateSnapshotAction;
+import org.elasticsearch.action.admin.cluster.snapshots.delete.TransportDeleteSnapshotAction;
+import org.elasticsearch.action.admin.cluster.snapshots.get.TransportGetSnapshotsAction;
+import org.elasticsearch.action.admin.cluster.snapshots.restore.TransportRestoreSnapshotAction;
+import org.elasticsearch.action.admin.indices.create.TransportBulkCreateIndicesAction;
 import org.elasticsearch.action.admin.indices.create.TransportCreateIndexAction;
 import org.elasticsearch.action.admin.indices.delete.TransportDeleteIndexAction;
-import org.elasticsearch.action.admin.indices.mapping.put.TransportPutMappingAction;
-import org.elasticsearch.action.admin.indices.refresh.TransportRefreshAction;
-import org.elasticsearch.action.admin.indices.settings.put.TransportUpdateSettingsAction;
 import org.elasticsearch.action.admin.indices.template.delete.TransportDeleteIndexTemplateAction;
-import org.elasticsearch.action.admin.indices.template.get.TransportGetIndexTemplatesAction;
-import org.elasticsearch.action.admin.indices.template.put.TransportPutIndexTemplateAction;
-import org.elasticsearch.action.bulk.SymbolBasedTransportShardUpsertActionDelegate;
-import org.elasticsearch.action.bulk.SymbolBasedTransportShardUpsertActionDelegateImpl;
-import org.elasticsearch.action.bulk.TransportShardUpsertActionDelegate;
-import org.elasticsearch.action.bulk.TransportShardUpsertActionDelegateImpl;
-import org.elasticsearch.action.count.TransportCountAction;
 import org.elasticsearch.action.delete.TransportDeleteAction;
-import org.elasticsearch.action.deletebyquery.TransportDeleteByQueryAction;
 import org.elasticsearch.action.get.TransportGetAction;
 import org.elasticsearch.action.get.TransportMultiGetAction;
 import org.elasticsearch.common.inject.Inject;
@@ -45,87 +41,78 @@ import org.elasticsearch.common.inject.Provider;
 
 public class TransportActionProvider {
 
-    private final Provider<TransportCollectNodeAction> transportCollectNodeActionProvider;
-    private final Provider<TransportMergeNodeAction> transportMergeNodeActionProvider;
     private final Provider<TransportFetchNodeAction> transportFetchNodeActionProvider;
-    private final Provider<TransportCloseContextNodeAction> transportCloseContextNodeActionProvider;
 
     private final Provider<TransportCreateIndexAction> transportCreateIndexActionProvider;
     private final Provider<TransportDeleteIndexAction> transportDeleteIndexActionProvider;
-    private final Provider<TransportGetIndexTemplatesAction> transportGetIndexTemplatesActionProvider;
-    private final Provider<TransportPutIndexTemplateAction> transportPutIndexTemplateActionProvider;
     private final Provider<TransportDeleteIndexTemplateAction> transportDeleteIndexTemplateActionProvider;
     private final Provider<TransportClusterUpdateSettingsAction> transportClusterUpdateSettingsActionProvider;
-    private final Provider<TransportCountAction> transportCountActionProvider;
-    private final Provider<TransportDeleteByQueryAction> transportDeleteByQueryActionProvider;
+    private final Provider<TransportShardDeleteAction> transportShardDeleteActionProvider;
     private final Provider<TransportDeleteAction> transportDeleteActionProvider;
 
     private final Provider<TransportGetAction> transportGetActionProvider;
     private final Provider<TransportMultiGetAction> transportMultiGetActionProvider;
-    private final Provider<SymbolBasedTransportShardUpsertAction> symbolBasedTransportShardUpsertActionProvider;
     private final Provider<TransportShardUpsertAction> transportShardUpsertActionProvider;
-    private final Provider<TransportPutMappingAction> transportPutMappingActionProvider;
-    private final Provider<TransportRefreshAction> transportRefreshActionProvider;
-    private final Provider<TransportUpdateSettingsAction> transportUpdateSettingsActionProvider;
+    private final Provider<TransportBulkCreateIndicesAction> transportBulkCreateIndicesActionProvider;
+
+    private final Provider<TransportJobAction> transportJobInitActionProvider;
+    private final Provider<TransportKillAllNodeAction> transportKillAllNodeActionProvider;
+    private final Provider<TransportKillJobsNodeAction> transportKillJobsNodeActionProvider;
+
+    private final Provider<TransportCreateSnapshotAction> transportCreateSnapshotActionProvider;
+    private final Provider<TransportDeleteSnapshotAction> transportDeleteSnapshotActionProvider;
+    private final Provider<TransportRestoreSnapshotAction> transportRestoreSnapshotActionProvider;
+    private final Provider<TransportGetSnapshotsAction> transportGetSnapshotsActionProvider;
 
     @Inject
-    public TransportActionProvider(Provider<TransportCollectNodeAction> transportCollectNodeActionProvider,
-                                   Provider<TransportMergeNodeAction> transportMergeNodeActionProvider,
-                                   Provider<TransportFetchNodeAction> transportFetchNodeActionProvider,
-                                   Provider<TransportCloseContextNodeAction> transportCloseContextNodeActionProvider,
+    public TransportActionProvider(Provider<TransportFetchNodeAction> transportFetchNodeActionProvider,
                                    Provider<TransportCreateIndexAction> transportCreateIndexActionProvider,
                                    Provider<TransportDeleteIndexAction> transportDeleteIndexActionProvider,
-                                   Provider<TransportGetIndexTemplatesAction> transportGetIndexTemplatesActionProvider,
-                                   Provider<TransportPutIndexTemplateAction> transportPutIndexTemplateActionProvider,
                                    Provider<TransportDeleteIndexTemplateAction> transportDeleteIndexTemplateActionProvider,
                                    Provider<TransportClusterUpdateSettingsAction> transportClusterUpdateSettingsActionProvider,
-                                   Provider<TransportCountAction> transportCountActionProvider,
-                                   Provider<TransportDeleteByQueryAction> transportDeleteByQueryActionProvider,
+                                   Provider<TransportShardDeleteAction> transportShardDeleteActionProvider,
                                    Provider<TransportDeleteAction> transportDeleteActionProvider,
                                    Provider<TransportGetAction> transportGetActionProvider,
                                    Provider<TransportMultiGetAction> transportMultiGetActionProvider,
-                                   Provider<SymbolBasedTransportShardUpsertAction> symbolBasedTransportShardUpsertActionProvider,
                                    Provider<TransportShardUpsertAction> transportShardUpsertActionProvider,
-                                   Provider<TransportPutMappingAction> transportPutMappingActionProvider,
-                                   Provider<TransportRefreshAction> transportRefreshActionProvider,
-                                   Provider<TransportUpdateSettingsAction> transportUpdateSettingsActionProvider) {
+                                   Provider<TransportKillAllNodeAction> transportKillAllNodeActionProvider,
+                                   Provider<TransportJobAction> transportJobInitActionProvider,
+                                   Provider<TransportBulkCreateIndicesAction> transportBulkCreateIndicesActionProvider,
+                                   Provider<TransportKillJobsNodeAction> transportKillJobsNodeActionProvider,
+                                   Provider<TransportDeleteSnapshotAction> transportDeleteSnapshotActionProvider,
+                                   Provider<TransportCreateSnapshotAction> transportCreateSnapshotActionProvider,
+                                   Provider<TransportRestoreSnapshotAction> transportRestoreSnapshotActionProvider,
+                                   Provider<TransportGetSnapshotsAction> transportGetSnapshotsActionPovider) {
         this.transportCreateIndexActionProvider = transportCreateIndexActionProvider;
         this.transportDeleteIndexActionProvider = transportDeleteIndexActionProvider;
-        this.transportPutIndexTemplateActionProvider = transportPutIndexTemplateActionProvider;
-        this.transportGetIndexTemplatesActionProvider = transportGetIndexTemplatesActionProvider;
         this.transportDeleteIndexTemplateActionProvider = transportDeleteIndexTemplateActionProvider;
         this.transportClusterUpdateSettingsActionProvider = transportClusterUpdateSettingsActionProvider;
-        this.transportCountActionProvider = transportCountActionProvider;
-        this.transportDeleteByQueryActionProvider = transportDeleteByQueryActionProvider;
+        this.transportShardDeleteActionProvider = transportShardDeleteActionProvider;
         this.transportDeleteActionProvider = transportDeleteActionProvider;
         this.transportGetActionProvider = transportGetActionProvider;
         this.transportMultiGetActionProvider = transportMultiGetActionProvider;
-        this.symbolBasedTransportShardUpsertActionProvider = symbolBasedTransportShardUpsertActionProvider;
         this.transportShardUpsertActionProvider = transportShardUpsertActionProvider;
-        this.transportCollectNodeActionProvider = transportCollectNodeActionProvider;
-        this.transportMergeNodeActionProvider = transportMergeNodeActionProvider;
+        this.transportKillAllNodeActionProvider = transportKillAllNodeActionProvider;
         this.transportFetchNodeActionProvider = transportFetchNodeActionProvider;
-        this.transportCloseContextNodeActionProvider = transportCloseContextNodeActionProvider;
-        this.transportPutMappingActionProvider = transportPutMappingActionProvider;
-        this.transportRefreshActionProvider = transportRefreshActionProvider;
-        this.transportUpdateSettingsActionProvider = transportUpdateSettingsActionProvider;
+        this.transportJobInitActionProvider = transportJobInitActionProvider;
+        this.transportBulkCreateIndicesActionProvider = transportBulkCreateIndicesActionProvider;
+        this.transportKillJobsNodeActionProvider = transportKillJobsNodeActionProvider;
+        this.transportDeleteSnapshotActionProvider = transportDeleteSnapshotActionProvider;
+        this.transportCreateSnapshotActionProvider = transportCreateSnapshotActionProvider;
+        this.transportRestoreSnapshotActionProvider = transportRestoreSnapshotActionProvider;
+        this.transportGetSnapshotsActionProvider = transportGetSnapshotsActionPovider;
     }
-
 
     public TransportCreateIndexAction transportCreateIndexAction() {
         return transportCreateIndexActionProvider.get();
     }
 
+    public TransportBulkCreateIndicesAction transportBulkCreateIndicesAction() {
+        return transportBulkCreateIndicesActionProvider.get();
+    }
+
     public TransportDeleteIndexAction transportDeleteIndexAction() {
         return transportDeleteIndexActionProvider.get();
-    }
-
-    public TransportGetIndexTemplatesAction transportGetIndexTemplatesAction() {
-        return transportGetIndexTemplatesActionProvider.get();
-    }
-
-    public TransportPutIndexTemplateAction transportPutIndexTemplateAction() {
-        return transportPutIndexTemplateActionProvider.get();
     }
 
     public TransportDeleteIndexTemplateAction transportDeleteIndexTemplateAction() {
@@ -134,14 +121,6 @@ public class TransportActionProvider {
 
     public TransportClusterUpdateSettingsAction transportClusterUpdateSettingsAction() {
         return transportClusterUpdateSettingsActionProvider.get();
-    }
-
-    public TransportCountAction transportCountAction() {
-        return transportCountActionProvider.get();
-    }
-
-    public TransportDeleteByQueryAction transportDeleteByQueryAction() {
-        return transportDeleteByQueryActionProvider.get();
     }
 
     public TransportDeleteAction transportDeleteAction() {
@@ -156,39 +135,43 @@ public class TransportActionProvider {
         return transportMultiGetActionProvider.get();
     }
 
-    public TransportShardUpsertActionDelegate transportShardUpsertActionDelegate() {
-        return new TransportShardUpsertActionDelegateImpl(transportShardUpsertActionProvider.get());
+    public TransportShardUpsertAction transportShardUpsertAction() {
+        return transportShardUpsertActionProvider.get();
     }
 
-    public SymbolBasedTransportShardUpsertActionDelegate symbolBasedTransportShardUpsertActionDelegate() {
-        return new SymbolBasedTransportShardUpsertActionDelegateImpl(symbolBasedTransportShardUpsertActionProvider.get());
+    public TransportShardDeleteAction transportShardDeleteAction() {
+        return transportShardDeleteActionProvider.get();
     }
 
-    public TransportCollectNodeAction transportCollectNodeAction() {
-        return transportCollectNodeActionProvider.get();
-    }
-
-    public TransportMergeNodeAction transportMergeNodeAction() {
-        return transportMergeNodeActionProvider.get();
+    public TransportJobAction transportJobInitAction() {
+        return transportJobInitActionProvider.get();
     }
 
     public TransportFetchNodeAction transportFetchNodeAction() {
         return transportFetchNodeActionProvider.get();
     }
 
-    public TransportCloseContextNodeAction transportCloseContextNodeAction() {
-        return transportCloseContextNodeActionProvider.get();
+    public TransportKillAllNodeAction transportKillAllNodeAction() {
+        return transportKillAllNodeActionProvider.get();
     }
 
-    public TransportPutMappingAction transportPutMappingAction() {
-        return transportPutMappingActionProvider.get();
+    public TransportKillJobsNodeAction transportKillJobsNodeAction() {
+        return transportKillJobsNodeActionProvider.get();
     }
 
-    public TransportRefreshAction transportRefreshAction() {
-        return transportRefreshActionProvider.get();
+    public TransportDeleteSnapshotAction transportDeleteSnapshotAction() {
+        return transportDeleteSnapshotActionProvider.get();
     }
 
-    public TransportUpdateSettingsAction transportUpdateSettingsAction() {
-        return transportUpdateSettingsActionProvider.get();
+    public TransportCreateSnapshotAction transportCreateSnapshotAction() {
+        return transportCreateSnapshotActionProvider.get();
+    }
+
+    public TransportRestoreSnapshotAction transportRestoreSnapshotAction() {
+        return transportRestoreSnapshotActionProvider.get();
+    }
+
+    public TransportGetSnapshotsAction transportGetSnapshotsAction() {
+        return transportGetSnapshotsActionProvider.get();
     }
 }

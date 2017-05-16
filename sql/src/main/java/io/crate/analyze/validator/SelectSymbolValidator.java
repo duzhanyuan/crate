@@ -21,9 +21,14 @@
 
 package io.crate.analyze.validator;
 
-import io.crate.planner.symbol.*;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.MatchPredicate;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.SymbolVisitor;
+import io.crate.exceptions.UnsupportedFeatureException;
 
 import java.util.Collection;
+import java.util.Locale;
 
 public class SelectSymbolValidator {
 
@@ -43,12 +48,11 @@ public class SelectSymbolValidator {
                 case SCALAR:
                 case AGGREGATE:
                     break;
-                case PREDICATE:
-                    throw new UnsupportedOperationException(String.format(
-                            "%s predicate cannot be selected", symbol.info().ident().name()));
+                case TABLE:
+                    throw new UnsupportedFeatureException("Table functions are not supported in select list");
                 default:
-                    throw new UnsupportedOperationException(String.format(
-                            "FunctionInfo.Type %s not handled", symbol.info().type()));
+                    throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
+                        "FunctionInfo.Type %s not handled", symbol.info().type()));
             }
             for (Symbol arg : symbol.arguments()) {
                 process(arg, context);

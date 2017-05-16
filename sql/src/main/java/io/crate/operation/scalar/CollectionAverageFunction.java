@@ -25,9 +25,7 @@ import com.google.common.collect.ImmutableList;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
 import io.crate.metadata.Scalar;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Symbol;
+import io.crate.data.Input;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import io.crate.types.SetType;
@@ -42,26 +40,27 @@ public class CollectionAverageFunction extends Scalar<Double, Set<Number>> {
     public static void register(ScalarFunctionModule mod) {
         for (DataType t : DataTypes.NUMERIC_PRIMITIVE_TYPES) {
             mod.register(
-                    new CollectionAverageFunction(
-                            new FunctionInfo(new FunctionIdent(
-                                    NAME, ImmutableList.<DataType>of(new SetType(t))), DataTypes.DOUBLE))
+                new CollectionAverageFunction(
+                    new FunctionInfo(new FunctionIdent(
+                        NAME, ImmutableList.<DataType>of(new SetType(t))), DataTypes.DOUBLE))
             );
         }
     }
 
-    public CollectionAverageFunction(FunctionInfo info) {
+    private CollectionAverageFunction(FunctionInfo info) {
         this.info = info;
     }
 
     @Override
     public Double evaluate(Input<Set<Number>>... args) {
         // NOTE: always returning double ignoring the input type, maybe better implement type safe
-        if (args[0].value() == null) {
+        Set<Number> arg0Value = args[0].value();
+        if (arg0Value == null) {
             return null;
         }
         double sum = 0;
         long count = 0;
-        for (Number value : args[0].value()) {
+        for (Number value : arg0Value) {
             sum += value.doubleValue();
             count++;
         }
@@ -75,10 +74,5 @@ public class CollectionAverageFunction extends Scalar<Double, Set<Number>> {
     @Override
     public FunctionInfo info() {
         return info;
-    }
-
-    @Override
-    public Symbol normalizeSymbol(Function function) {
-        return function;
     }
 }

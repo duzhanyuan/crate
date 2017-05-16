@@ -26,7 +26,7 @@ import io.crate.Streamer;
 import io.crate.breaker.RamAccountingContext;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.FunctionInfo;
-import io.crate.operation.Input;
+import io.crate.data.Input;
 import io.crate.operation.aggregation.AggregationFunction;
 import io.crate.types.DataType;
 import io.crate.types.DataTypeFactory;
@@ -39,23 +39,27 @@ import java.io.IOException;
 
 public class AverageAggregation extends AggregationFunction<AverageAggregation.AverageState, Double> {
 
-    public static final String[] NAMES = new String[] {"avg", "mean"};
+    public static final String[] NAMES = new String[]{"avg", "mean"};
     public static final String NAME = NAMES[0];
     private final FunctionInfo info;
+
+    static {
+        DataTypes.register(AverageStateType.ID, AverageStateType.INSTANCE);
+    }
 
     /**
      * register as "avg" and "mean"
      */
     public static void register(AggregationImplModule mod) {
-        for (String name :NAMES) {
+        for (String name : NAMES) {
             for (DataType<?> t : DataTypes.NUMERIC_PRIMITIVE_TYPES) {
                 mod.register(new AverageAggregation(new FunctionInfo(
-                        new FunctionIdent(name, ImmutableList.<DataType>of(t)), DataTypes.DOUBLE,
-                        FunctionInfo.Type.AGGREGATE)));
+                    new FunctionIdent(name, ImmutableList.<DataType>of(t)), DataTypes.DOUBLE,
+                    FunctionInfo.Type.AGGREGATE)));
             }
             mod.register(new AverageAggregation(new FunctionInfo(
-                    new FunctionIdent(name, ImmutableList.<DataType>of(DataTypes.TIMESTAMP)), DataTypes.DOUBLE,
-                    FunctionInfo.Type.AGGREGATE)));
+                new FunctionIdent(name, ImmutableList.<DataType>of(DataTypes.TIMESTAMP)), DataTypes.DOUBLE,
+                FunctionInfo.Type.AGGREGATE)));
         }
     }
 
@@ -92,14 +96,10 @@ public class AverageAggregation extends AggregationFunction<AverageAggregation.A
     }
 
     public static class AverageStateType extends DataType<AverageState>
-            implements FixedWidthType, Streamer<AverageState>, DataTypeFactory {
+        implements FixedWidthType, Streamer<AverageState>, DataTypeFactory {
 
         public static final int ID = 1024;
         private static final AverageStateType INSTANCE = new AverageStateType();
-
-        private AverageStateType() {
-            DataTypes.register(ID, this);
-        }
 
         @Override
         public int id() {

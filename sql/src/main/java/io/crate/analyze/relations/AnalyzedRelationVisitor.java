@@ -21,12 +21,10 @@
 
 package io.crate.analyze.relations;
 
-import io.crate.analyze.InsertFromSubQueryAnalyzedStatement;
-import io.crate.analyze.MultiSourceSelect;
-import io.crate.analyze.QueriedTable;
-import io.crate.analyze.UpdateAnalyzedStatement;
+import io.crate.analyze.*;
 
 import javax.annotation.Nullable;
+import java.util.Locale;
 
 public abstract class AnalyzedRelationVisitor<C, R> {
 
@@ -35,10 +33,14 @@ public abstract class AnalyzedRelationVisitor<C, R> {
     }
 
     protected R visitAnalyzedRelation(AnalyzedRelation relation, C context) {
-        throw new UnsupportedOperationException(String.format("relation \"%s\" is not supported", relation));
+        throw new UnsupportedOperationException(String.format(Locale.ENGLISH, "relation \"%s\" is not supported", relation));
     }
 
     public R visitQueriedTable(QueriedTable table, C context) {
+        return visitAnalyzedRelation(table, context);
+    }
+
+    public R visitQueriedDocTable(QueriedDocTable table, C context) {
         return visitAnalyzedRelation(table, context);
     }
 
@@ -50,16 +52,23 @@ public abstract class AnalyzedRelationVisitor<C, R> {
         return visitAnalyzedRelation(tableRelation, context);
     }
 
-    public R visitPlanedAnalyzedRelation(PlannedAnalyzedRelation plannedAnalyzedRelation, C context) {
-        return visitAnalyzedRelation(plannedAnalyzedRelation, context);
+    public R visitDocTableRelation(DocTableRelation relation, C context) {
+        return visitAnalyzedRelation(relation, context);
     }
 
-    public R visitInsertFromQuery(InsertFromSubQueryAnalyzedStatement insertFromSubQueryAnalyzedStatement, C context) {
-        return visitAnalyzedRelation(insertFromSubQueryAnalyzedStatement, context);
+    public R visitTwoTableJoin(TwoTableJoin twoTableJoin, C context) {
+        return visitAnalyzedRelation(twoTableJoin, context);
     }
 
-    public R visitUpdateAnalyzedStatement(UpdateAnalyzedStatement updateAnalyzedStatement, C context) {
-        return visitAnalyzedRelation(updateAnalyzedStatement, context);
+    public R visitExplain(ExplainAnalyzedStatement explainAnalyzedStatement, C context) {
+        return visitAnalyzedRelation(explainAnalyzedStatement, context);
     }
 
+    public R visitTableFunctionRelation(TableFunctionRelation tableFunctionRelation, C context) {
+        return visitAnalyzedRelation(tableFunctionRelation, context);
+    }
+
+    public R visitQueriedSelectRelation(QueriedSelectRelation relation, C context) {
+        return visitAnalyzedRelation(relation, context);
+    }
 }

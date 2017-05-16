@@ -21,32 +21,29 @@
 package io.crate.operation.reference.sys.shard;
 
 import io.crate.metadata.PartitionName;
-import io.crate.metadata.ReferenceInfos;
+import io.crate.metadata.ReferenceImplementation;
+import io.crate.metadata.Schemas;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.index.shard.ShardId;
 
 import java.util.regex.Matcher;
 
-public class ShardTableNameExpression extends SysShardExpression<BytesRef> {
+public class ShardTableNameExpression implements ReferenceImplementation<BytesRef> {
 
-    public static final String NAME = "table_name";
     private final BytesRef value;
 
-    @Inject
     public ShardTableNameExpression(ShardId shardId) {
-        super(NAME);
-        String tableName = shardId.getIndex();
-        try {
-            tableName = PartitionName.tableName(tableName);
-        } catch (IllegalArgumentException e) {
-            // no partition
+        String index = shardId.getIndexName();
+        if (PartitionName.isPartition(index)) {
+            value = new BytesRef(PartitionName.fromIndexOrTemplate(index).tableIdent().name());
+        } else {
+            Matcher matcher = Schemas.SCHEMA_PATTERN.matcher(index);
+            if (matcher.matches()) {
+                value = new BytesRef(matcher.group(2));
+            } else {
+                value = new BytesRef(index);
+            }
         }
-        Matcher matcher = ReferenceInfos.SCHEMA_PATTERN.matcher(tableName);
-        if (matcher.matches()) {
-            tableName = matcher.group(2);
-        }
-        this.value = new BytesRef(tableName);
     }
 
     @Override

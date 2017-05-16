@@ -22,18 +22,20 @@
 package io.crate.operation.predicate;
 
 import com.google.common.base.Preconditions;
+import io.crate.analyze.symbol.Function;
+import io.crate.analyze.symbol.Literal;
+import io.crate.analyze.symbol.Symbol;
+import io.crate.analyze.symbol.format.FunctionFormatSpec;
 import io.crate.metadata.*;
-import io.crate.operation.Input;
-import io.crate.planner.symbol.Function;
-import io.crate.planner.symbol.Literal;
-import io.crate.planner.symbol.Symbol;
+import io.crate.data.Input;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 
+import javax.annotation.Nullable;
 import java.util.List;
 
 
-public class IsNullPredicate<T> extends Scalar<Boolean, T> {
+public class IsNullPredicate<T> extends Scalar<Boolean, T> implements FunctionFormatSpec {
 
     public static final String NAME = "op_isnull";
     private final FunctionInfo info;
@@ -42,8 +44,8 @@ public class IsNullPredicate<T> extends Scalar<Boolean, T> {
         module.register(NAME, new Resolver());
     }
 
-    private static FunctionInfo generateInfo(List<DataType> types) {
-        return new FunctionInfo(new FunctionIdent(NAME, types), DataTypes.BOOLEAN, FunctionInfo.Type.PREDICATE);
+    public static FunctionInfo generateInfo(List<DataType> types) {
+        return new FunctionInfo(new FunctionIdent(NAME, types), DataTypes.BOOLEAN);
     }
 
     IsNullPredicate(FunctionInfo info) {
@@ -57,33 +59,54 @@ public class IsNullPredicate<T> extends Scalar<Boolean, T> {
     }
 
     @Override
-    public Symbol normalizeSymbol(Function symbol) {
-        assert (symbol != null);
-        assert (symbol.arguments().size() == 1);
+    public Symbol normalizeSymbol(Function symbol, TransactionContext transactionContext) {
+        assert symbol != null : "function must not be null";
+        assert symbol.arguments().size() == 1 : "function's number of arguments must be 1";
 
         Symbol arg = symbol.arguments().get(0);
         if (arg.equals(Literal.NULL) || arg.valueType().equals(DataTypes.UNDEFINED)) {
-            return Literal.newLiteral(true);
+            return Literal.of(true);
         } else if (arg.symbolType().isValueSymbol()) {
-            return Literal.newLiteral(((Input) arg).value() == null);
+            return Literal.of(((Input) arg).value() == null);
         }
         return symbol;
     }
 
     @Override
     public Boolean evaluate(Input[] args) {
-        assert args.length == 1;
+        assert args.length == 1 : "number of args must be 1";
         return args[0] == null || args[0].value() == null;
     }
 
-    private static class Resolver implements DynamicFunctionResolver {
+    @Override
+    public String beforeArgs(Function function) {
+        return "";
+    }
+
+    @Override
+    public String afterArgs(Function function) {
+        return " IS NULL";
+    }
+
+    @Override
+    public boolean formatArgs(Function function) {
+        return true;
+    }
+
+    private static class Resolver implements FunctionResolver {
 
         @Override
-        public FunctionImplementation<Function> getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
+        public FunctionImplementation getForTypes(List<DataType> dataTypes) throws IllegalArgumentException {
             Preconditions.checkArgument(
                 dataTypes.size() == 1, "the is null predicate takes only 1 argument");
 
             return new IsNullPredicate<>(generateInfo(dataTypes));
+        }
+
+        @Nullable
+        @Override
+        public List<DataType> getSignature(List<DataType> dataTypes) {
+            return Signature.SIGNATURES_SINGLE_ANY.apply(dataTypes);
         }
     }
 }
